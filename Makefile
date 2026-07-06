@@ -1,6 +1,6 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test vet fmt fmt-check race cover conformance check tidy
+.PHONY: all build test vet fmt fmt-check race cover conformance bench check tidy
 
 all: check
 
@@ -30,6 +30,10 @@ cover:
 # Replay the shared lazily-spec conformance fixtures.
 conformance:
 	go test -run Conformance ./...
+
+# Micro-benchmarks for the hot paths (see BENCHMARKS.md).
+bench:
+	go test -run '^$$' -bench=. -benchmem ./...
 
 tidy:
 	go mod tidy

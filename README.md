@@ -121,6 +121,16 @@ keyed collections, and Harel state charts) — asserting identical behavior to
 every other binding. Run `make check` (fmt + vet + build + test) locally; CI
 also runs the race detector.
 
+## Benchmarks
+
+See [BENCHMARKS.md](BENCHMARKS.md) for micro-benchmark results on the hot paths
+— reactive core read/write, slot/memo recompute, batch coalescing, keyed
+collections, and CRDT construction — with `ns/op` / `B/op` / `allocs/op` and
+what each case measures. The reactive steady state (`Cell` read/write, `CellMap`
+insert/read) is zero-allocation. Benchmarks are defined as Go `testing.B` cases
+in [`bench_test.go`](bench_test.go) (mirroring the in-library `RunBenchmarkSuite`)
+and reproducible with `make bench` (`go test -bench=. -benchmem ./...`).
+
 ## Feature coverage
 
 The full `lazily` capability set across every binding. Legend: ✅ shipped ·
