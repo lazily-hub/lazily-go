@@ -83,6 +83,47 @@ tracking. `Context` is single-goroutine; for concurrent access use the
 lock-backed `ThreadSafeContext` or drive the graph from one owner goroutine via
 the channel-serialized `AsyncContext`.
 
+## Reactive members on a struct
+
+Go has no decorators, so there is no direct analog of lazily-py's `@slot` /
+`@cell` on a method. The idiomatic Go equivalent of a lazily-*decorated method*
+is to wire the reactive members as `Cell` / `Slot` / `Memo` / `Signal` fields in
+the constructor and expose thin accessor methods. The accessor reads like a
+plain method but is lazy, cached, and dependency-tracked:
+
+```go
+type Greeter struct {
+	Name     *lazily.Cell[string]
+	greeting *lazily.Slot[string] // the "decorated" lazy member
+}
+
+func NewGreeter(ctx *lazily.Context) *Greeter {
+	g := &Greeter{Name: lazily.NewCell(ctx, "")}
+	// greeting tracks Name automatically; it recomputes only after Name changes.
+	g.greeting = lazily.NewSlot(ctx, func(*lazily.Context) string {
+		return "Hello, " + g.Name.Get() + "!"
+	})
+	return g
+}
+
+// Greeting reads like a normal method but is lazy + cached + reactive.
+func (g *Greeter) Greeting() string { return g.greeting.Get() }
+```
+
+```go
+ctx := lazily.NewContext()
+g := NewGreeter(ctx)
+g.Name.Set("World")
+g.Greeting() // "Hello, World!" (computed on first read, then cached)
+g.Name.Set("Go")
+g.Greeting() // "Hello, Go!"  (recomputed once, because Name changed)
+```
+
+Use `NewMemo` for the equality-guarded variant (suppress the downstream cascade
+when the recomputed value is unchanged) or `NewSignal` for eager recomputation.
+A runnable version of this pattern lives in
+[`example_test.go`](example_test.go).
+
 ## State machine
 
 `StateMachine` is a finite state machine backed by a `Cell`, so any slot or
