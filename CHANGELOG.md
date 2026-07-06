@@ -4,6 +4,20 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## Unreleased
+
+### Changed
+
+- **On-node slot cache (perf).** Cached slot values now live on the `Slot`
+  itself instead of a shared identity-keyed `Context` map. A read is a direct
+  field access on the node, so read latency no longer grows with total graph
+  size by probing a whole-graph hash table. On the spreadsheet-scale benchmark
+  this flattens viewport recalc from 24.9 µs → **2.70 µs** at 2M cells and
+  103 µs → **7.12 µs** at 10M cells, and roughly halves cold/full recalc. No API
+  change except `Context.Size()` now reports the number of cached slots (was the
+  map length; equivalent); all 153 tests + conformance fixtures unchanged. See
+  [BENCHMARKS.md](BENCHMARKS.md).
+
 ## 0.1.0
 
 Initial release — the Go binding of the lazily reactive-signals family, at full

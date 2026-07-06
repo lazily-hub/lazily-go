@@ -19,8 +19,10 @@
 // only recompute when accessed. When you need eager push-style semantics, reach
 // for Signal.
 //
-// A Context is the shared scope: it holds an identity-keyed cache and the
-// computation stack used for automatic dependency tracking. All reactives that
+// A Context is the shared scope: the computation stack used for automatic
+// dependency tracking (cached slot values live on the nodes themselves, not in
+// a shared Context table, so reads stay O(1) regardless of graph size). All
+// reactives that
 // react to each other must share a Context. Context is not safe for concurrent
 // use by multiple goroutines; use ThreadSafeContext (see thread_safe.go) or the
 // channel-serialized AsyncContext (see async_context.go) for concurrent access.
@@ -103,15 +105,29 @@ func (b *reactiveBase) invalidate() {
 	}
 }
 
-// Context is a reactive scope: an identity-keyed value cache plus the
-// computation stack. All Slots, Cells, and Signals that should react to each
-// other must be created with (and thus share) the same Context.
+// cacheable is a slot-like node that stores its own memoized value and can be
+// asked to drop it. Cached values live ON the node (see Slot), not in a shared
+// Context-owned map — so a read touches only the node it reads, and read
+// latency is independent of the total graph size (no probing a whole-graph hash
+// table). The Context keeps a registry of these purely so Clear/Size stay O(1)
+// on the hot path and correct; the registry is never touched by a read.
+type cacheable interface {
+	clearCache()
+	cachedNow() bool
+}
+
+// Context is a reactive scope: the computation stack for automatic dependency
+// tracking plus batch/effect scheduling. Cached slot values are stored on the
+// nodes themselves, not here. All Slots, Cells, and Signals that should react to
+// each other must be created with (and thus share) the same Context.
 //
 // Context is not safe for concurrent use. Wrap it with ThreadSafeContext for
 // lock-backed concurrency, or drive it from a single goroutine via AsyncContext.
 type Context struct {
-	cache map[reactiveNode]any
 	stack []reactiveNode
+
+	slots       []cacheable // registry of value-bearing slots (for Clear/Size)
+	cachedCount int         // number of slots currently holding a cached value
 
 	batchDepth       int
 	batchedCells     map[reactiveNode]struct{}
@@ -123,23 +139,26 @@ type Context struct {
 // NewContext creates an empty reactive scope.
 func NewContext() *Context {
 	return &Context{
-		cache:            map[reactiveNode]any{},
 		batchedCells:     map[reactiveNode]struct{}{},
 		scheduledEffects: map[*Effect]struct{}{},
 	}
 }
 
-// Size reports the number of cached values.
-func (c *Context) Size() int { return len(c.cache) }
+// registerSlot records a value-bearing slot so Clear can reset it. Called once
+// per slot at construction; not on any read path.
+func (c *Context) registerSlot(s cacheable) { c.slots = append(c.slots, s) }
 
-func (c *Context) contains(n reactiveNode) bool { _, ok := c.cache[n]; return ok }
-func (c *Context) read(n reactiveNode) any      { return c.cache[n] }
-func (c *Context) write(n reactiveNode, v any)  { c.cache[n] = v }
-func (c *Context) evict(n reactiveNode)         { delete(c.cache, n) }
+// Size reports the number of slots currently holding a cached value.
+func (c *Context) Size() int { return c.cachedCount }
 
-// Clear drops every cached value. Dependency edges are re-established lazily as
-// slots are read again.
-func (c *Context) Clear() { c.cache = map[reactiveNode]any{} }
+// Clear drops every cached slot value. Dependency edges are re-established
+// lazily as slots are read again. Cell values are unaffected.
+func (c *Context) Clear() {
+	for _, s := range c.slots {
+		s.clearCache()
+	}
+	c.cachedCount = 0
+}
 
 func (c *Context) current() reactiveNode {
 	if len(c.stack) == 0 {
@@ -230,10 +249,16 @@ func (c *Context) flushEffects() {
 // (tracking every Cell, Signal, or Slot read during computation as a
 // dependency), caches it, and returns it. When any dependency changes, the
 // cached value is invalidated and the next Get recomputes.
+//
+// The cached value lives on the Slot itself (value/cached fields), not in a
+// shared Context map — so a Get is a direct field read on the node you already
+// hold, and read latency does not grow with the total number of nodes.
 type Slot[T any] struct {
 	reactiveBase
 	ctx     *Context
 	compute func(ctx *Context) T
+	value   T    // last computed value (valid iff cached)
+	cached  bool // whether value is current
 	Name    string
 }
 
@@ -241,6 +266,7 @@ type Slot[T any] struct {
 func NewSlot[T any](ctx *Context, compute func(ctx *Context) T) *Slot[T] {
 	s := &Slot[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}
 	s.self = s
+	ctx.registerSlot(s)
 	return s
 }
 
@@ -254,27 +280,41 @@ func NewNamedSlot[T any](ctx *Context, name string, compute func(ctx *Context) T
 // Get reads (and caches if needed) the value.
 func (s *Slot[T]) Get() T {
 	s.track(s.ctx)
-	if s.ctx.contains(s.self) {
-		return s.ctx.read(s.self).(T)
+	if s.cached {
+		return s.value
 	}
 	s.detachUpstream()
 	s.ctx.push(s.self)
-	defer s.ctx.pop()
 	v := s.compute(s.ctx)
-	s.ctx.write(s.self, v)
+	s.ctx.pop()
+	s.value = v
+	s.cached = true
+	s.ctx.cachedCount++
 	return v
 }
 
 // Peek returns the cached value without recomputing, and whether it was cached.
 func (s *Slot[T]) Peek() (T, bool) {
-	if s.ctx.contains(s.self) {
-		return s.ctx.read(s.self).(T), true
+	if s.cached {
+		return s.value, true
 	}
 	var zero T
 	return zero, false
 }
 
-func (s *Slot[T]) onInvalidate() { s.ctx.evict(s.self) }
+func (s *Slot[T]) onInvalidate() {
+	if s.cached {
+		s.cached = false
+		s.ctx.cachedCount--
+	}
+}
+
+// clearCache drops the memoized value (used by Context.Clear); does not touch
+// cachedCount, which Clear resets wholesale.
+func (s *Slot[T]) clearCache() { s.cached = false }
+
+// cachedNow reports whether this slot currently holds a cached value.
+func (s *Slot[T]) cachedNow() bool { return s.cached }
 
 // Cell is a mutable source value that invalidates dependents when it changes.
 //
@@ -415,13 +455,17 @@ type signalSlot[T comparable] struct {
 func newSignalSlot[T comparable](ctx *Context, compute func(ctx *Context) T) *signalSlot[T] {
 	ss := &signalSlot[T]{Slot: Slot[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}}
 	ss.self = ss
+	ctx.registerSlot(ss)
 	return ss
 }
 
 func (ss *signalSlot[T]) onInvalidate() {
-	// Evict the cached slot value so the re-pull recomputes, then eagerly
+	// Drop the cached slot value so the re-pull recomputes, then eagerly
 	// recompute the owning signal.
-	ss.ctx.evict(ss.self)
+	if ss.cached {
+		ss.cached = false
+		ss.ctx.cachedCount--
+	}
 	if ss.signal != nil {
 		ss.signal.eagerRecompute()
 	}
@@ -504,6 +548,7 @@ type Memo[T comparable] struct {
 func NewMemo[T comparable](ctx *Context, compute func(ctx *Context) T) *Memo[T] {
 	m := &Memo[T]{Slot: Slot[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}}
 	m.self = m
+	ctx.registerSlot(m)
 	return m
 }
 
@@ -520,14 +565,16 @@ func (m *Memo[T]) invalidate() {
 	newValue := m.compute(m.ctx)
 	m.ctx.pop()
 
-	if m.ctx.contains(m.self) {
-		old := m.ctx.read(m.self).(T)
-		if newValue == old {
+	if m.cached {
+		if newValue == m.value {
 			// Value unchanged — suppress the downstream cascade.
 			return
 		}
+	} else {
+		m.ctx.cachedCount++
 	}
-	m.ctx.write(m.self, newValue)
+	m.value = newValue
+	m.cached = true
 	if len(m.dependents) == 0 {
 		return
 	}

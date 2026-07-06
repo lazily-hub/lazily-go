@@ -39,13 +39,13 @@ cpu: AMD Ryzen 9 9950X3D 16-Core Processor
 
 | Benchmark | ns/op | B/op | allocs/op | What it measures |
 |-----------|------:|-----:|----------:|------------------|
-| `CellReadWrite` | 8.65 | 0 | 0 | `Cell.Set` (PartialEq guard) + `Cell.Get` round trip — the core mutation path, alloc-free. |
-| `CellMapInsertRead` | 15.58 | 0 | 0 | `CellMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
-| `MemoEqualityGuard` | 209.9 | 512 | 4 | `Memo` recompute that yields an equal value, suppressing the downstream cascade (an `Effect` stays put). |
-| `SlotRecompute` | 240.9 | 520 | 4 | Invalidate a `Cell`, then re-pull a dependent `Slot` (edge re-tracking + recompute). |
-| `BatchCoalesce` | 1998 | 4152 | 31 | 10 cell writes inside one `Batch`, coalesced into a single invalidation pass, then one `Slot` recompute. |
-| `SeqCrdtInsert` | 76,489 | 38,870 | 1,810 | Build a move-aware `SeqCrdt` of 100 elements (fractional-index positions + LWW registers). |
-| `TextCrdtInsert` | 687,792 | 1,054,418 | 11,444 | Build a `TextCrdt` of 100 characters (Fugue/RGA ordering rebuilt per insert). |
+| `CellReadWrite` | 9.35 | 0 | 0 | `Cell.Set` (PartialEq guard) + `Cell.Get` round trip — the core mutation path, alloc-free. |
+| `CellMapInsertRead` | 16.58 | 0 | 0 | `CellMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
+| `MemoEqualityGuard` | 185.0 | 512 | 4 | `Memo` recompute that yields an equal value, suppressing the downstream cascade (an `Effect` stays put). |
+| `SlotRecompute` | 189.1 | 512 | 4 | Invalidate a `Cell`, then re-pull a dependent `Slot` (edge re-tracking + recompute). |
+| `BatchCoalesce` | 1864 | 4144 | 31 | 10 cell writes inside one `Batch`, coalesced into a single invalidation pass, then one `Slot` recompute. |
+| `SeqCrdtInsert` | 79,162 | 38,863 | 1,809 | Build a move-aware `SeqCrdt` of 100 elements (fractional-index positions + LWW registers). |
+| `TextCrdtInsert` | 687,793 | 1,054,417 | 11,444 | Build a `TextCrdt` of 100 characters (Fugue/RGA ordering rebuilt per insert). |
 
 ## Notes
 
@@ -90,10 +90,10 @@ LAZILY_SCALE_N=5000000 go test -tags scalebench -run '^$' -bench=Scale -benchmem
 
 | Benchmark | Time | Per cell | What it measures |
 |-----------|-----:|---------:|------------------|
-| `ScaleBuild` | 153 ms | ~77 ns | Construct all 2N nodes (formulas lazy, not yet computed). |
-| `ScaleColdFullRecalc` | 393 ms | ~196 ns | First read of every formula — forces every compute + edge-tracking. |
-| `ScaleViewportRecalc` | **24.9 µs** | — | Edit one input, read only a 1,000-cell viewport. ~15,800× cheaper than a full recalc. |
-| `ScaleFullRecalcInvalidateAll` | 791 ms | ~395 ns | Touch every input, then read every formula (worst-case full-sheet edit). |
+| `ScaleBuild` | 189 ms | ~95 ns | Construct all 2N nodes (formulas lazy, not yet computed). |
+| `ScaleColdFullRecalc` | 212 ms | ~106 ns | First read of every formula — forces every compute + edge-tracking. |
+| `ScaleViewportRecalc` | **2.70 µs** | — | Edit one input, read only a 1,000-cell viewport. ~78,000× cheaper than a full recalc. |
+| `ScaleFullRecalcInvalidateAll` | 467 ms | ~234 ns | Touch every input, then read every formula (worst-case full-sheet edit). |
 
 ### 5,000,000 rows (10M cells — a full Google Sheets workbook)
 
@@ -102,14 +102,14 @@ input cells + 5,000,000 formula cells (`LAZILY_SCALE_N=5000000`):
 
 | Benchmark | Time | Per cell | What it measures |
 |-----------|-----:|---------:|------------------|
-| `ScaleBuild` | 827 ms | ~83 ns | Build the full 10M-cell workbook. |
-| `ScaleColdFullRecalc` | 2.25 s | ~225 ns | Compute all 5M formulas cold. |
-| `ScaleViewportRecalc` | **103 µs** | — | Edit one input, read a 1,000-cell viewport. ~44,000× cheaper than a full recalc. |
-| `ScaleFullRecalcInvalidateAll` | 4.43 s | ~443 ns | Re-edit every input, recompute the whole workbook. |
+| `ScaleBuild` | 955 ms | ~95 ns | Build the full 10M-cell workbook. |
+| `ScaleColdFullRecalc` | 1.04 s | ~208 ns | Compute all 5M formulas cold. |
+| `ScaleViewportRecalc` | **7.12 µs** | — | Edit one input, read a 1,000-cell viewport. ~146,000× cheaper than a full recalc. |
+| `ScaleFullRecalcInvalidateAll` | 2.20 s | ~220 ns | Re-edit every input, recompute the whole workbook. |
 
 So lazily-go backs a **full-capacity Google Sheets workbook**: build under a
-second, full cold recompute ~2.3 s, and a one-cell edit + bounded-viewport read
-stays in the **~100 µs** range — because the lazy pull-based model leaves
+second, full cold recompute ~1 s, and a one-cell edit + bounded-viewport read
+stays in the **single-digit-µs** range — because the lazy pull-based model leaves
 off-viewport formulas dirty and never recomputes them (only ~2 formulas actually
 recompute per edit, regardless of sheet size — the property a viewport-rendered
 spreadsheet needs).
@@ -126,17 +126,25 @@ grid-complete Excel worksheet (17 billion cells) is unrepresentative — real
 sheets populate a tiny fraction of the grid, and lazily stores only the cells
 you create, so the `scale` group measures the populated-cell path that matters.
 
-### A note on viewport scaling vs. lazily-rs
+### A note on viewport scaling — on-node cache
 
-lazily-rs's viewport recalc is **size-independent** (~11.5 µs at both 2M and 10M
-cells) because its `Context` indexes nodes by a slotmap array key (true O(1)).
-lazily-go's `Context` keys its value cache by node identity in a single Go map,
-so a viewport read does ~1,000 lookups into a map holding *all* nodes — the
-**number of recomputes stays viewport-bounded (~2, independent of sheet size)**,
-but per-lookup latency grows mildly with total sheet size from cache/TLB pressure
-on a multi-GB map (hence 24.9 µs at 2M cells → 103 µs at 10M). It is still
-~44,000× cheaper than a full recalc at 10M cells and never recomputes
-off-viewport formulas; a future slotmap-style cache would recover the flat
-curve. Reported honestly rather than claiming the rs flat line.
+Cached slot values live **on the node itself** (`Slot.value`/`cached` fields),
+not in a shared `Context` hash map. So a viewport read of ~1,000 formulas is
+~1,000 direct field reads on the nodes you already hold — it never probes a
+whole-graph structure. This is the design that keeps the viewport curve nearly
+flat: **2.70 µs at 2M cells → 7.12 µs at 10M cells** (vs the shared-map design
+this replaced, which degraded 24.9 µs → 103 µs from cache/TLB pressure probing a
+multi-GB map). The **number of recomputes stays viewport-bounded (~2, fully
+independent of sheet size)**; the residual ~2.6× growth is pointer-chasing
+latency — the viewport's nodes are scattered across a larger heap at 10M cells,
+so more of the 1,000 reads miss cache. That is memory-hierarchy, not algorithmic:
+still ~146,000× cheaper than a full recalc at 10M cells, and off-viewport
+formulas are never recomputed.
+
+lazily-rs holds the flattest curve of the family (~11.5 µs at both sizes) because
+its slotmap packs values into a contiguous array indexed by a dense handle, so
+even the pointer-chase is largely sequential; a contiguous arena keyed by a dense
+node id would close the remaining lazily-go gap. Reported with real before/after
+numbers rather than a claimed flat line.
 
 [rs-scale]: https://github.com/lazily-hub/lazily-rs/blob/main/benches/scale.rs

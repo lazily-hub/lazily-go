@@ -175,7 +175,7 @@ func (t *SemTree[V, D]) IsCached(id string) bool {
 	if !ok || node.slot == nil {
 		return false
 	}
-	return t.ctx.contains(node.slot)
+	return node.slot.cachedNow()
 }
 
 // RootHandle returns the root slot handle.
