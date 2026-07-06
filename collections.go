@@ -1,0 +1,626 @@
+// Keyed cell collections — CellMap, CellTree, CellFamily, and keyed
+// reconciliation (cell-model.md § Keyed cell collections).
+//
+// A keyed cell collection is a *composition of cells*, not a new cell kind. It
+// maps keys K to per-entry Cells and adds dedicated membership and order
+// reactive signals so the three reactivity planes stay independent:
+//
+//   - writing one entry's value invalidates only that entry's value readers;
+//   - adding/removing a key invalidates membership readers (Len / ContainsKey)
+//     and order readers (Keys), but not unrelated entry value readers;
+//   - a pure reorder (atomic move) invalidates order readers only.
+//
+// Ported from lazily-dart lib/src/collections.dart, mirroring
+// lazily-rs/src/cell_family.rs (reactive) and lazily-rs/src/reconcile.rs (LIS).
+// Validated against lazily-spec/conformance/collections/{cellmap_independence,
+// cellmap_atomic_move,keyed_reconciliation_lis}.json.
+//
+// Semantic note on the `comparable` constraint: core.go's Cell[T] requires a
+// comparable T for the PartialEq guard, and keyed reconciliation compares entry
+// values for the Update op. Both mean the value type V must support ==, so this
+// module constrains V to `comparable` and stores per-key values in a plain
+// Cell[V] (no boxing needed). This matches the Dart port's use of Dart `==` /
+// PartialEq exactly, and gives real handle stability: an atomic move never
+// re-mints the entry's *Cell, so the same pointer (and its dependents) survive.
+package lazily
+
+// CellMap is a keyed collection of reactive cells with independent value /
+// membership / order reactivity (cell-model.md § Keyed cell collections).
+//
+// Each entry is an ordinary Cell[V]; the collection adds no new merge unit. A
+// dedicated membership cell tracks the set of keys and a dedicated order cell
+// tracks the ordered key list. Reads subscribe through those cells so the three
+// planes stay independent:
+//
+//   - Keys subscribes only to the order signal;
+//   - Len / ContainsKey subscribe only to the membership signal;
+//   - a value read subscribes only to that entry's cell.
+//
+// An atomic move (MoveTo / MoveBefore / MoveAfter) bumps only the order signal
+// once and keeps the moved entry's same Cell handle, dependents, and lineage —
+// it is not a remove + re-mint.
+type CellMap[K comparable, V comparable] struct {
+	ctx     *Context
+	entries map[K]*Cell[V]
+	order   []K
+
+	// membership is bumped only when the set of keys changes (add/remove).
+	membership *Cell[int]
+	// orderSignal is bumped on add/remove and on move/reorder.
+	orderSignal *Cell[int]
+
+	membershipVersion int
+	orderVersion      int
+}
+
+// NewCellMap creates an empty keyed cell collection bound to ctx.
+func NewCellMap[K comparable, V comparable](ctx *Context) *CellMap[K, V] {
+	return &CellMap[K, V]{
+		ctx:         ctx,
+		entries:     map[K]*Cell[V]{},
+		order:       nil,
+		membership:  NewCell[int](ctx, 0),
+		orderSignal: NewCell[int](ctx, 0),
+	}
+}
+
+// bumpOrder bumps only the order signal (invalidates Keys readers). A pure move
+// bumps only this.
+func (m *CellMap[K, V]) bumpOrder() {
+	m.orderVersion++
+	m.orderSignal.Set(m.orderVersion)
+}
+
+// bumpMembership bumps set-membership (invalidates Len / ContainsKey readers),
+// then the order signal too (the key set changed, so the ordered list did too).
+func (m *CellMap[K, V]) bumpMembership() {
+	m.membershipVersion++
+	m.membership.Set(m.membershipVersion)
+	m.bumpOrder()
+}
+
+// EntryWith returns the value cell for key, minting it with defaultValue() on
+// first access. Adding a new key bumps reactive membership; re-fetching an
+// existing key does not.
+func (m *CellMap[K, V]) EntryWith(key K, defaultValue func() V) *Cell[V] {
+	if existing, ok := m.entries[key]; ok {
+		return existing
+	}
+	handle := NewCell[V](m.ctx, defaultValue())
+	m.entries[key] = handle
+	m.order = append(m.order, key)
+	m.bumpMembership()
+	return handle
+}
+
+// Entry returns the value cell for key, minting it with defaultValue on first
+// access. Convenience wrapper over EntryWith.
+func (m *CellMap[K, V]) Entry(key K, defaultValue V) *Cell[V] {
+	return m.EntryWith(key, func() V { return defaultValue })
+}
+
+// Cell returns the existing value cell for key, or nil. Non-reactive: does not
+// subscribe the caller to membership.
+func (m *CellMap[K, V]) Cell(key K) *Cell[V] {
+	return m.entries[key]
+}
+
+// Get reads the value at key if present (peek). Non-reactive.
+func (m *CellMap[K, V]) Get(key K) (V, bool) {
+	if handle, ok := m.entries[key]; ok {
+		return handle.Peek(), true
+	}
+	var zero V
+	return zero, false
+}
+
+// Read reads the value at key if present, subscribing the caller to that
+// entry's cell (reactive inside a Slot / Signal computation).
+func (m *CellMap[K, V]) Read(key K) (V, bool) {
+	if handle, ok := m.entries[key]; ok {
+		return handle.Get(), true
+	}
+	var zero V
+	return zero, false
+}
+
+// Set assigns the value at key, inserting a new entry (and bumping membership)
+// if it does not exist yet. Updating an existing entry leaves membership
+// untouched and invalidates only that entry's dependents.
+func (m *CellMap[K, V]) Set(key K, value V) {
+	if handle, ok := m.entries[key]; ok {
+		handle.Set(value)
+		return
+	}
+	m.EntryWith(key, func() V { return value })
+}
+
+// Remove removes key's entry. Bumps reactive membership and clears the removed
+// entry's dependents. Returns whether the key was present.
+//
+// The orphaned Cell stops driving any dependents; the runtime exposes no
+// node-recycle yet (mirrors lazily-rs).
+func (m *CellMap[K, V]) Remove(key K) bool {
+	handle, ok := m.entries[key]
+	if !ok {
+		return false
+	}
+	delete(m.entries, key)
+	m.removeFromOrder(key)
+	// Invalidate the orphaned cell's dependents (mirrors lazily-rs
+	// CellHandle::clear_dependents): any reader that read this entry is notified
+	// that its source is gone.
+	handle.Invalidate()
+	m.bumpMembership()
+	return true
+}
+
+func (m *CellMap[K, V]) removeFromOrder(key K) {
+	for i, k := range m.order {
+		if k == key {
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			return
+		}
+	}
+}
+
+// Keys returns a reactive snapshot of the keys in their current order.
+// Subscribes the caller to order changes (add/remove and move/reorder), not to
+// per-entry value changes.
+func (m *CellMap[K, V]) Keys() []K {
+	// Subscribe to the order signal.
+	m.orderSignal.Get()
+	out := make([]K, len(m.order))
+	copy(out, m.order)
+	return out
+}
+
+// Position reports the current 0-based position of key in the order, or false
+// if absent. Non-reactive.
+func (m *CellMap[K, V]) Position(key K) (int, bool) {
+	for i, k := range m.order {
+		if k == key {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// MoveTo atomically moves key to index in the order (#lzcellmove).
+//
+// This is the atomic, optimized reorder: the entry keeps the same value cell,
+// the same dependents, and its CRDT lineage — unlike the naive Remove + Entry
+// which re-mints the cell and bumps membership twice. Only the order signal is
+// bumped (once), so Keys readers recompute but Len / ContainsKey readers stay
+// cached.
+//
+// index is clamped to [0, len). A no-op move (already at position) bumps
+// nothing. Returns whether key was present.
+func (m *CellMap[K, V]) MoveTo(key K, index int) bool {
+	from, ok := m.Position(key)
+	if !ok {
+		return false
+	}
+	to := index
+	if to < 0 {
+		to = 0
+	}
+	if hi := len(m.order) - 1; to > hi {
+		to = hi
+	}
+	if from == to {
+		return true
+	}
+	m.order = append(m.order[:from], m.order[from+1:]...)
+	// Re-insert at `to`.
+	m.order = append(m.order, key) // grow
+	copy(m.order[to+1:], m.order[to:])
+	m.order[to] = key
+	m.bumpOrder()
+	return true
+}
+
+// MoveBefore atomically moves key to just before anchor (#lzcellmove). Returns
+// whether the move could be expressed.
+func (m *CellMap[K, V]) MoveBefore(key, anchor K) bool {
+	anchorIdx, ok := m.Position(anchor)
+	if !ok {
+		return false
+	}
+	from, ok := m.Position(key)
+	if !ok {
+		return false
+	}
+	// Removing key first shifts anchor left by one when key precedes it.
+	target := anchorIdx
+	if from < anchorIdx {
+		target = anchorIdx - 1
+	}
+	return m.MoveTo(key, target)
+}
+
+// MoveAfter atomically moves key to just after anchor (#lzcellmove).
+func (m *CellMap[K, V]) MoveAfter(key, anchor K) bool {
+	anchorIdx, ok := m.Position(anchor)
+	if !ok {
+		return false
+	}
+	from, ok := m.Position(key)
+	if !ok {
+		return false
+	}
+	target := anchorIdx + 1
+	if from <= anchorIdx {
+		target = anchorIdx
+	}
+	return m.MoveTo(key, target)
+}
+
+// Insert inserts key with value at the position specified by at (relative to
+// anchor for InsertAtBefore / InsertAtAfter; anchor is ignored otherwise).
+// Bumps membership + order. Returns whether the key was newly inserted (false
+// if it already existed; in that case the value is updated in place and only
+// the entry's value readers invalidate).
+//
+// Go lacks Dart's optional named args: pass InsertAtEnd with a zero anchor for
+// the common append case.
+func (m *CellMap[K, V]) Insert(key K, value V, at InsertAt, anchor K) bool {
+	if _, ok := m.entries[key]; ok {
+		m.Set(key, value)
+		return false
+	}
+	m.EntryWith(key, func() V { return value })
+	switch at {
+	case InsertAtEnd, InsertAtIndex:
+		// Already at end (InsertAtIndex positions via a follow-up MoveTo).
+	case InsertAtBefore:
+		m.MoveBefore(key, anchor)
+	case InsertAtAfter:
+		m.MoveAfter(key, anchor)
+	}
+	return true
+}
+
+// Len reports the reactive entry count. Subscribes the caller to membership
+// changes only.
+func (m *CellMap[K, V]) Len() int {
+	m.membership.Get()
+	return len(m.order)
+}
+
+// IsEmpty reports the reactive emptiness check. Subscribes the caller to
+// membership changes.
+func (m *CellMap[K, V]) IsEmpty() bool { return m.Len() == 0 }
+
+// ContainsKey reports the reactive membership test for key. Subscribes the
+// caller to membership changes (add/remove of any key), not to value changes.
+func (m *CellMap[K, V]) ContainsKey(key K) bool {
+	m.membership.Get()
+	_, ok := m.entries[key]
+	return ok
+}
+
+// LenUntracked reports the non-reactive count. Does not subscribe the caller to
+// anything.
+func (m *CellMap[K, V]) LenUntracked() int { return len(m.order) }
+
+// Reconcile reconciles to targetOrder + targetValues: compute the minimal diff
+// and apply it per-cell. Stable entries (unchanged value, in the LIS) keep
+// their cell handles and stay cached.
+func (m *CellMap[K, V]) Reconcile(targetOrder []K, targetValues map[K]V) {
+	prior := make([]KeyValue[K, V], 0, len(m.order))
+	for _, k := range m.order {
+		v, _ := m.Get(k)
+		prior = append(prior, KeyValue[K, V]{Key: k, Value: v})
+	}
+	target := make([]KeyValue[K, V], 0, len(targetOrder))
+	for _, k := range targetOrder {
+		target = append(target, KeyValue[K, V]{Key: k, Value: targetValues[k]})
+	}
+	for _, op := range ReconcileDiff(prior, target) {
+		switch op := op.(type) {
+		case DiffOpInsert[K, V]:
+			m.Insert(op.Key, op.Value, InsertAtEnd, *new(K))
+		case DiffOpRemove[K, V]:
+			m.Remove(op.Key)
+		case DiffOpMove[K, V]:
+			m.MoveTo(op.Key, op.To)
+		case DiffOpUpdate[K, V]:
+			m.Set(op.Key, op.Value)
+		}
+	}
+}
+
+// InsertAt is the position specifier for CellMap.Insert (mirrors
+// lazily-kt::InsertAt). The string values are the normative wire tokens.
+type InsertAt string
+
+const (
+	// InsertAtEnd appends at the end (default).
+	InsertAtEnd InsertAt = "end"
+	// InsertAtIndex inserts at an absolute index (use CellMap.MoveTo after
+	// insert to position).
+	InsertAtIndex InsertAt = "at"
+	// InsertAtBefore inserts just before the anchor.
+	InsertAtBefore InsertAt = "before"
+	// InsertAtAfter inserts just after the anchor.
+	InsertAtAfter InsertAt = "after"
+)
+
+// KeyValue is an ordered key/value pair, the input unit for ReconcileDiff
+// (mirrors Dart's MapEntry<K, V>).
+type KeyValue[K comparable, V comparable] struct {
+	Key   K
+	Value V
+}
+
+// DiffOp is a keyed reconciliation op (cell-model.md § Keyed reconciliation):
+// one of DiffOpInsert, DiffOpRemove, DiffOpMove, or DiffOpUpdate. It is a sealed
+// union — only the four concrete types in this package implement it.
+type DiffOp[K comparable, V comparable] interface {
+	isDiffOp()
+}
+
+// DiffOpInsert inserts a brand-new key (not present in prior) at Index (its
+// final position in the target sequence).
+type DiffOpInsert[K comparable, V comparable] struct {
+	Key   K
+	Value V
+	Index int
+}
+
+func (DiffOpInsert[K, V]) isDiffOp() {}
+
+// DiffOpRemove removes a key present in prior but absent in target.
+type DiffOpRemove[K comparable, V comparable] struct {
+	Key K
+}
+
+func (DiffOpRemove[K, V]) isDiffOp() {}
+
+// DiffOpMove atomic-moves a common key from its prior position to To (the target
+// index). Keeps the entry's same cell handle, dependents, and lineage.
+type DiffOpMove[K comparable, V comparable] struct {
+	Key K
+	To  int
+}
+
+func (DiffOpMove[K, V]) isDiffOp() {}
+
+// DiffOpUpdate updates an existing key's value (PartialEq-guarded at the cell).
+type DiffOpUpdate[K comparable, V comparable] struct {
+	Key   K
+	Value V
+}
+
+func (DiffOpUpdate[K, V]) isDiffOp() {}
+
+// ReconcileDiff computes the move-minimized keyed reconciliation (cell-model.md
+// § Keyed reconciliation).
+//
+// Diffs two keyed sequences by stable key, not position, emitting the minimal
+// {insert, remove, move, update} op set: removes, then inserts + moves (in
+// target order), then updates. Moves are move-minimized: the
+// longest-increasing-subsequence (LIS) over prior indices of the common keys is
+// held fixed, and only the remainder move. O(n log n) via patience sorting
+// (strictly increasing), mirroring
+// lazily-rs/src/reconcile.rs::longest_increasing_subsequence.
+func ReconcileDiff[K comparable, V comparable](
+	prior []KeyValue[K, V],
+	target []KeyValue[K, V],
+) []DiffOp[K, V] {
+	priorIndex := make(map[K]int, len(prior))
+	priorValue := make(map[K]V, len(prior))
+	for i, e := range prior {
+		priorIndex[e.Key] = i
+		priorValue[e.Key] = e.Value
+	}
+	targetValue := make(map[K]V, len(target))
+	for _, e := range target {
+		targetValue[e.Key] = e.Value
+	}
+
+	ops := []DiffOp[K, V]{}
+
+	// Removes: keys in prior not in target.
+	for _, e := range prior {
+		if _, ok := targetValue[e.Key]; !ok {
+			ops = append(ops, DiffOpRemove[K, V]{Key: e.Key})
+		}
+	}
+
+	// Common keys in target order, with their prior indices (for the LIS).
+	commonKeys := []K{}
+	commonIdxOf := map[K]int{}
+	priorIdxSeq := []int{}
+	for _, e := range target {
+		if pi, ok := priorIndex[e.Key]; ok {
+			commonIdxOf[e.Key] = len(commonKeys)
+			commonKeys = append(commonKeys, e.Key)
+			priorIdxSeq = append(priorIdxSeq, pi)
+		}
+	}
+	stableSet := map[int]struct{}{} // indices into commonKeys held fixed by the LIS
+	for _, i := range longestIncreasingSubsequence(priorIdxSeq) {
+		stableSet[i] = struct{}{}
+	}
+
+	// Inserts + moves: walk target left-to-right. Inserts mint new keys at their
+	// final index; common keys either stay (LIS) or move to their final index.
+	for ti, e := range target {
+		k := e.Key
+		if _, ok := priorIndex[k]; !ok {
+			ops = append(ops, DiffOpInsert[K, V]{Key: k, Value: e.Value, Index: ti})
+			continue
+		}
+		commonIdx := commonIdxOf[k]
+		if _, stable := stableSet[commonIdx]; !stable {
+			ops = append(ops, DiffOpMove[K, V]{Key: k, To: ti})
+		}
+	}
+
+	// Updates: common keys whose value changed.
+	for _, e := range target {
+		if pv, ok := priorValue[e.Key]; ok && pv != e.Value {
+			ops = append(ops, DiffOpUpdate[K, V]{Key: e.Key, Value: e.Value})
+		}
+	}
+
+	return ops
+}
+
+// longestIncreasingSubsequence returns the indices (into seq) of a longest
+// strictly-increasing subsequence, in ascending order. Patience-sort LIS,
+// O(n log n). Mirrors lazily-rs/src/reconcile.rs::longest_increasing_subsequence.
+func longestIncreasingSubsequence(seq []int) []int {
+	n := len(seq)
+	if n == 0 {
+		return nil
+	}
+	tails := []int{} // tails[k] = index into seq of smallest tail of an IS of len k+1
+	prev := make([]int, n)
+	for i := range prev {
+		prev[i] = -1
+	}
+	for i := 0; i < n; i++ {
+		lo, hi := 0, len(tails)
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if seq[tails[mid]] < seq[i] {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		if lo > 0 {
+			prev[i] = tails[lo-1]
+		}
+		if lo == len(tails) {
+			tails = append(tails, i)
+		} else {
+			tails[lo] = i
+		}
+	}
+	if len(tails) == 0 {
+		return nil
+	}
+	res := []int{}
+	for k := tails[len(tails)-1]; k != -1; k = prev[k] {
+		res = append(res, k)
+	}
+	// Reverse into ascending order.
+	for i, j := 0, len(res)-1; i < j; i, j = i+1, j-1 {
+		res[i], res[j] = res[j], res[i]
+	}
+	return res
+}
+
+// CellTree is an ordered keyed tree (cell-model.md § Ordered keyed tree).
+//
+// Each node is (stable id, value cell, ordered keyed child collection). A
+// node's children are a CellMap keyed by child id, so per-level
+// membership/order reactivity and the atomic-move guarantee are inherited. The
+// tree is still a composition of cells — not a new cell kind — so per-cell merge
+// applies node-by-node. Recursive, mirroring lazily-rs/src/cell_tree.rs.
+type CellTree[K comparable, V comparable] struct {
+	ctx      *Context
+	ID       K
+	Value    *Cell[V]
+	Children *CellMap[K, *CellTree[K, V]]
+}
+
+// NewCellTree creates a tree node with id and initialValue and an empty child
+// collection.
+func NewCellTree[K comparable, V comparable](ctx *Context, id K, initialValue V) *CellTree[K, V] {
+	return &CellTree[K, V]{
+		ctx:      ctx,
+		ID:       id,
+		Value:    NewCell[V](ctx, initialValue),
+		Children: NewCellMap[K, *CellTree[K, V]](ctx),
+	}
+}
+
+// Get reads this node's value (reactive).
+func (t *CellTree[K, V]) Get() V { return t.Value.Get() }
+
+// Set sets this node's value (PartialEq-guarded).
+func (t *CellTree[K, V]) Set(next V) { t.Value.Set(next) }
+
+// NodeID returns the id of this node (stable handle).
+func (t *CellTree[K, V]) NodeID() K { return t.ID }
+
+// InsertChild inserts a fresh child id with value, returning the child node. If
+// the child already exists, its value is updated and the existing node returned.
+func (t *CellTree[K, V]) InsertChild(id K, value V) *CellTree[K, V] {
+	if existing := t.Children.Cell(id); existing != nil {
+		existing.Peek().Set(value)
+		return existing.Peek()
+	}
+	child := NewCellTree[K, V](t.ctx, id, value)
+	t.Children.Set(id, child)
+	return child
+}
+
+// Child returns the child node for id, or nil. Non-reactive.
+func (t *CellTree[K, V]) Child(id K) *CellTree[K, V] {
+	child, ok := t.Children.Get(id)
+	if !ok {
+		return nil
+	}
+	return child
+}
+
+// RemoveChild removes the child id. Returns whether it was present.
+func (t *CellTree[K, V]) RemoveChild(id K) bool { return t.Children.Remove(id) }
+
+// MoveChildTo atomically moves child id to index within this node's children.
+func (t *CellTree[K, V]) MoveChildTo(id K, index int) bool { return t.Children.MoveTo(id, index) }
+
+// MoveChildBefore atomically moves child id to just before anchor.
+func (t *CellTree[K, V]) MoveChildBefore(id, anchor K) bool { return t.Children.MoveBefore(id, anchor) }
+
+// MoveChildAfter atomically moves child id to just after anchor.
+func (t *CellTree[K, V]) MoveChildAfter(id, anchor K) bool { return t.Children.MoveAfter(id, anchor) }
+
+// ChildIDs returns a reactive snapshot of this node's child ids in order.
+func (t *CellTree[K, V]) ChildIDs() []K { return t.Children.Keys() }
+
+// ChildCount returns the reactive child count for this node.
+func (t *CellTree[K, V]) ChildCount() int { return t.Children.Len() }
+
+// HasChild reports the reactive membership test for a child of this node.
+func (t *CellTree[K, V]) HasChild(id K) bool { return t.Children.ContainsKey(id) }
+
+// CellFamily is a parameterized factory of reactive cells, keyed by K (à la
+// Recoil/Jotai atomFamily). The factory lazily mints and caches one Cell per
+// distinct key; repeated Gets of the same key return the same cell. Built on top
+// of CellMap, so membership is reactive and entries are fine-grained.
+type CellFamily[K comparable, V comparable] struct {
+	ctx     *Context
+	m       *CellMap[K, V]
+	factory func(K) V
+}
+
+// NewCellFamily creates a cell family bound to ctx with the given per-key
+// factory.
+func NewCellFamily[K comparable, V comparable](ctx *Context, factory func(K) V) *CellFamily[K, V] {
+	return &CellFamily[K, V]{
+		ctx:     ctx,
+		m:       NewCellMap[K, V](ctx),
+		factory: factory,
+	}
+}
+
+// Get returns (minting on first access via the factory) the cell for key.
+func (f *CellFamily[K, V]) Get(key K) *Cell[V] {
+	if existing := f.m.Cell(key); existing != nil {
+		return existing
+	}
+	return f.m.EntryWith(key, func() V { return f.factory(key) })
+}
+
+// Map returns the underlying CellMap for membership/iteration APIs.
+func (f *CellFamily[K, V]) Map() *CellMap[K, V] { return f.m }
+
+// Remove removes key from the family (see CellMap.Remove).
+func (f *CellFamily[K, V]) Remove(key K) bool { return f.m.Remove(key) }

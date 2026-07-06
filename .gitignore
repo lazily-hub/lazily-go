@@ -1,0 +1,16 @@
+# Go
+*.test
+*.out
+/coverage.out
+/coverage.html
+/bin/
+/dist/
+
+# cgo build artifacts
+*.so
+*.dylib
+*.dll
+
+# editor / OS
+.DS_Store
+*.swp
