@@ -35,6 +35,12 @@ conformance:
 bench:
 	go test -run '^$$' -bench=. -benchmem ./...
 
+# Large-graph scale benchmark: spreadsheet-shaped graph of ~2M nodes (default
+# N=1M rows). Set LAZILY_SCALE_N=5000000 for a full 10M-cell Google Sheets
+# workbook. Gated behind the `scalebench` build tag.
+bench-scale:
+	go test -tags scalebench -run '^$$' -bench=Scale -benchmem ./...
+
 tidy:
 	go mod tidy
 

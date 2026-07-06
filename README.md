@@ -131,6 +131,14 @@ insert/read) is zero-allocation. Benchmarks are defined as Go `testing.B` cases
 in [`bench_test.go`](bench_test.go) (mirroring the in-library `RunBenchmarkSuite`)
 and reproducible with `make bench` (`go test -bench=. -benchmem ./...`).
 
+BENCHMARKS.md also includes a **spreadsheet-scale** benchmark (`make bench-scale`)
+on a graph of `N` input cells + `N` formula slots (`=A_i + A_{i-1}`): ~2M nodes
+at the default `N=1M`, up to a full **10M-cell Google Sheets workbook** at
+`LAZILY_SCALE_N=5000000`. It builds the full workbook in under a second and — via
+the lazy pull-based model — a one-cell edit + bounded-viewport read recomputes
+only the viewport (~2 formulas), staying orders of magnitude cheaper than a full
+recalc regardless of sheet size.
+
 ## Feature coverage
 
 The full `lazily` capability set across every binding. Legend: ✅ shipped ·
