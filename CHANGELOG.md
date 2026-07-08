@@ -6,6 +6,32 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+### Added
+
+- **Lossless tree CRDT (M1).** `LosslessTreeCrdt` — a single rooted
+  concrete-syntax tree whose leaves own every rendered byte (`render == source`
+  for valid, invalid, and unknown source). Implements the M1 op vocabulary
+  (create / tombstone / intra-parent reorder / leaf-edit / split-leaf /
+  merge-adjacent-leaves) with op-based delta sync over a **dotted non-contiguous
+  version frontier** (`TreeVersionFrontier` / `TreeDotRange`) that keeps
+  delivery holes re-requestable, plus the `prev` causal chain for out-of-order
+  text ops. Leaf text embeds `TextCrdt` wholesale; leaf-local wire offsets are
+  UTF-8 bytes. Conforms to `schemas/lossless-tree.json` +
+  `schemas/lossless-tree-delta.json` and replays all nine
+  `conformance/lossless-tree/` compute fixtures (exact round-trip, anti-entropy
+  with a hole, concurrent same-parent insert / move+edit / incompatible-shape
+  convergence).
+- **Command / RPC message plane (`command-plane-v1`).** `CommandProjection`
+  (the reducer) + `CommandRpcClient` (the RPC facade) over the four
+  externally-tagged frames `CommandSubmit` / `CommandCancel` / `CommandEvents` /
+  `CommandProjection`. Terminal authority is the causal receipt, not the event
+  or the transport: a unary `call` resolves only when a terminal
+  `CausalReceipt` folds in. Implements generation guards, idempotency
+  (duplicate command/event/receipt/cancel ids), cancel-before-terminal-only,
+  and terminal-conflict fail-closed. Conforms to `schemas/message-passing.json`
+  and replays all eight `conformance/message-passing/` fixtures. The plane is
+  feature-gated; peers advertise `command-plane-v1` in `CapabilityHandshake`.
+
 ### Changed
 
 - **On-node slot cache (perf).** Cached slot values now live on the `Slot`
