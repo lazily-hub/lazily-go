@@ -6,6 +6,8 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.2.0
+
 ### Added
 
 - **Lossless tree CRDT (M1).** `LosslessTreeCrdt` — a single rooted
