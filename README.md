@@ -143,9 +143,12 @@ actions, and named fail-closed guards.
 Keyed cell collections (`CellMap`, `CellTree`) with LIS move-minimized
 reconciliation, the memoized semantic tree (`SemTree`), stable-id alignment, and
 the CRDT family: free-text character CRDT (`TextCrdt`, with delta sync),
-move-aware sequence CRDT (`SeqCrdt`), registers (`MvRegister`, `PnCounter`,
-`CellCrdt`), and the distributed CRDT plane (`CrdtPlane`, `CrdtPlaneRuntime`)
-with anti-entropy and WebRTC transport + signaling.
+move-aware sequence CRDT (`SeqCrdt`), the **lossless tree CRDT**
+(`LosslessTreeCrdt` — a single rooted concrete-syntax tree whose leaves own
+every rendered byte, with op-based delta sync over a dotted non-contiguous
+version frontier), registers (`MvRegister`, `PnCounter`, `CellCrdt`), and the
+distributed CRDT plane (`CrdtPlane`, `CrdtPlaneRuntime`) with anti-entropy and
+WebRTC transport + signaling.
 
 ## lazily-spec IPC
 
@@ -155,12 +158,19 @@ be mirrored to remote observers across processes and languages. They round-trip
 the canonical fixtures from [`lazily-spec`][spec]/`conformance/`. The C-ABI FFI
 boundary (cgo) exposes the state plane to in-process native embedders.
 
+The additive **command / RPC message plane** (`command-plane-v1`) —
+`CommandSubmit` / `CommandCancel` / `CommandEvents` / `CommandProjection` plus
+the `CommandRpcClient` facade — rides the same wire envelope. Terminal command
+authority folds through a `CausalReceipt`, so a unary `call` resolves only on a
+terminal receipt (never on a transport ACK or `accepted`/queued event).
+
 ## Conformance
 
 lazily-go replays the shared [`lazily-spec`][spec] conformance fixtures (IPC,
-keyed collections, and Harel state charts) — asserting identical behavior to
-every other binding. Run `make check` (fmt + vet + build + test) locally; CI
-also runs the race detector.
+keyed collections, Harel state charts, the lossless-tree CRDT, and the
+command-plane message family) — asserting identical behavior to every other
+binding. Run `make check` (fmt + vet + build + test) locally; CI also runs the
+race detector.
 
 ## Benchmarks
 
@@ -201,9 +211,9 @@ notes and platform carve-outs lives in
 | Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `TextCrdt` delta sync (`version_vector` / `delta_since` / `apply_delta`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Move-aware sequence CRDT (`SeqCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Lossless tree CRDT core (`LosslessTreeCrdt`, M1) | ✅ | — | ✅ | ✅ | — | — | — |
-| Lossless tree — dotted-frontier anti-entropy | ✅ | — | ✅ | ✅ | — | — | — |
-| Lossless tree — concurrent merge convergence | ✅ | — | ✅ | ✅ | — | — | — |
+| Lossless tree CRDT core (`LosslessTreeCrdt`, M1) | ✅ | ✅ | ✅ | ✅ | — | — | ✅ |
+| Lossless tree — dotted-frontier anti-entropy | ✅ | ✅ | ✅ | ✅ | — | — | ✅ |
+| Lossless tree — concurrent merge convergence | ✅ | ✅ | ✅ | ✅ | — | — | ✅ |
 | Registers (LWW / MV) + `PnCounter` + `CellCrdt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | IPC wire — `Snapshot` + `Delta` + `CrdtSync` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Shared-memory blob path (`ShmBlobArena`) | ✅ | ✅ | ✅ | ~ | ~ | ✅ | ✅ |
@@ -211,11 +221,11 @@ notes and platform carve-outs lives in
 | Distributed plane — WebRTC transport + signaling | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | State projection / mirror | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Causal receipts (`CausalReceipts` outcome projection) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Message-passing + RPC command plane (`command-plane-v1`) | ✅ | — | ✅ | ✅ | — | — | — |
+| Message-passing + RPC command plane (`command-plane-v1`) | ✅ | ✅ | ✅ | ✅ | — | — | ✅ |
 | C-ABI FFI boundary | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | Permission boundary (`PeerPermissions` / `RemoteOp`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Capability negotiation (`SessionHandshake`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Instrumentation / benchmarks | ✅ | ✅ | — | — | ✅ | ✅ | ✅ |
+| Instrumentation / benchmarks | ✅ | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 <!-- coverage-table:end -->
 
 [spec]: https://github.com/lazily-hub/lazily-spec
