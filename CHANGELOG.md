@@ -6,6 +6,42 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.3.0
+
+### Added
+
+- **Reactive queue (`QueueCell` + `QueueStorage`).** `QueueCell` is a FIFO
+  collection composed of cells — not a new cell kind — whose reactive shell
+  invalidates by **reader kind** rather than by position: `Head` (the current
+  head value), `Len`, `IsEmpty`, `IsFull` (the bounded-queue backpressure
+  signal), and `IsClosed`. A push invalidates `Len`/`IsEmpty` (and `Head` when
+  transitioning from empty); a pop invalidates `Head`/`Len`/`IsEmpty`; a
+  bounded queue's pop that makes room invalidates `IsFull` so a producer
+  `Effect` observing it resumes without polling; a no-op (Full / Empty / Closed
+  / idempotent close) invalidates nothing. Reader-kind independence comes "for
+  free" from the host `Cell` PartialEq guard: the shell re-derives the four
+  content cells from storage after each op inside one `Context.Batch`, and any
+  cell whose value is unchanged suppresses its cascade (a push to a non-empty
+  queue leaves `Head` cached).
+  - **SPSC primitive with an MPSC usage rule** — `QueueCell` is a
+    single-producer / single-consumer primitive; multi-producer is the same
+    primitive used inside a `Context.Batch` boundary (no `MPSCQueueCell` type).
+    Per-producer FIFO is preserved; inter-producer order is deterministic within
+    a batch.
+  - **Pluggable `QueueStorage` backend** — the shell is storage-agnostic; the
+    default `VecDequeStorage` (unbounded or bounded) is the reference backend,
+    and a custom backend (ring buffer, broker client, consensus log) drops in
+    via `NewQueueCellWithStorage`. Distribution is a storage-backend property.
+  - **Closure lifecycle** — pop on closed + non-empty drains; pop on closed +
+    empty returns `Closed` (distinct from `Empty`); push after close is an
+    error; close is idempotent and terminal (the formal
+    `Closed_then_stays_Closed` invariant).
+  - Conforms with `lazily-spec`/`cell-model.md` § Reactive queues and replays
+    all five `lazily-spec`/`conformance/collections/queuecell_*.json` fixtures
+    (SPSC push/pop, popped-head observation, MPSC multi-writer, bounded
+    backpressure, closure lifecycle), plus direct tests for backpressure-driven
+    effect wake-up and a custom ring-buffer backend.
+
 ## 0.2.0
 
 ### Added

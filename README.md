@@ -141,11 +141,16 @@ actions, and named fail-closed guards.
 ## Collections & CRDTs
 
 Keyed cell collections (`CellMap`, `CellTree`) with LIS move-minimized
-reconciliation, the memoized semantic tree (`SemTree`), stable-id alignment, and
-the CRDT family: free-text character CRDT (`TextCrdt`, with delta sync),
-move-aware sequence CRDT (`SeqCrdt`), the **lossless tree CRDT**
-(`LosslessTreeCrdt` — a single rooted concrete-syntax tree whose leaves own
-every rendered byte, with op-based delta sync over a dotted non-contiguous
+reconciliation, the memoized semantic tree (`SemTree`), stable-id alignment, the
+**reactive queue** (`QueueCell` — a FIFO collection whose shell invalidates by
+reader kind: a push invalidates `Len`/`IsEmpty` (and `Head` when transitioning
+from empty), a pop invalidates `Head`/`Len`/`IsEmpty`, and a bounded queue's
+`IsFull` is the reactive backpressure signal; SPSC primitive with MPSC via
+`Batch`, over a pluggable `QueueStorage` backend with the default
+`VecDequeStorage`), and the CRDT family: free-text character CRDT (`TextCrdt`,
+with delta sync), move-aware sequence CRDT (`SeqCrdt`), the **lossless tree
+CRDT** (`LosslessTreeCrdt` — a single rooted concrete-syntax tree whose leaves
+own every rendered byte, with op-based delta sync over a dotted non-contiguous
 version frontier), registers (`MvRegister`, `PnCounter`, `CellCrdt`), and the
 distributed CRDT plane (`CrdtPlane`, `CrdtPlaneRuntime`) with anti-entropy and
 WebRTC transport + signaling.
@@ -208,7 +213,7 @@ notes and platform carve-outs lives in
 | Keyed cell collections (`CellMap` / `CellTree`) + reconcile | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Memoized semantic tree (`SemTree`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Stable-id alignment (manufactured identity) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | — | ✅ | ✅ | — | ✅ | — | ✅ |
+| Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | — | ✅ | ✅ | — | ✅ | ✅ | ✅ |
 | Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `TextCrdt` delta sync (`version_vector` / `delta_since` / `apply_delta`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Move-aware sequence CRDT (`SeqCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
