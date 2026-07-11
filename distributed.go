@@ -38,6 +38,23 @@ import (
 // goroutine blocks on the send) but never loses an entry and never leaks.
 const convergedStreamBuffer = 64
 
+// familyNodeBase is the locally-private base for minted family entry node ids
+// (#lzfamilysync), set far above any application-registered id so a
+// materialized family entry can never collide with an app cell. Mirrors
+// lazily-rs FAMILY_NODE_BASE / lazily-zig FAMILY_NODE_BASE.
+const familyNodeBase NodeId = 1 << 48
+
+// keyNamespace returns the first `/`-separated segment of a NodeKey path — the
+// family namespace (#lzfamilysync).
+func keyNamespace(path string) string {
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' {
+			return path[:i]
+		}
+	}
+	return path
+}
+
 // ConvergedEntry is the converged state of a single node: its id, the winning
 // op's optional wire-stable key (the bare NodeKey path string, nil when the
 // node is addressed only by id), and the winning op's state payload.
@@ -113,17 +130,39 @@ type crdtPlaneState struct {
 	// of peers ever observed. Both are updated together in observeStamp.
 	frontier   *StampFrontier
 	membership map[PeerId]struct{}
+
+	// --- Reactive family-granularity sync (#lzfamilysync) ---
+	// clock mints local stamps for familySetLww (the base plane only observes
+	// remote stamps in the ingest path).
+	clock *Hlc
+	// families is the set of registered family namespaces. An inbound keyed op
+	// whose first NodeKey segment is a member materializes on ingest.
+	families map[string]struct{}
+	// familyMembers holds each namespace's materialized keys in
+	// first-materialization order (present set only grows: deferral-not-dealloc).
+	familyMembers map[string][]NodeKey
+	// membershipEpoch is the reactive membership signal, bumped whenever a family
+	// entry materializes — a derived aggregate over a family reads it so a
+	// remote-added key forces a recompute. A plain counter (mirrors lazily-zig).
+	membershipEpoch uint64
+	// nextFamilyNode is the monotonic allocator for locally-private family node
+	// ids.
+	nextFamilyNode NodeId
 }
 
 func newCrdtPlaneState(peer PeerId) *crdtPlaneState {
 	return &crdtPlaneState{
-		peer:       peer,
-		winning:    map[NodeId]CrdtOp{},
-		log:        map[opDedupKey]struct{}{},
-		keyToNode:  map[string]NodeId{},
-		nodeToKey:  map[NodeId]*string{},
-		frontier:   NewStampFrontier(),
-		membership: map[PeerId]struct{}{},
+		peer:           peer,
+		winning:        map[NodeId]CrdtOp{},
+		log:            map[opDedupKey]struct{}{},
+		keyToNode:      map[string]NodeId{},
+		nodeToKey:      map[NodeId]*string{},
+		frontier:       NewStampFrontier(),
+		membership:     map[PeerId]struct{}{},
+		clock:          NewHlc(peer),
+		families:       map[string]struct{}{},
+		familyMembers:  map[string][]NodeKey{},
+		nextFamilyNode: familyNodeBase,
 	}
 }
 
@@ -177,6 +216,22 @@ func (s *crdtPlaneState) ingestOps(ops []CrdtOp) (int, []NodeId) {
 		applied++
 
 		s.observeStamp(op.Stamp)
+
+		// Key-aware resolution (#lzfamilysync): a keyed op whose namespace is a
+		// registered family resolves to a LOCAL family node — an already-known
+		// key updates its entry under LWW; an unknown key MATERIALIZES a fresh
+		// entry seeded from the op state (materialize-on-ingest) rather than
+		// letting the base plane treat the remote's volatile node id as
+		// authoritative.
+		if op.Key != nil {
+			if _, isFamily := s.families[keyNamespace(op.Key.Path())]; isFamily {
+				if node, ch := s.ingestFamilyOp(op); ch {
+					changed[node] = struct{}{}
+				}
+				continue
+			}
+		}
+
 		s.resolveNode(op)
 
 		existing, ok := s.winning[op.Node]
@@ -236,6 +291,165 @@ func (s *crdtPlaneState) convergedFor(nodes []NodeId) []ConvergedEntry {
 		}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Reactive family-granularity sync (#lzfamilysync)
+//
+// A keyed op for a family entry that is NOT locally registered materializes the
+// entry on ingest (seeded from the op's converged register) instead of being
+// dropped — so a keyed family syncs as a unit: membership propagates, values are
+// adopted, a later last-writer-wins update converges, re-ingest is idempotent,
+// and a derived aggregate over the family (e.g. a count of `true` entries)
+// converges across replicas. Each entry is a last-writer-wins register keyed by
+// namespace/suffix. Proved in lazily-formal FamilySync.lean (applyOp_eq_merge,
+// applyOp_present, applyOp_absent_adopts, present_merge, applyOp_idem,
+// aggregate_converges); mirrors lazily-rs crdt_plane.rs + lazily-zig.
+// ---------------------------------------------------------------------------
+
+// registerFamilyLww registers a last-writer-wins family under namespace, so a
+// keyed op an entry of this family produces on a peer materializes an entry here
+// on ingest instead of being dropped. Replicas that share a session must
+// register the same family namespace.
+func (s *crdtPlaneState) registerFamilyLww(namespace string) {
+	s.families[namespace] = struct{}{}
+	if _, ok := s.familyMembers[namespace]; !ok {
+		s.familyMembers[namespace] = nil
+	}
+}
+
+// bumpMembershipEpoch bumps the reactive membership signal so a derived
+// aggregate over a family recomputes when its present set grows.
+func (s *crdtPlaneState) bumpMembershipEpoch() { s.membershipEpoch++ }
+
+// mintFamilyNode allocates a locally-private node id for a family entry,
+// skipping any id already in use so a family node can never collide with an
+// application-registered cell.
+func (s *crdtPlaneState) mintFamilyNode() NodeId {
+	for {
+		candidate := s.nextFamilyNode
+		s.nextFamilyNode++
+		if _, inUse := s.winning[candidate]; !inUse {
+			return candidate
+		}
+	}
+}
+
+// recordFamilyMember records a newly-materialized key in its family's present
+// set (dedup so a re-observed key does not duplicate). Only called for a
+// genuinely new key.
+func (s *crdtPlaneState) recordFamilyMember(namespace string, key NodeKey) {
+	members := s.familyMembers[namespace]
+	for _, k := range members {
+		if k.Path() == key.Path() {
+			return
+		}
+	}
+	s.familyMembers[namespace] = append(members, key)
+}
+
+// materializeFamilyEntry mints a local node for a fresh family entry seeded from
+// state/stamp: record membership, index the key, install the winning op, and
+// bump the membership epoch. Returns the local node id.
+func (s *crdtPlaneState) materializeFamilyEntry(namespace string, key NodeKey, state IpcValue, stamp WireStamp) NodeId {
+	s.recordFamilyMember(namespace, key)
+	node := s.mintFamilyNode()
+	keyStr := key.ToWire()
+	s.keyToNode[keyStr] = node
+	ks := keyStr
+	s.nodeToKey[node] = &ks
+	k := key
+	s.winning[node] = CrdtOp{Node: node, Key: &k, Stamp: stamp, State: state}
+	s.bumpMembershipEpoch()
+	return node
+}
+
+// ingestFamilyOp applies a keyed family op: an already-known key updates its
+// local entry under LWW (greatest stamp wins); an unknown key materializes a
+// fresh local entry seeded from the op state. Returns the local node id and
+// whether its winning value changed. Seeding from the op state IS the pointwise
+// CRDT merge, so this inherits full semilattice convergence.
+func (s *crdtPlaneState) ingestFamilyOp(op CrdtOp) (NodeId, bool) {
+	keyStr := op.Key.ToWire()
+	if node, known := s.keyToNode[keyStr]; known {
+		existing := s.winning[node]
+		if HlcStampFromWire(op.Stamp).Greater(HlcStampFromWire(existing.Stamp)) {
+			// LWW update: preserve the local node + key; op.Key is a transient
+			// wire slice with the same path.
+			s.winning[node] = CrdtOp{Node: node, Key: existing.Key, Stamp: op.Stamp, State: op.State}
+			return node, true
+		}
+		return node, false
+	}
+	return s.materializeFamilyEntry(keyNamespace(op.Key.Path()), *op.Key, op.State, op.Stamp), true
+}
+
+// familySetLww inserts or updates a local LWW family entry namespace/<keySuffix>
+// to state at nowMicros, returning the CrdtOp to broadcast (recorded in the op
+// log so a sync frame carries it) and true, or a zero op and false if the key is
+// invalid or the write was stamp-dominated. Materializes the entry (and bumps
+// membership) on first insert.
+func (s *crdtPlaneState) familySetLww(namespace, keySuffix string, state IpcValue, nowMicros int64) (CrdtOp, bool) {
+	key, err := NewNodeKey(namespace + "/" + keySuffix)
+	if err != nil {
+		return CrdtOp{}, false
+	}
+	hlc := s.clock.Tick(nowMicros)
+	s.observeStamp(hlc.ToWire())
+	stamp := hlc.ToWire()
+	keyStr := key.ToWire()
+	if node, known := s.keyToNode[keyStr]; known {
+		existing := s.winning[node]
+		if !hlc.Greater(HlcStampFromWire(existing.Stamp)) {
+			return CrdtOp{}, false
+		}
+		op := CrdtOp{Node: node, Key: existing.Key, Stamp: stamp, State: state}
+		s.winning[node] = op
+		s.recordLocalOp(op)
+		return op, true
+	}
+	node := s.materializeFamilyEntry(namespace, key, state, stamp)
+	op := s.winning[node]
+	s.recordLocalOp(op)
+	return op, true
+}
+
+// recordLocalOp records a locally-minted op in the op log + insertion-ordered
+// op list (so Ops() / a sync frame carries it), deduped by (node, stamp).
+func (s *crdtPlaneState) recordLocalOp(op CrdtOp) {
+	dk := dedupKeyOf(op)
+	if _, ok := s.log[dk]; ok {
+		return
+	}
+	s.log[dk] = struct{}{}
+	s.ops = append(s.ops, op)
+}
+
+// familyKeys returns a copy of the materialized keys of family namespace, in
+// first-materialization order.
+func (s *crdtPlaneState) familyKeys(namespace string) []NodeKey {
+	members := s.familyMembers[namespace]
+	out := make([]NodeKey, len(members))
+	copy(out, members)
+	return out
+}
+
+// familyValueLww returns the current converged state of family entry
+// namespace/<keySuffix>, or (nil, false) if the key is not present.
+func (s *crdtPlaneState) familyValueLww(namespace, keySuffix string) (IpcValue, bool) {
+	key, err := NewNodeKey(namespace + "/" + keySuffix)
+	if err != nil {
+		return nil, false
+	}
+	node, ok := s.keyToNode[key.ToWire()]
+	if !ok {
+		return nil, false
+	}
+	op, ok := s.winning[node]
+	if !ok {
+		return nil, false
+	}
+	return op.State, true
 }
 
 // ---------------------------------------------------------------------------
@@ -509,4 +723,72 @@ func (r *CrdtPlaneRuntime) Ops() []CrdtOp {
 		return nil
 	})
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Reactive family-granularity sync (#lzfamilysync) — runtime surface
+// ---------------------------------------------------------------------------
+
+// RegisterFamilyLww registers a last-writer-wins family under namespace so an
+// inbound keyed op for an unregistered entry of this family materializes on
+// ingest instead of being dropped. Replicas sharing a session must register the
+// same namespace.
+func (r *CrdtPlaneRuntime) RegisterFamilyLww(namespace string) {
+	r.submit(func() []ConvergedEntry {
+		r.state.registerFamilyLww(namespace)
+		return nil
+	})
+}
+
+// FamilySetLww inserts or updates the local LWW family entry
+// namespace/<keySuffix> to state at nowMicros, materializing it (and bumping the
+// membership epoch) on first insert. Returns the broadcast op and true, or a
+// zero op and false if the key is invalid or the write was stamp-dominated. The
+// converged entry is fanned out on ConvergedStream.
+func (r *CrdtPlaneRuntime) FamilySetLww(namespace, keySuffix string, state IpcValue, nowMicros int64) (CrdtOp, bool) {
+	var op CrdtOp
+	var ok bool
+	r.submit(func() []ConvergedEntry {
+		op, ok = r.state.familySetLww(namespace, keySuffix, state, nowMicros)
+		if !ok {
+			return nil
+		}
+		return r.state.convergedFor([]NodeId{op.Node})
+	})
+	return op, ok
+}
+
+// FamilyKeys returns the materialized keys of family namespace, in
+// first-materialization order.
+func (r *CrdtPlaneRuntime) FamilyKeys(namespace string) []NodeKey {
+	var out []NodeKey
+	r.submit(func() []ConvergedEntry {
+		out = r.state.familyKeys(namespace)
+		return nil
+	})
+	return out
+}
+
+// FamilyValueLww returns the current converged state of family entry
+// namespace/<keySuffix>, and whether the key is present.
+func (r *CrdtPlaneRuntime) FamilyValueLww(namespace, keySuffix string) (IpcValue, bool) {
+	var v IpcValue
+	var ok bool
+	r.submit(func() []ConvergedEntry {
+		v, ok = r.state.familyValueLww(namespace, keySuffix)
+		return nil
+	})
+	return v, ok
+}
+
+// MembershipEpoch returns the reactive membership signal (#lzfamilysync): a
+// derived aggregate over a family depends on it so a remote-materialized key
+// forces a recompute. Bumped whenever a family entry materializes.
+func (r *CrdtPlaneRuntime) MembershipEpoch() uint64 {
+	var e uint64
+	r.submit(func() []ConvergedEntry {
+		e = r.state.membershipEpoch
+		return nil
+	})
+	return e
 }

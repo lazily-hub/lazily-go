@@ -6,6 +6,56 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.6.0
+
+### Added
+
+- **Thread-safe reactive family (`ThreadSafeReactiveFamily`, `#lzmatmode`).** The
+  `Send + Sync` flavor of `ReactiveFamily`: keys `K` map to per-entry reactive
+  values of one `EntryKind`, allocated per a `MaterializationMode`, with all
+  present-set mutation serialized by an internal `sync.Mutex`. Once built its
+  address is stable, so concurrent goroutines may share a `*ThreadSafeReactive
+  Family` and serve `Observe`/`Get` from any goroutine with no per-key locking of
+  the value axis. Obeys the eager/lazy contract, observational transparency, and
+  present-set monotonicity, plus **materialization confluence**: the present set
+  and every observed value are independent of the order in which keys are
+  materialized under concurrency (`materialize_present_comm` /
+  `materialize_observe_comm`). Constructors `ThreadSafeEager/LazySlotFamily` and
+  `ThreadSafeEager/LazyCellFamily`; surface `Get`/`Observe`/`Set`/`IsPresent`/
+  `PresentKeys`/`PresentCount`/`Mode`/`EntryKind`. Verified under `-race` with an
+  N-goroutine confluence soak. Flips the Go **Thread-safe reactive family** cell
+  to ✅.
+
+- **Async reactive family (`AsyncReactiveFamily`, `#lzmatmode`).** The async
+  flavor of `ReactiveFamily`, adding a **resolution axis** orthogonal to the
+  present-set axis: a derived (slot) entry is *pending* until `Drive`n (the
+  analog of `AsyncContext.GetAsync`), then *resolved*; input (cell) entries are
+  resolved at build. A non-blocking `Observe` returns `(value, ok)` — `(_, false)`
+  while pending, `(value, true)` once resolved. The single-threaded transparency
+  law weakens to **eventual transparency**: once a node resolves its observed
+  value is the canonical value, identical to the synchronous family
+  (`eventual_transparency`, `async_resolved_matches_sync`, `observe_pending_is_none`,
+  `cell_resolved_at_build`, `resolve_monotone`, `resolve_preserves_observe`).
+  Mutex-guarded for cross-goroutine owners. Flips the Go **Async reactive
+  family** cell to ✅.
+
+- **Reactive family sync (`#lzfamilysync`).** The distributed CRDT plane
+  (`CrdtPlaneRuntime`) now syncs a keyed family as a unit: a keyed op for a
+  family entry NOT registered locally **materializes** the entry on ingest
+  (seeded from the op's converged register) instead of being dropped —
+  membership propagates, values are adopted, a later last-writer-wins update
+  converges, re-ingest is idempotent, and a derived aggregate over the family
+  (e.g. a count of `true` entries) converges across replicas. Each entry is an
+  LWW register addressed by `NodeKey` `namespace/<suffix>`, materialized on a
+  locally-private node id (above `familyNodeBase = 1 << 48`) so it never collides
+  with an app cell. A `MembershipEpoch` reactive signal bumps whenever an entry
+  materializes so a derived aggregate recomputes. Surface `RegisterFamilyLww`/
+  `FamilySetLww`/`FamilyKeys`/`FamilyValueLww`/`MembershipEpoch`. Conforms to
+  `lazily-formal`'s `FamilySync` module (`applyOp_eq_merge`, `applyOp_present`,
+  `applyOp_absent_adopts`, `present_merge`, `applyOp_idem`, `aggregate_converges`)
+  and replays `conformance/familysync/materialize_on_ingest.json`. Flips the Go
+  **Reactive family sync** cell to ✅ — completing full Go feature parity.
+
 ## 0.5.0
 
 ### Added
