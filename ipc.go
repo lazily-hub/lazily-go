@@ -112,18 +112,106 @@ func (k *NodeKey) UnmarshalJSON(b []byte) error {
 }
 
 // ---------------------------------------------------------------------------
+// BlobBackendKind (defs.json#/$defs/ShmBlobRef.backend) — zero-copy transport
+// ---------------------------------------------------------------------------
+
+// BlobBackendKind selects which pluggable blob backend resolves a descriptor
+// (cross-process zero-copy transport, #lzzcpy). A receiver routes resolution by
+// this discriminator: a `shm` descriptor never resolves in an Arrow backend and
+// vice versa (the resolve_wrong_backend theorem). It is the wire mirror of the
+// Rust `BlobBackendKind` enum; the `arena` itself is backend-agnostic and does
+// not store it — the discriminator is wire-level routing only.
+//
+// The zero value ("") is the default backend, Shm, so a legacy descriptor with
+// no `backend` field resolves unchanged. Unknown strings also fall back to Shm
+// (never a hard failure), matching the Rust `from_str`.
+type BlobBackendKind string
+
+const (
+	// BackendShm is the POSIX shared-memory backend (shm_open + mmap) — the
+	// default cross-process backend (same host). Omitted on the wire.
+	BackendShm BlobBackendKind = "shm"
+	// BackendArrow holds Apache Arrow IPC stream bytes — the descriptor's bytes
+	// are an Arrow IPC stream the receiver imports zero-copy.
+	BackendArrow BlobBackendKind = "arrow"
+	// BackendInProcess is an in-process arena (single address space — the FFI
+	// host / an editor plugin loaded in the same process).
+	BackendInProcess BlobBackendKind = "in_process"
+)
+
+// Normalized collapses the zero value and any unknown discriminator to the
+// default backend (Shm), so resolution never hard-fails on a legacy or
+// forward-compatible descriptor.
+func (k BlobBackendKind) Normalized() BlobBackendKind {
+	switch k {
+	case BackendArrow, BackendInProcess:
+		return k
+	default:
+		return BackendShm
+	}
+}
+
+// IsDefault reports whether this is the default backend (Shm). Used to omit the
+// `backend` field on the wire so legacy descriptors validate unchanged.
+func (k BlobBackendKind) IsDefault() bool { return k.Normalized() == BackendShm }
+
+// routerIndex is the BlobRouter slot for this backend kind (Shm=0, Arrow=1,
+// InProcess=2), matching the Rust `BlobBackendKind as usize` router indexing.
+func (k BlobBackendKind) routerIndex() int {
+	switch k.Normalized() {
+	case BackendArrow:
+		return 1
+	case BackendInProcess:
+		return 2
+	default:
+		return 0
+	}
+}
+
+// ---------------------------------------------------------------------------
 // ShmBlobRef (defs.json#/$defs/ShmBlobRef)
 // ---------------------------------------------------------------------------
 
-// ShmBlobRef is a descriptor into a shared-memory blob arena. The arena writes
-// a fixed header { generation, epoch, length, checksum } before each payload;
-// this struct is the wire mirror of that descriptor.
+// ShmBlobRef is a descriptor into a blob backend (zero-copy transport). The
+// arena writes a fixed header { generation, epoch, length, checksum } before
+// each payload; this struct is the wire mirror of that descriptor. The optional
+// Backend discriminator selects which pluggable backend resolves it; it defaults
+// to Shm and is omitted on the wire when default, so legacy descriptors validate
+// unchanged (a strict superset of the pre-existing shared-memory blob path).
 type ShmBlobRef struct {
-	Offset     int64 `json:"offset"`
-	Len        int64 `json:"len"`
-	Generation int64 `json:"generation"`
-	Epoch      int64 `json:"epoch"`
-	Checksum   int64 `json:"checksum"`
+	Offset     int64           `json:"offset"`
+	Len        int64           `json:"len"`
+	Generation int64           `json:"generation"`
+	Epoch      int64           `json:"epoch"`
+	Checksum   int64           `json:"checksum"`
+	Backend    BlobBackendKind `json:"backend,omitempty"`
+}
+
+// WithBackend returns a copy of the descriptor tagged with the given backend
+// discriminator (the producer stamps this when spilling to a non-default
+// backend; the receiver routes resolution by it).
+func (r ShmBlobRef) WithBackend(kind BlobBackendKind) ShmBlobRef {
+	r.Backend = kind
+	return r
+}
+
+// MarshalJSON emits the descriptor with fields in schema order, omitting the
+// `backend` field when it is the default (Shm) so the wire form is a strict
+// superset of the legacy backend-absent descriptor.
+func (r ShmBlobRef) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		Offset     int64  `json:"offset"`
+		Len        int64  `json:"len"`
+		Generation int64  `json:"generation"`
+		Epoch      int64  `json:"epoch"`
+		Checksum   int64  `json:"checksum"`
+		Backend    string `json:"backend,omitempty"`
+	}
+	w := wire{r.Offset, r.Len, r.Generation, r.Epoch, r.Checksum, ""}
+	if !r.Backend.IsDefault() {
+		w.Backend = string(r.Backend.Normalized())
+	}
+	return json.Marshal(w)
 }
 
 // NewShmBlobRef constructs a ShmBlobRef, rejecting negative fields.
@@ -139,10 +227,11 @@ func NewShmBlobRef(offset, length, generation, epoch, checksum int64) (ShmBlobRe
 			return ShmBlobRef{}, fmt.Errorf("%s must be a non-negative integer (was %d)", f.name, f.v)
 		}
 	}
-	return ShmBlobRef{offset, length, generation, epoch, checksum}, nil
+	return ShmBlobRef{Offset: offset, Len: length, Generation: generation, Epoch: epoch, Checksum: checksum}, nil
 }
 
-// UnmarshalJSON validates non-negative fields to match the Dart fromWire.
+// UnmarshalJSON validates non-negative fields to match the Dart fromWire and
+// normalizes the optional `backend` discriminator (absent or unknown → Shm).
 func (r *ShmBlobRef) UnmarshalJSON(b []byte) error {
 	type raw ShmBlobRef
 	var x raw
@@ -152,13 +241,14 @@ func (r *ShmBlobRef) UnmarshalJSON(b []byte) error {
 	if x.Offset < 0 || x.Len < 0 || x.Generation < 0 || x.Epoch < 0 || x.Checksum < 0 {
 		return fmt.Errorf("ShmBlobRef fields must be non-negative")
 	}
+	x.Backend = x.Backend.Normalized()
 	*r = ShmBlobRef(x)
 	return nil
 }
 
 func (r ShmBlobRef) String() string {
-	return fmt.Sprintf("ShmBlobRef(offset=%d, len=%d, generation=%d, epoch=%d, checksum=%d)",
-		r.Offset, r.Len, r.Generation, r.Epoch, r.Checksum)
+	return fmt.Sprintf("ShmBlobRef(offset=%d, len=%d, generation=%d, epoch=%d, checksum=%d, backend=%s)",
+		r.Offset, r.Len, r.Generation, r.Epoch, r.Checksum, r.Backend.Normalized())
 }
 
 // ---------------------------------------------------------------------------

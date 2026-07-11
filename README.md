@@ -169,6 +169,33 @@ the `CommandRpcClient` facade — rides the same wire envelope. Terminal command
 authority folds through a `CausalReceipt`, so a unary `call` resolves only on a
 terminal receipt (never on a transport ACK or `accepted`/queued event).
 
+## Cross-process zero-copy transport
+
+Large cell/slot payloads cross the IPC plane as **descriptors**, not copies
+(`#lzzcpy`). The producer **spills** an oversized payload to a pluggable
+[`BlobBackend`](transport.go) and ships a small `ShmBlobRef` descriptor; the
+receiver **resolves** the descriptor against the same backend and reads the
+bytes in place — no copy, no checksum recompute. Three backends ship:
+
+- **`InProcessBackend`** wraps a `ShmBlobArena` — the single-address-space case
+  (the cgo FFI host / an in-process embedder).
+- **`ArrowBackend`** holds Apache Arrow IPC stream bytes — the descriptor's bytes
+  *are* an Arrow IPC stream a columnar consumer imports zero-copy.
+- **`ShmBackend`** (Linux) is a genuine POSIX `shm_open` + `mmap` region with an
+  atomic bump allocator — the cross-process backend: a descriptor minted by one
+  mapping resolves zero-copy against an independent mapping of the same region.
+
+`SpillMessage` replaces oversized `Inline`/`Payload` sites across a
+`Snapshot`/`Delta`/`CrdtSync` with descriptors above a deployment threshold; a
+receiver-side `BlobRouter` resolves any descriptor by its `backend`
+discriminator (a `shm` descriptor never resolves in an Arrow backend, and vice
+versa). The `backend` field is optional and defaults to `shm`, so legacy
+descriptors validate unchanged — the transport is a strict superset of the
+shared-memory blob path. The backend-agnostic invariants (spill-then-resolve
+identity, backend isolation, ABA generation safety, checksum integrity) are
+proven in [`lazily-formal`][spec]'s `ZeroCopyTransport.lean` and pinned by the
+`delta_zero_copy_arrow` conformance fixture.
+
 ## Conformance
 
 lazily-go replays the shared [`lazily-spec`][spec] conformance fixtures (IPC,
@@ -224,7 +251,7 @@ notes and platform carve-outs lives in
 | Registers (LWW / MV) + `PnCounter` + `CellCrdt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | IPC wire — `Snapshot` + `Delta` + `CrdtSync` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Shared-memory blob path (`ShmBlobArena`) | ✅ | ✅ | ✅ | ~ | ~ | ✅ | ✅ | ✅ |
-| Cross-process zero-copy transport (`BlobBackend` / shm / arrow) | ✅ | — | — | — | — | — | — | ✅ |
+| Cross-process zero-copy transport (`BlobBackend` / shm / arrow) | ✅ | ✅ | ✅ | — | — | — | ✅ | ✅ |
 | Distributed CRDT plane (`CrdtPlaneRuntime` / anti-entropy) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Distributed plane — WebRTC transport + signaling | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | State projection / mirror | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

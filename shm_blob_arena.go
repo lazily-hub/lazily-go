@@ -140,6 +140,26 @@ func (a *ShmBlobArena) Read(ref ShmBlobRef) []byte {
 	return out
 }
 
+// ReadView resolves a descriptor zero-copy: it returns the arena's own backing
+// payload slice (NOT a defensive copy) and ok=true iff the descriptor passes
+// full header validation (offset in range, slot live, matching generation /
+// epoch / len / checksum); otherwise (nil, false). This is the transport
+// read_view primitive — the caller reads the backend's bytes in place. The
+// returned slice aliases arena storage; the arena entry is immutable for the
+// lifetime a descriptor may reference it (Write never mutates a stored buffer;
+// Update/Free bump the generation, invalidating the descriptor), so the view is
+// stable. Callers that intend to retain the bytes past a possible Free should
+// copy. Contrast Read, which always copies.
+func (a *ShmBlobArena) ReadView(ref ShmBlobRef) ([]byte, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	entry := a.validEntry(ref)
+	if entry == nil {
+		return nil, false
+	}
+	return entry.payload, true
+}
+
 // Update rewrites an existing blob in place (bumping its generation) and
 // returns the new descriptor, or nil if ref is stale. Mirrors Dart `update`:
 // the payload buffer is overwritten from offset 0 and keeps its original

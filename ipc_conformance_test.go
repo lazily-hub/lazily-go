@@ -309,6 +309,21 @@ func assertDeltaAssertions(t *testing.T, d Delta, assertions map[string]json.Raw
 				t.Fatalf("first op %T has no payload", d.Ops[0])
 			}
 			actual = ipcValueKind(t, payload)
+		case "first_op_payload_backend":
+			var payload IpcValue
+			switch op := d.Ops[0].(type) {
+			case DeltaOpCellSet:
+				payload = op.Payload
+			case DeltaOpSlotValue:
+				payload = op.Payload
+			default:
+				t.Fatalf("first op %T has no payload", d.Ops[0])
+			}
+			sb, ok := payload.(IpcValueSharedBlob)
+			if !ok {
+				t.Fatalf("first op payload %T is not a SharedBlob", payload)
+			}
+			actual = string(sb.Blob.Backend.Normalized())
 		default:
 			t.Fatalf("unknown delta assertion key: %q", key)
 		}
@@ -328,6 +343,7 @@ func TestIPCConformanceFixtures(t *testing.T) {
 		"delta_sequential.json",
 		"delta_non_sequential.json",
 		"delta_shared_blob.json",
+		"delta_zero_copy_arrow.json",
 	}
 	for _, name := range fixtures {
 		name := name

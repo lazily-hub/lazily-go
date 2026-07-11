@@ -6,6 +6,29 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.4.0
+
+### Added
+
+- **Cross-process zero-copy transport (`BlobBackend` / shm / arrow, `#lzzcpy`).**
+  Large cell/slot payloads now cross the IPC plane as descriptors, not copies.
+  A producer spills an oversized payload to a pluggable `BlobBackend` (minting a
+  `ShmBlobRef`) and ships only the descriptor; the receiver resolves it against
+  the same backend and reads the bytes in place. Three backends ship:
+  `InProcessBackend` (wraps `ShmBlobArena` — single address space),
+  `ArrowBackend` (holds Apache Arrow IPC stream bytes), and `ShmBackend` (Linux
+  — a genuine POSIX `shm_open` + `mmap` region with an atomic bump allocator,
+  resolving cross-mapping). `SpillMessage`/`SpillValue` apply the threshold spill
+  policy across `Snapshot`/`Delta`/`CrdtSync`; a receiver-side `BlobRouter`
+  resolves any descriptor by its `backend` discriminator. `ShmBlobRef` gains an
+  optional `backend` field (`shm` | `arrow` | `in_process`) that defaults to
+  `shm` and is omitted on the wire when default, so legacy descriptors validate
+  unchanged — the transport is a strict superset of the shared-memory blob path.
+  The backend-agnostic laws (spill-then-resolve identity, backend isolation, ABA
+  generation safety, checksum integrity) match `lazily-formal`'s
+  `ZeroCopyTransport.lean` and the `delta_zero_copy_arrow` conformance fixture.
+  Flips the Go **Cross-process zero-copy transport** coverage cell to ✅.
+
 ## 0.3.0
 
 ### Added
