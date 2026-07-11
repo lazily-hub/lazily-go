@@ -6,6 +6,28 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.5.0
+
+### Added
+
+- **Reactive family + materialization mode (`ReactiveFamily`, `#lzmatmode`).** A
+  unified keyed reactive family mapping keys `K` to per-entry reactive nodes,
+  allocated per a `MaterializationMode`. Entry kind (`EntryKindCell` input
+  `*Cell[V]` / `EntryKindSlot` derived `*Slot[V]`) is orthogonal to mode: cell
+  entries are always materialized; derived slots are allocated eagerly (default,
+  `EagerSlotFamily`) or lazily on first read (`LazySlotFamily` — "materialize on
+  pull", never-read nodes never allocated). Materialization mode is never
+  observable on the value axis — eager and lazy return identical values
+  (observational transparency); it changes allocation timing and memory only.
+  Present set grows monotonically (deferral, not de-allocation) and the lazy set
+  is a subset of the eager set. `Observe`/`GetCell`/`GetSlot`/`Set`/`IsPresent`/
+  `PresentKeys`/`PresentCount`/`Mode`/`EntryKind` surface. Conforms to
+  `lazily-formal`'s `Materialization` module and replays the
+  `conformance/materialization/*.json` fixtures (observational transparency,
+  deferral-not-deallocation, entry-kind orthogonality). The existing `CellFamily`
+  is the input-cell collection specialization. Flips the Go **Reactive family**
+  coverage cell to ✅.
+
 ## 0.4.0
 
 ### Added

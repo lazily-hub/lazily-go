@@ -155,6 +155,41 @@ version frontier), registers (`MvRegister`, `PnCounter`, `CellCrdt`), and the
 distributed CRDT plane (`CrdtPlane`, `CrdtPlaneRuntime`) with anti-entropy and
 WebRTC transport + signaling.
 
+## Reactive family & materialization mode
+
+`ReactiveFamily[K, V]` is the unified keyed reactive family (`#lzmatmode`): keys
+map to per-entry reactive nodes, allocated per a **materialization mode**.
+Materialization mode is an axis **orthogonal** to cell kind — it fixes *when* a
+derived node is allocated, never what it computes, and is **never observable on
+the value axis**.
+
+- **Entry kind** — a family is input **cells** (`EntryKindCell`, `*Cell[V]` —
+  always materialized, writable via `Set`) or derived **slots**
+  (`EntryKindSlot`, `*Slot[V]` — what materialization mode governs).
+- **Eager (default).** `EagerSlotFamily` allocates every declared node up front:
+  a read is a direct node access.
+- **Lazy (opt-in).** `LazySlotFamily` defers each derived node to its first read
+  ("materialize on pull"); a never-read node is never allocated. The present set
+  only *grows* (deferral, not de-allocation).
+
+```go
+ctx := lazily.NewContext()
+// Lazy family over a large keyed space; only read keys are allocated.
+sheet := lazily.LazySlotFamily(ctx, keys, func(k Key) int { return recompute(k) })
+sheet.Observe(k)      // materializes k on first pull, caches it
+sheet.PresentCount()  // grows only with reads
+```
+
+Eager and lazy return **identical values** for every key (observational
+transparency); mode changes allocation timing and memory, never results. The
+laws — `observe_canonical`, `eager_lazy_observationally_equivalent`,
+`materialize_present_monotone` / `lazy_present_subset_eager`, and entry-kind
+orthogonality (`cell_entries_materialized_in_every_mode` /
+`slot_entries_deferred_under_lazy`) — are proven in [`lazily-formal`][formal]'s
+`Materialization` module and pinned by the
+`conformance/materialization/*.json` fixtures. The existing `CellFamily`
+(Collections above) is the input-cell collection specialization.
+
 ## lazily-spec IPC
 
 The IPC types (`Snapshot`, `Delta`, `CrdtSync`, `NodeState`, ...) implement the
@@ -233,7 +268,7 @@ notes and platform carve-outs lives in
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig | Go | C++ |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: | :--: | :---: |
 | Reactive graph — `Cell` / `Slot` / `Signal` / `Effect` / memo / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Reactive family (`ReactiveFamily`) — keyed cell/slot family + materialization mode (`#lzmatmode`) | ✅ | — | ✅ | ✅ | — | ✅ | — | ✅ |
+| Reactive family (`ReactiveFamily`) — keyed cell/slot family + materialization mode (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thread-safe context (lock-backed) | ✅ | ✅ | ✅ | — | — | ✅ | ✅ | ✅ |
 | Async reactive context | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Flat state machine | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -251,7 +286,7 @@ notes and platform carve-outs lives in
 | Registers (LWW / MV) + `PnCounter` + `CellCrdt` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | IPC wire — `Snapshot` + `Delta` + `CrdtSync` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Shared-memory blob path (`ShmBlobArena`) | ✅ | ✅ | ✅ | ~ | ~ | ✅ | ✅ | ✅ |
-| Cross-process zero-copy transport (`BlobBackend` / shm / arrow) | ✅ | ✅ | ✅ | — | — | — | ✅ | ✅ |
+| Cross-process zero-copy transport (`BlobBackend` / shm / arrow) | ✅ | ✅ | ✅ | — | ✅ | — | ✅ | ✅ |
 | Distributed CRDT plane (`CrdtPlaneRuntime` / anti-entropy) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Distributed plane — WebRTC transport + signaling | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | State projection / mirror | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
