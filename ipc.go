@@ -1020,13 +1020,37 @@ func (c CrdtSync) FilterReadable(permissions *PeerPermissions, peer PeerId) Crdt
 }
 
 // ---------------------------------------------------------------------------
+// Reliable-sync reverse-channel control frames (#lzsync, reliable-sync.json)
+// ---------------------------------------------------------------------------
+
+// ResyncRequest is a reliable-sync reverse-channel control frame: request a
+// covering Snapshot on a detected gap (#lzsync, spec § ResyncCoordinator). It
+// carries no node content, so it is permission-filter- and blob-spill-
+// transparent. Wire form: {"from_epoch": N}.
+type ResyncRequest struct {
+	// FromEpoch is the requesting receiver's last_epoch; the sender replies with
+	// a Snapshot { epoch >= from_epoch }.
+	FromEpoch Epoch `json:"from_epoch"`
+}
+
+// OutboxAck is a reliable-sync reverse-channel control frame: prove receipt
+// through ThroughEpoch (#lzsync, spec § DurableOutbox). It advances the
+// sender's outbox retention cursor and doubles as the reconnect resume cursor;
+// it carries no node content. Wire form: {"through_epoch": N}.
+type OutboxAck struct {
+	// ThroughEpoch is the highest epoch the receiver has fully applied.
+	ThroughEpoch Epoch `json:"through_epoch"`
+}
+
+// ---------------------------------------------------------------------------
 // IpcMessage (protocol.md § IPC) — the tagged Snapshot/Delta/CrdtSync envelope
 // ---------------------------------------------------------------------------
 
-// IpcMessage is a length-prefixed, tagged Snapshot, Delta, or CrdtSync. The
-// CrdtSync variant carries multi-writer plane traffic alongside the
+// IpcMessage is a length-prefixed, tagged Snapshot, Delta, CrdtSync, or one of
+// the reliable-sync reverse-channel control frames (ResyncRequest / OutboxAck).
+// The CrdtSync variant carries multi-writer plane traffic alongside the
 // single-producer mirror. Externally tagged: {"Snapshot": ...} / {"Delta": ...}
-// / {"CrdtSync": ...}.
+// / {"CrdtSync": ...} / {"ResyncRequest": ...} / {"OutboxAck": ...}.
 type IpcMessage interface {
 	MarshalJSON() ([]byte, error)
 	// EncodeJSON returns the UTF-8 JSON bytes of the tagged wire form.
@@ -1055,6 +1079,22 @@ func (IpcMessageCrdtSync) isIpcMessage()                  {}
 func (m IpcMessageCrdtSync) MarshalJSON() ([]byte, error) { return taggedJSON("CrdtSync", m.Value) }
 func (m IpcMessageCrdtSync) EncodeJSON() ([]byte, error)  { return m.MarshalJSON() }
 
+// IpcMessageResyncRequest wraps a ResyncRequest control frame (#lzsync).
+type IpcMessageResyncRequest struct{ Value ResyncRequest }
+
+func (IpcMessageResyncRequest) isIpcMessage() {}
+func (m IpcMessageResyncRequest) MarshalJSON() ([]byte, error) {
+	return taggedJSON("ResyncRequest", m.Value)
+}
+func (m IpcMessageResyncRequest) EncodeJSON() ([]byte, error) { return m.MarshalJSON() }
+
+// IpcMessageOutboxAck wraps an OutboxAck control frame (#lzsync).
+type IpcMessageOutboxAck struct{ Value OutboxAck }
+
+func (IpcMessageOutboxAck) isIpcMessage()                  {}
+func (m IpcMessageOutboxAck) MarshalJSON() ([]byte, error) { return taggedJSON("OutboxAck", m.Value) }
+func (m IpcMessageOutboxAck) EncodeJSON() ([]byte, error)  { return m.MarshalJSON() }
+
 // IpcMessageFromWire decodes an externally-tagged IpcMessage from JSON bytes.
 func IpcMessageFromWire(data []byte) (IpcMessage, error) {
 	tag, body, err := splitTagged(data, "IpcMessage")
@@ -1080,6 +1120,18 @@ func IpcMessageFromWire(data []byte) (IpcMessage, error) {
 			return nil, err
 		}
 		return IpcMessageCrdtSync{Value: c}, nil
+	case "ResyncRequest":
+		var r ResyncRequest
+		if err := json.Unmarshal(body, &r); err != nil {
+			return nil, err
+		}
+		return IpcMessageResyncRequest{Value: r}, nil
+	case "OutboxAck":
+		var a OutboxAck
+		if err := json.Unmarshal(body, &a); err != nil {
+			return nil, err
+		}
+		return IpcMessageOutboxAck{Value: a}, nil
 	default:
 		return nil, fmt.Errorf("unknown IpcMessage variant: %s", tag)
 	}

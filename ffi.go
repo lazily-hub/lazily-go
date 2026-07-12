@@ -84,6 +84,12 @@ const (
 	// LazilyFfiMessageKindCrdtSync classifies an IpcMessageCrdtSync (the
 	// multi-writer CRDT plane).
 	LazilyFfiMessageKindCrdtSync LazilyFfiMessageKind = 3
+	// LazilyFfiMessageKindResyncRequest classifies an IpcMessageResyncRequest
+	// (the reliable-sync reverse-channel gap-recovery frame, #lzsync).
+	LazilyFfiMessageKindResyncRequest LazilyFfiMessageKind = 4
+	// LazilyFfiMessageKindOutboxAck classifies an IpcMessageOutboxAck (the
+	// reliable-sync reverse-channel ack/resume-cursor frame, #lzsync).
+	LazilyFfiMessageKindOutboxAck LazilyFfiMessageKind = 5
 )
 
 // LazilyFfiMessageKindFromCode decodes the integer discriminant, returning
@@ -91,7 +97,8 @@ const (
 // zero-default).
 func LazilyFfiMessageKindFromCode(code int) LazilyFfiMessageKind {
 	switch LazilyFfiMessageKind(code) {
-	case LazilyFfiMessageKindSnapshot, LazilyFfiMessageKindDelta, LazilyFfiMessageKindCrdtSync:
+	case LazilyFfiMessageKindSnapshot, LazilyFfiMessageKindDelta, LazilyFfiMessageKindCrdtSync,
+		LazilyFfiMessageKindResyncRequest, LazilyFfiMessageKindOutboxAck:
 		return LazilyFfiMessageKind(code)
 	default:
 		return LazilyFfiMessageKindUnknown
@@ -218,6 +225,10 @@ func ipcMessageKind(message IpcMessage) LazilyFfiMessageKind {
 		return LazilyFfiMessageKindDelta
 	case IpcMessageCrdtSync:
 		return LazilyFfiMessageKindCrdtSync
+	case IpcMessageResyncRequest:
+		return LazilyFfiMessageKindResyncRequest
+	case IpcMessageOutboxAck:
+		return LazilyFfiMessageKindOutboxAck
 	default:
 		return LazilyFfiMessageKindUnknown
 	}

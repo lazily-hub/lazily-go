@@ -6,6 +6,24 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.8.0
+
+### Added
+
+- **Reliable Sync (`#lzsync` + `#sync-driver`).** The delivery-reliability layer
+  over the `Snapshot`/`Delta`/`CrdtSync` planes (lazily-spec § Reliable Sync), at
+  parity with the `lazily-rs`/`lazily-kt`/`lazily-js` references:
+  - `ResyncCoordinator` — receiver-side `Apply`/`RequestSnapshot`/`Ignore`
+    decision function, multi-epoch-span aware, single-request-per-gap suppression.
+  - `DurableOutbox` interface + `InMemoryOutbox` — append-before-send,
+    `AckThrough` retention, `ReplayFrom` cursor (at-least-once → exactly-once).
+  - `OrSet` (add-wins) + `WireLwwRegister[V]` liveness cells on the CrdtSync plane.
+  - `SyncDriver` + `IpcSink`/`IpcSource`/`Clock`/`SnapshotProvider` seams — the
+    full-duplex drain → retain-on-fail → receive/route → advertise-ack loop.
+  - `ResyncRequest` / `OutboxAck` `IpcMessage` control frames (FFI kinds 4/5).
+  Replays the 5 `conformance/reliable-sync/` fixtures + SyncDriver loop-shape
+  tests (16 new; 279 total, `-race` clean). Go is now ✅ on both coverage rows.
+
 ## 0.7.0
 
 ### Changed
