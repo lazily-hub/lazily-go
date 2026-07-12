@@ -1,10 +1,15 @@
 package lazily
 
-// ReactiveFamily materialization-mode conformance (#lzmatmode) — replays the
-// shared lazily-spec/conformance/materialization/*.json fixtures and mirrors the
-// lazily-rs materialization_conformance.rs + reactive_family.rs test suites.
-// Each test names the law it exercises (proven in lazily-formal's Materialization
-// module).
+// ReactiveMap materialization conformance (#reactivemap) — replays the shared
+// lazily-spec/conformance/materialization/*.json fixtures (model "SlotMap") and
+// mirrors the lazily-rs materialization_conformance.rs + cell_family.rs test
+// suites. Each test names the law it exercises (proven in lazily-formal's
+// Materialization module).
+//
+// The unified model: SlotMap over derived slots — eager materialization is a
+// pre-mint loop (MaterializeAll); lazy is mint-on-access (GetOrInsertWith). There
+// is no eager/lazy mode flag. CellMap over input cells always materializes an
+// entry on mint (Entry / Set).
 
 import (
 	"encoding/json"
@@ -24,7 +29,8 @@ type matEntry struct {
 }
 
 type matFixture struct {
-	Spec struct {
+	Model string `json:"model"`
+	Spec  struct {
 		Val     map[string]int      `json:"val"`
 		Entries map[string]matEntry `json:"entries"`
 	} `json:"spec"`
@@ -91,20 +97,25 @@ func matSortedKeys(m map[string]int) []string {
 // ---------------------------------------------------------------------------
 
 // observe_canonical / eager_lazy_observationally_equivalent / default_mode_eager:
-// a keyed family of derived cells built eager vs lazy returns identical values;
-// eager materializes every key up front, lazy only the read keys.
+// a keyed SlotMap of derived slots built eager (MaterializeAll pre-mint) vs lazy
+// (GetOrInsertWith mint-on-access) returns identical values; eager materializes
+// every key up front, lazy only the read keys.
 func TestMaterializationObservationalTransparency(t *testing.T) {
 	f := loadMatFixture(t, "observational_transparency.json")
-	if f.Expected.DefaultMode != "eager" || DefaultMaterializationMode() != Eager {
-		t.Fatalf("default mode must be eager (fixture=%q lib=%v)", f.Expected.DefaultMode, DefaultMaterializationMode())
+	if f.Expected.DefaultMode != "eager" {
+		t.Fatalf("default strategy must be eager (fixture=%q)", f.Expected.DefaultMode)
+	}
+	if f.Model != "SlotMap" {
+		t.Fatalf("fixture model = %q, want SlotMap", f.Model)
 	}
 	keys := matSortedKeys(f.Spec.Val)
 	factory := func(k string) int { return f.Spec.Val[k] }
 
 	ctx := NewContext()
-	eager := EagerSlotFamily(ctx, keys, factory)
-	if eager.Mode() != Eager || eager.EntryKind() != EntryKindSlot {
-		t.Fatalf("eager slot family mis-tagged: mode=%v kind=%v", eager.Mode(), eager.EntryKind())
+	eager := NewSlotMap[string, int](ctx)
+	eager.MaterializeAll(keys, factory)
+	if eager.EntryKind() != EntryKindSlot {
+		t.Fatalf("slot map mis-tagged: kind=%v", eager.EntryKind())
 	}
 	if eager.PresentCount() != len(keys) {
 		t.Fatalf("eager present count %d != %d (eager_materializes_all)", eager.PresentCount(), len(keys))
@@ -112,26 +123,26 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 	assertSameSet(t, eager.PresentKeys(), f.Expected.EagerPresent, "eager_present")
 
 	// Lazy defers every derived slot: nothing present at build.
-	lazy := LazySlotFamily(ctx, keys, factory)
+	lazy := NewSlotMap[string, int](ctx)
 	if lazy.PresentCount() != 0 {
 		t.Fatalf("lazy present count %d != 0 (lazy_defers_slots)", lazy.PresentCount())
 	}
 
-	// Identical observed values under either mode.
+	// Identical observed values under either strategy.
 	for k, want := range f.Expected.Observe {
-		if got := eager.Observe(k); got != want {
+		if got, _ := eager.Observe(k); got != want {
 			t.Fatalf("eager.Observe(%q)=%d want %d", k, got, want)
 		}
-		if got := lazy.Observe(k); got != want {
-			t.Fatalf("lazy.Observe(%q)=%d want %d", k, got, want)
+		if got := lazy.GetOrInsertWith(k, factory); got != want {
+			t.Fatalf("lazy.GetOrInsertWith(%q)=%d want %d", k, got, want)
 		}
 	}
 
-	// Replay the read sequence on a FRESH lazy family; the present set is
-	// exactly the read keys.
-	fresh := LazySlotFamily(ctx, keys, factory)
+	// Replay the read sequence on a FRESH lazy map; the present set is exactly
+	// the read keys.
+	fresh := NewSlotMap[string, int](ctx)
 	for _, k := range f.Reads {
-		fresh.Observe(k)
+		fresh.GetOrInsertWith(k, factory)
 	}
 	assertSameSet(t, fresh.PresentKeys(), f.Expected.LazyPresentAfterReads, "lazy_present_after_reads")
 }
@@ -140,15 +151,14 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 // grows and is unchanged by a re-read; the lazy present set is a subset of eager.
 func TestMaterializationDeferralNotDeallocation(t *testing.T) {
 	f := loadMatFixture(t, "deferral_not_deallocation.json")
-	keys := matSortedKeys(f.Spec.Val)
 	factory := func(k string) int { return f.Spec.Val[k] }
 
 	ctx := NewContext()
-	lazy := LazySlotFamily(ctx, keys, factory)
+	lazy := NewSlotMap[string, int](ctx)
 
 	var sizes []int
 	for _, k := range f.Reads {
-		lazy.Observe(k)
+		lazy.GetOrInsertWith(k, factory)
 		sizes = append(sizes, lazy.PresentCount())
 	}
 	if len(sizes) != len(f.Expected.PresentAfterEachRead) {
@@ -171,12 +181,12 @@ func TestMaterializationDeferralNotDeallocation(t *testing.T) {
 }
 
 // cell_entries_materialized_in_every_mode / slot_entries_deferred_under_lazy:
-// entry kind is orthogonal to mode. A mixed-kind key space is modelled by a cell
-// family over the cell entries and a slot family over the slot entries.
-func TestMaterializationEntryKindOrthogonalToMode(t *testing.T) {
+// entry kind is orthogonal to strategy. A mixed-kind key space is modelled by a
+// CellMap over the cell entries and a SlotMap over the slot entries.
+func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	f := loadMatFixture(t, "entry_kind_orthogonal_to_mode.json")
 	if f.Expected.DefaultMode != "eager" {
-		t.Fatalf("default mode must be eager, got %q", f.Expected.DefaultMode)
+		t.Fatalf("default strategy must be eager, got %q", f.Expected.DefaultMode)
 	}
 
 	var cellKeys, slotKeys []string
@@ -196,18 +206,25 @@ func TestMaterializationEntryKindOrthogonalToMode(t *testing.T) {
 
 	ctx := NewContext()
 
-	// Eager build: every entry present (cells + slots).
-	eagerCells := EagerCellFamily(ctx, cellKeys, factory)
-	eagerSlots := EagerSlotFamily(ctx, slotKeys, factory)
+	// Eager build: cells pre-minted (always materialized) + slots pre-minted.
+	eagerCells := NewCellMap[string, int](ctx)
+	for _, k := range cellKeys {
+		eagerCells.Entry(k, vals[k])
+	}
+	eagerSlots := NewSlotMap[string, int](ctx)
+	eagerSlots.MaterializeAll(slotKeys, factory)
 	if eagerCells.EntryKind() != EntryKindCell || eagerSlots.EntryKind() != EntryKindSlot {
 		t.Fatalf("entry kinds mis-tagged")
 	}
 	eagerPresent := append(eagerCells.PresentKeys(), eagerSlots.PresentKeys()...)
 	assertSameSet(t, eagerPresent, f.Expected.EagerPresent, "eager_present")
 
-	// Lazy build: cells present at build, slots deferred.
-	lazyCells := LazyCellFamily(ctx, cellKeys, factory)
-	lazySlots := LazySlotFamily(ctx, slotKeys, factory)
+	// Lazy build: cells present at build (always materialized), slots deferred.
+	lazyCells := NewCellMap[string, int](ctx)
+	for _, k := range cellKeys {
+		lazyCells.Entry(k, vals[k])
+	}
+	lazySlots := NewSlotMap[string, int](ctx)
 	if lazySlots.PresentCount() != 0 {
 		t.Fatalf("slots must defer at build, present=%d", lazySlots.PresentCount())
 	}
@@ -217,9 +234,9 @@ func TestMaterializationEntryKindOrthogonalToMode(t *testing.T) {
 	slotSet := strSet(slotKeys)
 	for _, k := range f.Reads {
 		if _, ok := slotSet[k]; ok {
-			lazySlots.Observe(k)
+			lazySlots.GetOrInsertWith(k, factory)
 		} else {
-			lazyCells.Observe(k)
+			lazyCells.Entry(k, vals[k])
 		}
 	}
 	lazyAfter := append(lazyCells.PresentKeys(), lazySlots.PresentKeys()...)
@@ -229,69 +246,68 @@ func TestMaterializationEntryKindOrthogonalToMode(t *testing.T) {
 	cellSet := strSet(cellKeys)
 	for k, want := range f.Expected.Observe {
 		if _, isCell := cellSet[k]; isCell {
-			if got := eagerCells.Observe(k); got != want {
-				t.Fatalf("eagerCells.Observe(%q)=%d want %d", k, got, want)
+			if got, _ := eagerCells.Read(k); got != want {
+				t.Fatalf("eagerCells.Read(%q)=%d want %d", k, got, want)
 			}
-			if got := lazyCells.Observe(k); got != want {
-				t.Fatalf("lazyCells.Observe(%q)=%d want %d", k, got, want)
+			if got, _ := lazyCells.Read(k); got != want {
+				t.Fatalf("lazyCells.Read(%q)=%d want %d", k, got, want)
 			}
 		} else {
-			if got := eagerSlots.Observe(k); got != want {
+			if got, _ := eagerSlots.Observe(k); got != want {
 				t.Fatalf("eagerSlots.Observe(%q)=%d want %d", k, got, want)
 			}
-			if got := lazySlots.Observe(k); got != want {
-				t.Fatalf("lazySlots.Observe(%q)=%d want %d", k, got, want)
+			if got := lazySlots.GetOrInsertWith(k, factory); got != want {
+				t.Fatalf("lazySlots.GetOrInsertWith(%q)=%d want %d", k, got, want)
 			}
 		}
 	}
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests mirroring lazily-rs/src/reactive_family.rs
+// Unit tests mirroring lazily-rs/src/cell_family.rs
 // ---------------------------------------------------------------------------
 
-func TestReactiveFamilyDefaultModeIsEager(t *testing.T) {
-	var zero MaterializationMode
-	if zero != Eager || DefaultMaterializationMode() != Eager {
-		t.Fatalf("default materialization mode must be eager")
-	}
-}
-
-func TestReactiveFamilyEagerMaterializesAll(t *testing.T) {
+func TestSlotMapEagerMaterializesAll(t *testing.T) {
 	ctx := NewContext()
-	fam := EagerSlotFamily(ctx, []int{0, 1, 2, 5, 9}, func(k int) int { return k * 3 })
-	if fam.PresentCount() != 5 {
-		t.Fatalf("eager present count %d != 5", fam.PresentCount())
+	m := NewSlotMap[int, int](ctx)
+	m.MaterializeAll([]int{0, 1, 2, 5, 9}, func(k int) int { return k * 3 })
+	if m.PresentCount() != 5 {
+		t.Fatalf("eager present count %d != 5", m.PresentCount())
 	}
 	for _, k := range []int{0, 1, 2, 5, 9} {
-		if !fam.IsPresent(k) {
-			t.Fatalf("key %d not present under eager", k)
+		if !m.IsPresent(k) {
+			t.Fatalf("key %d not present after MaterializeAll", k)
 		}
 	}
 }
 
-func TestReactiveFamilyLazyDefersSlots(t *testing.T) {
+func TestSlotMapLazyDefersThenMintsOnAccess(t *testing.T) {
 	ctx := NewContext()
-	fam := LazySlotFamily(ctx, []int{0, 1, 2, 5, 9}, func(k int) int { return k * 3 })
-	if fam.PresentCount() != 0 || fam.IsPresent(5) {
-		t.Fatalf("lazy must defer slots; present=%d", fam.PresentCount())
+	m := NewSlotMap[int, int](ctx)
+	if m.PresentCount() != 0 || m.IsPresent(5) {
+		t.Fatalf("lazy must defer slots; present=%d", m.PresentCount())
 	}
-	if got := fam.Observe(5); got != 15 {
-		t.Fatalf("Observe(5)=%d want 15", got)
+	if got := m.GetOrInsertWith(5, func(k int) int { return k * 3 }); got != 15 {
+		t.Fatalf("GetOrInsertWith(5)=%d want 15", got)
 	}
-	if !fam.IsPresent(5) {
-		t.Fatalf("key 5 must be present after read")
+	if !m.IsPresent(5) {
+		t.Fatalf("key 5 must be present after mint-on-access")
 	}
-	assertSameSet(t, keysToStr(fam.PresentKeys()), []string{"5"}, "present after single read")
+	// Same key -> same slot; factory not re-run.
+	if got := m.GetOrInsertWith(5, func(k int) int { return k * 999 }); got != 15 {
+		t.Fatalf("GetOrInsertWith(5) re-run=%d want cached 15", got)
+	}
+	assertSameSet(t, keysToStr(m.PresentKeys()), []string{"5"}, "present after single read")
 }
 
-func TestReactiveFamilyPresentSetMonotone(t *testing.T) {
+func TestSlotMapPresentSetMonotone(t *testing.T) {
 	ctx := NewContext()
-	fam := LazySlotFamily(ctx, []int{1, 2, 3, 4, 5}, func(k int) int { return k * 2 })
+	m := NewSlotMap[int, int](ctx)
+	factory := func(k int) int { return k * 2 }
 	var sizes []int
 	for _, k := range []int{2, 4, 2, 5} {
-		fam.Observe(k)
-		sizes = append(sizes, fam.PresentCount())
+		m.GetOrInsertWith(k, factory)
+		sizes = append(sizes, m.PresentCount())
 	}
 	want := []int{1, 2, 2, 3}
 	for i := range want {
@@ -301,45 +317,36 @@ func TestReactiveFamilyPresentSetMonotone(t *testing.T) {
 	}
 }
 
-func TestReactiveFamilyCellMaterializedInEveryMode(t *testing.T) {
+func TestCellMapEntryCachesOneCellPerKey(t *testing.T) {
 	ctx := NewContext()
-	keys := []string{"a", "b", "c"}
-	for _, lazyMode := range []bool{false, true} {
-		var fam *ReactiveFamily[string, int]
-		if lazyMode {
-			fam = LazyCellFamily(ctx, keys, func(string) int { return 0 })
-		} else {
-			fam = EagerCellFamily(ctx, keys, func(string) int { return 0 })
-		}
-		if fam.EntryKind() != EntryKindCell {
-			t.Fatalf("expected cell entry kind")
-		}
-		if fam.PresentCount() != 3 {
-			t.Fatalf("cells must be present at build in every mode; present=%d (lazy=%v)", fam.PresentCount(), lazyMode)
-		}
+	m := NewCellMap[string, int](ctx)
+	a1 := m.Entry("a", 1)
+	a2 := m.Entry("a", 999)
+	// Same key -> same cell; the second default is ignored.
+	if a1 != a2 {
+		t.Fatalf("Entry must cache one cell per key")
+	}
+	if a1.Get() != 1 {
+		t.Fatalf("Entry(a)=%d want 1", a1.Get())
+	}
+	if m.LenUntracked() != 1 {
+		t.Fatalf("len untracked %d want 1", m.LenUntracked())
 	}
 }
 
-func TestReactiveFamilyCellEntriesAreWritableInputs(t *testing.T) {
+func TestCellMapSetIsCellOnly(t *testing.T) {
 	ctx := NewContext()
-	fam := EagerCellFamily(ctx, []int{7}, func(k int) int { return k })
-	cell, ok := fam.GetCell(7)
-	if !ok || cell.Get() != 7 {
-		t.Fatalf("GetCell(7) ok=%v val=%d want 7", ok, cell.Get())
+	m := NewCellMap[int, int](ctx)
+	m.Set(7, 42)
+	if got, ok := m.Read(7); !ok || got != 42 {
+		t.Fatalf("Read(7)=(%d,%v) want (42,true)", got, ok)
 	}
-	if !fam.Set(7, 100) {
-		t.Fatalf("Set on a cell family must succeed")
+	m.Set(7, 100)
+	if got, _ := m.Read(7); got != 100 {
+		t.Fatalf("Read(7)=%d want 100 after Set", got)
 	}
-	if got := fam.Observe(7); got != 100 {
-		t.Fatalf("Observe(7)=%d want 100 after Set", got)
-	}
-	// A slot family rejects Set / GetCell.
-	slotFam := EagerSlotFamily(ctx, []int{1}, func(k int) int { return k })
-	if _, ok := slotFam.GetCell(1); ok {
-		t.Fatalf("GetCell must fail on a slot family")
-	}
-	if slotFam.Set(1, 2) {
-		t.Fatalf("Set must fail on a slot family")
+	if m.EntryKind() != EntryKindCell {
+		t.Fatalf("CellMap kind = %v, want cell", m.EntryKind())
 	}
 }
 

@@ -1,5 +1,5 @@
-// Keyed cell collections — CellMap, CellTree, CellFamily, and keyed
-// reconciliation (cell-model.md § Keyed cell collections).
+// Keyed cell collections — CellMap, CellTree, and keyed reconciliation
+// (cell-model.md § Keyed cell collections).
 //
 // A keyed cell collection is a *composition of cells*, not a new cell kind. It
 // maps keys K to per-entry Cells and adds dedicated membership and order
@@ -24,59 +24,40 @@
 // re-mints the entry's *Cell, so the same pointer (and its dependents) survive.
 package lazily
 
-// CellMap is a keyed collection of reactive cells with independent value /
-// membership / order reactivity (cell-model.md § Keyed cell collections).
+// CellMap is the input-cell specialization of ReactiveMap: a keyed collection
+// of reactive cells with independent value / membership / order reactivity
+// (cell-model.md § Keyed cell collections).
 //
-// Each entry is an ordinary Cell[V]; the collection adds no new merge unit. A
-// dedicated membership cell tracks the set of keys and a dedicated order cell
-// tracks the ordered key list. Reads subscribe through those cells so the three
-// planes stay independent:
+// Each entry is an ordinary Cell[V]; the collection adds no new merge unit. The
+// shared reactive-membership / order / move / remove surface is inherited from
+// the embedded ReactiveMap; CellMap adds the cell-only Set and eager
+// value-minting (Entry / EntryWith), plus the Go-specific Insert / Reconcile
+// keyed-reconciliation helpers.
 //
 //   - Keys subscribes only to the order signal;
 //   - Len / ContainsKey subscribe only to the membership signal;
 //   - a value read subscribes only to that entry's cell.
 //
-// An atomic move (MoveTo / MoveBefore / MoveAfter) bumps only the order signal
-// once and keeps the moved entry's same Cell handle, dependents, and lineage —
-// it is not a remove + re-mint.
+// An atomic move (MoveTo / MoveBefore / MoveAfter, inherited) bumps only the
+// order signal once and keeps the moved entry's same Cell handle, dependents,
+// and lineage — it is not a remove + re-mint.
 type CellMap[K comparable, V comparable] struct {
-	ctx     *Context
-	entries map[K]*Cell[V]
-	order   []K
-
-	// membership is bumped only when the set of keys changes (add/remove).
-	membership *Cell[int]
-	// orderSignal is bumped on add/remove and on move/reorder.
-	orderSignal *Cell[int]
-
-	membershipVersion int
-	orderVersion      int
+	*ReactiveMap[K, V, *Cell[V]]
 }
 
 // NewCellMap creates an empty keyed cell collection bound to ctx.
 func NewCellMap[K comparable, V comparable](ctx *Context) *CellMap[K, V] {
-	return &CellMap[K, V]{
-		ctx:         ctx,
-		entries:     map[K]*Cell[V]{},
-		order:       nil,
-		membership:  NewCell[int](ctx, 0),
-		orderSignal: NewCell[int](ctx, 0),
-	}
-}
-
-// bumpOrder bumps only the order signal (invalidates Keys readers). A pure move
-// bumps only this.
-func (m *CellMap[K, V]) bumpOrder() {
-	m.orderVersion++
-	m.orderSignal.Set(m.orderVersion)
-}
-
-// bumpMembership bumps set-membership (invalidates Len / ContainsKey readers),
-// then the order signal too (the key set changed, so the ordered list did too).
-func (m *CellMap[K, V]) bumpMembership() {
-	m.membershipVersion++
-	m.membership.Set(m.membershipVersion)
-	m.bumpOrder()
+	rm := newReactiveMap[K, V, *Cell[V]](
+		ctx,
+		EntryKindCell,
+		func(ctx *Context, compute func() V) *Cell[V] { return NewCell(ctx, compute()) },
+		func(h *Cell[V]) V { return h.Get() },
+		// Invalidate the orphaned cell's dependents on remove (mirrors lazily-rs
+		// CellHandle::clear_dependents): any reader that read this entry is
+		// notified that its source is gone.
+		func(h *Cell[V]) { h.Invalidate() },
+	)
+	return &CellMap[K, V]{ReactiveMap: rm}
 }
 
 // EntryWith returns the value cell for key, minting it with defaultValue() on
@@ -86,11 +67,7 @@ func (m *CellMap[K, V]) EntryWith(key K, defaultValue func() V) *Cell[V] {
 	if existing, ok := m.entries[key]; ok {
 		return existing
 	}
-	handle := NewCell[V](m.ctx, defaultValue())
-	m.entries[key] = handle
-	m.order = append(m.order, key)
-	m.bumpMembership()
-	return handle
+	return m.mintWith(key, defaultValue)
 }
 
 // Entry returns the value cell for key, minting it with defaultValue on first
@@ -127,133 +104,14 @@ func (m *CellMap[K, V]) Read(key K) (V, bool) {
 // Set assigns the value at key, inserting a new entry (and bumping membership)
 // if it does not exist yet. Updating an existing entry leaves membership
 // untouched and invalidates only that entry's dependents.
+//
+// Cell-only: an input is settable; a derived SlotMap slot is not.
 func (m *CellMap[K, V]) Set(key K, value V) {
 	if handle, ok := m.entries[key]; ok {
 		handle.Set(value)
 		return
 	}
-	m.EntryWith(key, func() V { return value })
-}
-
-// Remove removes key's entry. Bumps reactive membership and clears the removed
-// entry's dependents. Returns whether the key was present.
-//
-// The orphaned Cell stops driving any dependents; the runtime exposes no
-// node-recycle yet (mirrors lazily-rs).
-func (m *CellMap[K, V]) Remove(key K) bool {
-	handle, ok := m.entries[key]
-	if !ok {
-		return false
-	}
-	delete(m.entries, key)
-	m.removeFromOrder(key)
-	// Invalidate the orphaned cell's dependents (mirrors lazily-rs
-	// CellHandle::clear_dependents): any reader that read this entry is notified
-	// that its source is gone.
-	handle.Invalidate()
-	m.bumpMembership()
-	return true
-}
-
-func (m *CellMap[K, V]) removeFromOrder(key K) {
-	for i, k := range m.order {
-		if k == key {
-			m.order = append(m.order[:i], m.order[i+1:]...)
-			return
-		}
-	}
-}
-
-// Keys returns a reactive snapshot of the keys in their current order.
-// Subscribes the caller to order changes (add/remove and move/reorder), not to
-// per-entry value changes.
-func (m *CellMap[K, V]) Keys() []K {
-	// Subscribe to the order signal.
-	m.orderSignal.Get()
-	out := make([]K, len(m.order))
-	copy(out, m.order)
-	return out
-}
-
-// Position reports the current 0-based position of key in the order, or false
-// if absent. Non-reactive.
-func (m *CellMap[K, V]) Position(key K) (int, bool) {
-	for i, k := range m.order {
-		if k == key {
-			return i, true
-		}
-	}
-	return 0, false
-}
-
-// MoveTo atomically moves key to index in the order (#lzcellmove).
-//
-// This is the atomic, optimized reorder: the entry keeps the same value cell,
-// the same dependents, and its CRDT lineage — unlike the naive Remove + Entry
-// which re-mints the cell and bumps membership twice. Only the order signal is
-// bumped (once), so Keys readers recompute but Len / ContainsKey readers stay
-// cached.
-//
-// index is clamped to [0, len). A no-op move (already at position) bumps
-// nothing. Returns whether key was present.
-func (m *CellMap[K, V]) MoveTo(key K, index int) bool {
-	from, ok := m.Position(key)
-	if !ok {
-		return false
-	}
-	to := index
-	if to < 0 {
-		to = 0
-	}
-	if hi := len(m.order) - 1; to > hi {
-		to = hi
-	}
-	if from == to {
-		return true
-	}
-	m.order = append(m.order[:from], m.order[from+1:]...)
-	// Re-insert at `to`.
-	m.order = append(m.order, key) // grow
-	copy(m.order[to+1:], m.order[to:])
-	m.order[to] = key
-	m.bumpOrder()
-	return true
-}
-
-// MoveBefore atomically moves key to just before anchor (#lzcellmove). Returns
-// whether the move could be expressed.
-func (m *CellMap[K, V]) MoveBefore(key, anchor K) bool {
-	anchorIdx, ok := m.Position(anchor)
-	if !ok {
-		return false
-	}
-	from, ok := m.Position(key)
-	if !ok {
-		return false
-	}
-	// Removing key first shifts anchor left by one when key precedes it.
-	target := anchorIdx
-	if from < anchorIdx {
-		target = anchorIdx - 1
-	}
-	return m.MoveTo(key, target)
-}
-
-// MoveAfter atomically moves key to just after anchor (#lzcellmove).
-func (m *CellMap[K, V]) MoveAfter(key, anchor K) bool {
-	anchorIdx, ok := m.Position(anchor)
-	if !ok {
-		return false
-	}
-	from, ok := m.Position(key)
-	if !ok {
-		return false
-	}
-	target := anchorIdx + 1
-	if from <= anchorIdx {
-		target = anchorIdx
-	}
-	return m.MoveTo(key, target)
+	m.mintWith(key, func() V { return value })
 }
 
 // Insert inserts key with value at the position specified by at (relative to
@@ -281,28 +139,8 @@ func (m *CellMap[K, V]) Insert(key K, value V, at InsertAt, anchor K) bool {
 	return true
 }
 
-// Len reports the reactive entry count. Subscribes the caller to membership
-// changes only.
-func (m *CellMap[K, V]) Len() int {
-	m.membership.Get()
-	return len(m.order)
-}
-
-// IsEmpty reports the reactive emptiness check. Subscribes the caller to
-// membership changes.
-func (m *CellMap[K, V]) IsEmpty() bool { return m.Len() == 0 }
-
-// ContainsKey reports the reactive membership test for key. Subscribes the
-// caller to membership changes (add/remove of any key), not to value changes.
-func (m *CellMap[K, V]) ContainsKey(key K) bool {
-	m.membership.Get()
-	_, ok := m.entries[key]
-	return ok
-}
-
-// LenUntracked reports the non-reactive count. Does not subscribe the caller to
-// anything.
-func (m *CellMap[K, V]) LenUntracked() int { return len(m.order) }
+// Len, IsEmpty, ContainsKey, LenUntracked, Keys, Remove, Position, and the
+// atomic Move* operations are inherited from the embedded ReactiveMap.
 
 // Reconcile reconciles to targetOrder + targetValues: compute the minimal diff
 // and apply it per-cell. Stable entries (unchanged value, in the LIS) keep
@@ -590,37 +428,3 @@ func (t *CellTree[K, V]) ChildCount() int { return t.Children.Len() }
 
 // HasChild reports the reactive membership test for a child of this node.
 func (t *CellTree[K, V]) HasChild(id K) bool { return t.Children.ContainsKey(id) }
-
-// CellFamily is a parameterized factory of reactive cells, keyed by K (à la
-// Recoil/Jotai atomFamily). The factory lazily mints and caches one Cell per
-// distinct key; repeated Gets of the same key return the same cell. Built on top
-// of CellMap, so membership is reactive and entries are fine-grained.
-type CellFamily[K comparable, V comparable] struct {
-	ctx     *Context
-	m       *CellMap[K, V]
-	factory func(K) V
-}
-
-// NewCellFamily creates a cell family bound to ctx with the given per-key
-// factory.
-func NewCellFamily[K comparable, V comparable](ctx *Context, factory func(K) V) *CellFamily[K, V] {
-	return &CellFamily[K, V]{
-		ctx:     ctx,
-		m:       NewCellMap[K, V](ctx),
-		factory: factory,
-	}
-}
-
-// Get returns (minting on first access via the factory) the cell for key.
-func (f *CellFamily[K, V]) Get(key K) *Cell[V] {
-	if existing := f.m.Cell(key); existing != nil {
-		return existing
-	}
-	return f.m.EntryWith(key, func() V { return f.factory(key) })
-}
-
-// Map returns the underlying CellMap for membership/iteration APIs.
-func (f *CellFamily[K, V]) Map() *CellMap[K, V] { return f.m }
-
-// Remove removes key from the family (see CellMap.Remove).
-func (f *CellFamily[K, V]) Remove(key K) bool { return f.m.Remove(key) }

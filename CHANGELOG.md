@@ -6,6 +6,29 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.7.0
+
+### Changed
+
+- **Keyed-collection unification (`#reactivemap`).** Unified all keyed reactive
+  collections on a single generic primitive `ReactiveMap[K, V, H]` (reactive
+  membership + order, `GetOrInsertWith` mint-on-access, `Remove`, `Move*`) over
+  the entry handle kind `H` (`*Cell[V]` input cells / `*Slot[V]` derived slots),
+  mirroring lazily-rs `cell_family.rs`. Two thin specializations embed it with
+  the handle fixed: `CellMap[K, V]` (input cells — adds the cell-only `Set` and
+  eager value-minting `Entry`/`EntryWith`) and `SlotMap[K, V]` (derived slots —
+  `GetOrInsertWith` lazy mint-on-access + `MaterializeAll` eager pre-mint; no
+  `Set`). The `Send + Sync` (`ThreadSafeCellMap`/`ThreadSafeSlotMap`) and async
+  (`AsyncCellMap`/`AsyncSlotMap`) flavors follow the same shape.
+- **Removed the materialization-mode machinery.** Deleted `ReactiveFamily`,
+  `ThreadSafeReactiveFamily`, `AsyncReactiveFamily`, `CellFamily`, the
+  `MaterializationMode` enum (`Eager`/`Lazy`/`DefaultMaterializationMode`), and
+  all `*Family` constructors. There is no longer an eager/lazy mode flag: eager
+  is a pre-mint loop (`MaterializeAll`), lazy is mint-on-access
+  (`GetOrInsertWith`). Behavior is unchanged; the shared
+  `conformance/materialization/*.json` fixtures (now `"model": "SlotMap"`) still
+  pass.
+
 ## 0.6.0
 
 ### Added

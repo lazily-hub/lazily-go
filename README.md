@@ -155,40 +155,43 @@ version frontier), registers (`MvRegister`, `PnCounter`, `CellCrdt`), and the
 distributed CRDT plane (`CrdtPlane`, `CrdtPlaneRuntime`) with anti-entropy and
 WebRTC transport + signaling.
 
-## Reactive family & materialization mode
+## Keyed reactive maps
 
-`ReactiveFamily[K, V]` is the unified keyed reactive family (`#lzmatmode`): keys
-map to per-entry reactive nodes, allocated per a **materialization mode**.
-Materialization mode is an axis **orthogonal** to cell kind — it fixes *when* a
-derived node is allocated, never what it computes, and is **never observable on
-the value axis**.
+`ReactiveMap[K, V, H]` is the unified keyed reactive collection (`#reactivemap`):
+keys map to independently-tracked per-entry reactive nodes over a handle kind `H`
+(`*Cell[V]` input cells or `*Slot[V]` derived slots), with **reactive membership
+and order**. Go generics can't add methods to a type alias, so its two
+specializations are thin distinct structs embedding `*ReactiveMap` with the
+handle kind fixed:
 
-- **Entry kind** — a family is input **cells** (`EntryKindCell`, `*Cell[V]` —
-  always materialized, writable via `Set`) or derived **slots**
-  (`EntryKindSlot`, `*Slot[V]` — what materialization mode governs).
-- **Eager (default).** `EagerSlotFamily` allocates every declared node up front:
-  a read is a direct node access.
-- **Lazy (opt-in).** `LazySlotFamily` defers each derived node to its first read
-  ("materialize on pull"); a never-read node is never allocated. The present set
-  only *grows* (deferral, not de-allocation).
+- **`CellMap[K, V]`** — input-cell entries. Adds the cell-only `Set` and eager
+  value-minting (`Entry` / `EntryWith`). Every entry is a writable `*Cell[V]`.
+- **`SlotMap[K, V]`** — derived-slot entries. `GetOrInsertWith` mints a slot on
+  first access (**lazy materialization**); `MaterializeAll` pre-mints the keyset
+  (**eager**). A slot's value is derived, so `SlotMap` has **no `Set`**. There is
+  **no eager/lazy mode flag** — eager is a pre-mint loop, lazy is mint-on-access.
+
+The shared surface — `GetOrInsertWith` / `Remove` / `Move*` / `Keys` / `Len` /
+`ContainsKey` / membership + order signals — lives on the generic `ReactiveMap`.
 
 ```go
 ctx := lazily.NewContext()
-// Lazy family over a large keyed space; only read keys are allocated.
-sheet := lazily.LazySlotFamily(ctx, keys, func(k Key) int { return recompute(k) })
-sheet.Observe(k)      // materializes k on first pull, caches it
-sheet.PresentCount()  // grows only with reads
+// Lazy derived-slot map over a large keyed space; only read keys are allocated.
+sheet := lazily.NewSlotMap[Key, int](ctx)
+sheet.GetOrInsertWith(k, func(k Key) int { return recompute(k) }) // mint on first pull
+sheet.PresentCount()                                              // grows only with reads
 ```
 
-Eager and lazy return **identical values** for every key (observational
-transparency); mode changes allocation timing and memory, never results. The
-laws — `observe_canonical`, `eager_lazy_observationally_equivalent`,
+Eager (`MaterializeAll` pre-mint) and lazy (`GetOrInsertWith` mint-on-access)
+return **identical values** for every key (observational transparency); the
+strategy changes allocation timing and memory, never results. The laws —
+`observe_canonical`, `eager_lazy_observationally_equivalent`,
 `materialize_present_monotone` / `lazy_present_subset_eager`, and entry-kind
 orthogonality (`cell_entries_materialized_in_every_mode` /
 `slot_entries_deferred_under_lazy`) — are proven in [`lazily-formal`][formal]'s
-`Materialization` module and pinned by the
-`conformance/materialization/*.json` fixtures. The existing `CellFamily`
-(Collections above) is the input-cell collection specialization.
+`Materialization` module and pinned by the `conformance/materialization/*.json`
+fixtures. The `Send + Sync` (`ThreadSafeCellMap` / `ThreadSafeSlotMap`) and async
+(`AsyncCellMap` / `AsyncSlotMap`) flavors mirror the same surface.
 
 ## lazily-spec IPC
 
