@@ -493,3 +493,249 @@ func (q *QueueCell[T, S]) ReaderHandles() QueueReaderHandles[T] {
 		IsClosed: q.closed,
 	}
 }
+
+// TopicDurability controls whether a subscription survives disconnect and
+// participates in the retained-log GC frontier.
+type TopicDurability string
+
+const (
+	TopicDurable   TopicDurability = "durable"
+	TopicEphemeral TopicDurability = "ephemeral"
+)
+
+// TopicSubscribeOutcome describes whether Subscribe minted or resumed a cursor.
+type TopicSubscribeOutcome string
+
+const (
+	TopicSubscribed        TopicSubscribeOutcome = "subscribed"
+	TopicReconnected       TopicSubscribeOutcome = "reconnected"
+	TopicAlreadySubscribed TopicSubscribeOutcome = "already_subscribed"
+)
+
+// TopicSubscriptionSnapshot is the persistent state for one stable subscriber.
+type TopicSubscriptionSnapshot struct {
+	ID         string
+	Cursor     int
+	Durability TopicDurability
+	Connected  bool
+}
+
+// TopicSnapshot is a portable TopicCell retained-log snapshot.
+type TopicSnapshot[T any] struct {
+	BaseOffset    int
+	Elements      []T
+	Subscriptions []TopicSubscriptionSnapshot
+}
+
+type topicSubscription struct {
+	cursor     int
+	durability TopicDurability
+	connected  bool
+}
+
+// TopicRead is the memoized per-subscriber suffix returned by a reader Slot.
+type TopicRead[T any] struct {
+	Elements []T
+	Exists   bool
+}
+
+// TopicCell is a broadcast log with one absolute reactive cursor per subscriber.
+// Durable offline subscribers retain their cursor; ephemeral ones disappear on
+// disconnect. GC drops only the prefix below the slowest durable cursor.
+type TopicCell[T any] struct {
+	ctx           *Context
+	baseOffset    int
+	elements      []T
+	subscriptions map[string]*topicSubscription
+	readers       map[string]*Slot[TopicRead[T]]
+}
+
+// NewTopicCell creates an empty broadcast topic.
+func NewTopicCell[T any](ctx *Context) *TopicCell[T] {
+	return &TopicCell[T]{
+		ctx:           ctx,
+		subscriptions: make(map[string]*topicSubscription),
+		readers:       make(map[string]*Slot[TopicRead[T]]),
+	}
+}
+
+// NewTopicCellFromSnapshot restores retained elements and absolute cursors.
+func NewTopicCellFromSnapshot[T any](ctx *Context, snapshot TopicSnapshot[T]) *TopicCell[T] {
+	t := NewTopicCell[T](ctx)
+	t.baseOffset = snapshot.BaseOffset
+	t.elements = append([]T(nil), snapshot.Elements...)
+	tail := t.TailOffset()
+	for _, saved := range snapshot.Subscriptions {
+		if saved.Cursor < t.baseOffset || saved.Cursor > tail {
+			panic("TopicCell: subscription cursor outside retained log")
+		}
+		t.subscriptions[saved.ID] = &topicSubscription{
+			cursor: saved.Cursor, durability: saved.Durability, connected: saved.Connected,
+		}
+		t.ensureReader(saved.ID)
+	}
+	return t
+}
+
+func (t *TopicCell[T]) ensureReader(id string) *Slot[TopicRead[T]] {
+	if reader, ok := t.readers[id]; ok {
+		return reader
+	}
+	reader := NewSlot[TopicRead[T]](t.ctx, func(*Context) TopicRead[T] {
+		return t.readUntracked(id)
+	})
+	t.readers[id] = reader
+	return reader
+}
+
+func (t *TopicCell[T]) invalidate(ids []string) {
+	for _, id := range ids {
+		if reader, ok := t.readers[id]; ok {
+			reader.invalidate()
+		}
+	}
+	if len(ids) > 0 && !t.ctx.IsBatching() {
+		t.ctx.flushEffects()
+	}
+}
+
+// Subscribe starts a new cursor at the current tail, or resumes an offline
+// durable cursor with the same stable id.
+func (t *TopicCell[T]) Subscribe(id string, durability TopicDurability) TopicSubscribeOutcome {
+	if sub, ok := t.subscriptions[id]; ok {
+		if sub.connected {
+			return TopicAlreadySubscribed
+		}
+		if sub.durability != TopicDurable {
+			panic("TopicCell: only durable subscriptions can reconnect")
+		}
+		sub.connected = true
+		t.invalidate([]string{id})
+		return TopicReconnected
+	}
+	t.subscriptions[id] = &topicSubscription{
+		cursor: t.TailOffset(), durability: durability, connected: true,
+	}
+	t.ensureReader(id)
+	return TopicSubscribed
+}
+
+// Reconnect resumes an offline durable subscription at its saved cursor.
+func (t *TopicCell[T]) Reconnect(id string) {
+	sub, ok := t.subscriptions[id]
+	if !ok || sub.durability != TopicDurable {
+		panic("TopicCell: durable subscription not found")
+	}
+	if !sub.connected {
+		sub.connected = true
+		t.invalidate([]string{id})
+	}
+}
+
+// Disconnect retains durable cursors and removes ephemeral subscriptions.
+func (t *TopicCell[T]) Disconnect(id string) {
+	sub, ok := t.subscriptions[id]
+	if !ok || !sub.connected {
+		return
+	}
+	sub.connected = false
+	if sub.durability == TopicEphemeral {
+		delete(t.subscriptions, id)
+	}
+	t.invalidate([]string{id})
+}
+
+// Publish appends a value and invalidates each connected reader independently.
+func (t *TopicCell[T]) Publish(value T) int {
+	offset := t.TailOffset()
+	t.elements = append(t.elements, value)
+	ids := make([]string, 0, len(t.subscriptions))
+	for id, sub := range t.subscriptions {
+		if sub.connected {
+			ids = append(ids, id)
+		}
+	}
+	t.invalidate(ids)
+	return offset
+}
+
+func (t *TopicCell[T]) readUntracked(id string) TopicRead[T] {
+	sub, ok := t.subscriptions[id]
+	if !ok {
+		return TopicRead[T]{}
+	}
+	start := sub.cursor - t.baseOffset
+	return TopicRead[T]{Elements: append([]T(nil), t.elements[start:]...), Exists: true}
+}
+
+// ReadStream reactively reads the complete retained suffix at this cursor.
+func (t *TopicCell[T]) ReadStream(id string) ([]T, bool) {
+	read := t.ensureReader(id).Get()
+	return read.Elements, read.Exists
+}
+
+// Read reactively reads the next value without advancing the cursor.
+func (t *TopicCell[T]) Read(id string) (T, bool) {
+	values, exists := t.ReadStream(id)
+	if exists && len(values) > 0 {
+		return values[0], true
+	}
+	var zero T
+	return zero, false
+}
+
+// Advance moves only the named subscriber's absolute cursor.
+func (t *TopicCell[T]) Advance(id string, count int) int {
+	sub, ok := t.subscriptions[id]
+	if !ok || count < 0 || sub.cursor+count > t.TailOffset() {
+		panic("TopicCell: invalid cursor advance")
+	}
+	if count > 0 {
+		sub.cursor += count
+		t.invalidate([]string{id})
+	}
+	return sub.cursor
+}
+
+// GC drops only the prefix below every durable cursor and invalidates nothing.
+func (t *TopicCell[T]) GC() int {
+	frontier := t.TailOffset()
+	for _, sub := range t.subscriptions {
+		if sub.durability == TopicDurable && sub.cursor < frontier {
+			frontier = sub.cursor
+		}
+	}
+	removed := frontier - t.baseOffset
+	t.elements = append([]T(nil), t.elements[removed:]...)
+	t.baseOffset = frontier
+	return removed
+}
+
+func (t *TopicCell[T]) BaseOffset() int { return t.baseOffset }
+func (t *TopicCell[T]) TailOffset() int { return t.baseOffset + len(t.elements) }
+func (t *TopicCell[T]) Elements() []T   { return append([]T(nil), t.elements...) }
+
+// Subscription reports a copy of a subscriber's current state.
+func (t *TopicCell[T]) Subscription(id string) (TopicSubscriptionSnapshot, bool) {
+	sub, ok := t.subscriptions[id]
+	if !ok {
+		return TopicSubscriptionSnapshot{}, false
+	}
+	return TopicSubscriptionSnapshot{id, sub.cursor, sub.durability, sub.connected}, true
+}
+
+func (t *TopicCell[T]) ReaderHandle(id string) *Slot[TopicRead[T]] { return t.ensureReader(id) }
+
+// Snapshot copies the retained log and stable subscription table.
+func (t *TopicCell[T]) Snapshot() TopicSnapshot[T] {
+	snapshot := TopicSnapshot[T]{BaseOffset: t.baseOffset, Elements: t.Elements()}
+	for id, sub := range t.subscriptions {
+		snapshot.Subscriptions = append(snapshot.Subscriptions, TopicSubscriptionSnapshot{
+			ID: id, Cursor: sub.cursor, Durability: sub.durability, Connected: sub.connected,
+		})
+	}
+	return snapshot
+}
+
+// Restart models a process restart; persisted state and reader values are stable.
+func (t *TopicCell[T]) Restart() {}

@@ -6,6 +6,15 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.12.0
+
+### Added
+
+- **`TopicCell` broadcast topics (`#lztopiccell`).** Independent absolute
+  subscriber cursors, durable offline replay, ephemeral disconnect lifecycle,
+  per-subscriber reactive invalidation, snapshot restore, and safe prefix GC at
+  the slowest durable cursor.
+
 ## 0.9.0
 
 ### Changed
