@@ -64,3 +64,54 @@ func TestTopicEphemeralLifecycle(t *testing.T) {
 		t.Fatalf("new ephemeral cursor = %d, tail = %d", viewer.Cursor, topic.TailOffset())
 	}
 }
+
+func TestTopicTailAndOfflineAdvanceAreNoops(t *testing.T) {
+	topic := NewTopicCell[string](NewContext())
+	topic.Subscribe("worker", TopicDurable)
+	topic.Publish("a")
+	if got := topic.Advance("worker", 1); got != 1 {
+		t.Fatalf("advance = %d", got)
+	}
+	if got := topic.Advance("worker", 1); got != 1 {
+		t.Fatalf("tail advance = %d", got)
+	}
+
+	topic.Disconnect("worker")
+	topic.Publish("b")
+	if stream, exists := topic.ReadStream("worker"); exists || len(stream) != 0 {
+		t.Fatalf("offline read = %v, exists = %v", stream, exists)
+	}
+	if got := topic.Advance("worker", 1); got != 1 {
+		t.Fatalf("offline advance = %d", got)
+	}
+	worker, _ := topic.Subscription("worker")
+	if worker.Cursor != 1 {
+		t.Fatalf("offline cursor = %d", worker.Cursor)
+	}
+
+	topic.Reconnect("worker")
+	stream, exists := topic.ReadStream("worker")
+	if !exists || !reflect.DeepEqual(stream, []string{"b"}) {
+		t.Fatalf("reconnected read = %v, exists = %v", stream, exists)
+	}
+	if topic.GC() != 1 || topic.BaseOffset() != 1 {
+		t.Fatal("safe GC did not advance to the frozen cursor")
+	}
+	worker, _ = topic.Subscription("worker")
+	if worker.Cursor != 1 {
+		t.Fatalf("GC moved absolute cursor to %d", worker.Cursor)
+	}
+}
+
+func TestTopicSnapshotRejectsDisconnectedEphemeral(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected invalid snapshot to panic")
+		}
+	}()
+	_ = NewTopicCellFromSnapshot(NewContext(), TopicSnapshot[string]{
+		Subscriptions: []TopicSubscriptionSnapshot{{
+			ID: "viewer", Cursor: 0, Durability: TopicEphemeral, Connected: false,
+		}},
+	})
+}

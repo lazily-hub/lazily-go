@@ -562,12 +562,21 @@ func NewTopicCell[T any](ctx *Context) *TopicCell[T] {
 // NewTopicCellFromSnapshot restores retained elements and absolute cursors.
 func NewTopicCellFromSnapshot[T any](ctx *Context, snapshot TopicSnapshot[T]) *TopicCell[T] {
 	t := NewTopicCell[T](ctx)
+	if snapshot.BaseOffset < 0 {
+		panic("TopicCell: base offset must be non-negative")
+	}
 	t.baseOffset = snapshot.BaseOffset
 	t.elements = append([]T(nil), snapshot.Elements...)
 	tail := t.TailOffset()
 	for _, saved := range snapshot.Subscriptions {
 		if saved.Cursor < t.baseOffset || saved.Cursor > tail {
 			panic("TopicCell: subscription cursor outside retained log")
+		}
+		if saved.Durability != TopicDurable && saved.Durability != TopicEphemeral {
+			panic("TopicCell: invalid subscription durability")
+		}
+		if saved.Durability == TopicEphemeral && !saved.Connected {
+			panic("TopicCell: disconnected ephemeral subscription must be removed")
 		}
 		t.subscriptions[saved.ID] = &topicSubscription{
 			cursor: saved.Cursor, durability: saved.Durability, connected: saved.Connected,
@@ -602,6 +611,9 @@ func (t *TopicCell[T]) invalidate(ids []string) {
 // Subscribe starts a new cursor at the current tail, or resumes an offline
 // durable cursor with the same stable id.
 func (t *TopicCell[T]) Subscribe(id string, durability TopicDurability) TopicSubscribeOutcome {
+	if durability != TopicDurable && durability != TopicEphemeral {
+		panic("TopicCell: invalid subscription durability")
+	}
 	if sub, ok := t.subscriptions[id]; ok {
 		if sub.connected {
 			return TopicAlreadySubscribed
@@ -661,7 +673,7 @@ func (t *TopicCell[T]) Publish(value T) int {
 
 func (t *TopicCell[T]) readUntracked(id string) TopicRead[T] {
 	sub, ok := t.subscriptions[id]
-	if !ok {
+	if !ok || !sub.connected {
 		return TopicRead[T]{}
 	}
 	start := sub.cursor - t.baseOffset
@@ -687,7 +699,13 @@ func (t *TopicCell[T]) Read(id string) (T, bool) {
 // Advance moves only the named subscriber's absolute cursor.
 func (t *TopicCell[T]) Advance(id string, count int) int {
 	sub, ok := t.subscriptions[id]
-	if !ok || count < 0 || sub.cursor+count > t.TailOffset() {
+	if !ok || count < 0 {
+		panic("TopicCell: invalid cursor advance")
+	}
+	if !sub.connected || sub.cursor == t.TailOffset() {
+		return sub.cursor
+	}
+	if sub.cursor+count > t.TailOffset() {
 		panic("TopicCell: invalid cursor advance")
 	}
 	if count > 0 {
