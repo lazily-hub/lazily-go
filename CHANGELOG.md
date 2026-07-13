@@ -6,6 +6,15 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.14.0
+
+### Added
+
+- **`WorkQueueCell` competing-consumer delivery (`#lzworkqueue`).** Exclusive
+  FIFO claims use stable item ids and fresh delivery ids, worker-scoped
+  ack/nack settlement, strict visibility expiry, tail redelivery, bounded
+  dead-letter handling, and independent reactive count readers.
+
 ## 0.13.1
 
 ### Fixed
