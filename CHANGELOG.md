@@ -6,6 +6,23 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.9.0
+
+### Changed
+
+- **Demand-driven queue reader-kinds + optional `Peek`/`Capacity` (Phase 0,
+  `#relaycell`).** `QueueCell` reader-kinds (`Head`/`Len`/`IsEmpty`/`IsFull`) are
+  now demand-driven memoized `Slot`s (were eagerly-set `Cell`s): a successful
+  push/pop derives no reader value and invalidates only the readers whose value
+  provably changed. `Peek`/`Capacity` become optional capabilities via interface
+  segregation — the required `QueueStorage` contract is
+  `TryPush`/`TryPop`/`Len`/`IsClosed`/`Close`; `PeekableStorage[T]` adds a `Head`
+  reader and `BoundedStorage` adds `IsFull`. A raw-channel-style backend conforms
+  with neither. Observable semantics are unchanged; all conformance fixtures stay
+  green.
+- **BREAKING:** `QueueReaderHandles` `Head`/`Len`/`IsEmpty`/`IsFull` are now
+  `*Slot` (were `*Cell`); `IsClosed` stays `*Cell`.
+
 ## 0.8.0
 
 ### Added
