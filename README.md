@@ -75,6 +75,21 @@ ctx.Batch(func() {
 }) // a single coalesced cascade
 ```
 
+## Competing-consumer work queue
+
+`WorkQueueCell[T]` provides exclusive FIFO claims, visibility deadlines,
+worker-scoped acknowledgements, tail retries, and bounded dead-letter handling.
+Item ids remain stable across retries; every claim gets a fresh delivery id.
+
+```go
+work := lazily.NewWorkQueueCell[string](ctx, 10, 3)
+work.Push("job")
+delivery, _ := work.Claim("worker-a", 100)
+if !work.Ack("worker-a", delivery.DeliveryID) {
+    panic("ack rejected")
+}
+```
+
 ## Context
 
 All reactives that react to each other must share a `Context`. It holds an
@@ -284,6 +299,7 @@ notes and platform carve-outs lives in
 | Stable-id alignment (manufactured identity) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Broadcast topic (`TopicCell`) — independent cursors + durable replay + safe GC (`#lztopiccell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Competing-consumer work queue (`WorkQueueCell`) — exclusive leases + ack/nack + redelivery + DLQ (`#lzworkqueue`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Merge algebra + `MergeCell` — associative `MergePolicy` (`KeepLatest`/`Sum`/`Max`/`SetUnion`/`RawFifo`), `Cell ≡ MergeCell<KeepLatest>`, `Reactive`/`Source` split (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | RelayCell — conflating relay + `BackpressurePolicy` + `SpillStore` + `Transport` + Inbox/Outbox + Rate/Window/Expiry/Priority/keyed policies (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
