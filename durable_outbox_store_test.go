@@ -13,7 +13,11 @@ type outboxStoreFixture struct {
 		PutEpochs  []Epoch `json:"put_epochs"`
 		ScanAfter  Epoch   `json:"scan_after"`
 		AckThrough []Epoch `json:"ack_through"`
-		Expect     struct {
+		SaveCursor []struct {
+			Handle string `json:"handle"`
+			Epoch  Epoch  `json:"epoch"`
+		} `json:"save_cursor"`
+		Expect struct {
 			Epochs         []Epoch `json:"epochs"`
 			Cursor         Epoch   `json:"cursor"`
 			Retained       []Epoch `json:"retained"`
@@ -42,7 +46,11 @@ func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) 
 	PutEpochs  []Epoch `json:"put_epochs"`
 	ScanAfter  Epoch   `json:"scan_after"`
 	AckThrough []Epoch `json:"ack_through"`
-	Expect     struct {
+	SaveCursor []struct {
+		Handle string `json:"handle"`
+		Epoch  Epoch  `json:"epoch"`
+	} `json:"save_cursor"`
+	Expect struct {
 		Epochs         []Epoch `json:"epochs"`
 		Cursor         Epoch   `json:"cursor"`
 		Retained       []Epoch `json:"retained"`
@@ -127,22 +135,32 @@ func TestOutboxStoreProtocol(t *testing.T) {
 }
 
 func TestFileOutboxCursorRecordsAreSerializedMonotone(t *testing.T) {
+	fixture := loadOutboxStoreFixture(t)
+	scenario := outboxStoreScenario(t, fixture, "stale handle cannot regress serialized cursor")
 	path := filepath.Join(t.TempDir(), "cursor.jsonl")
-	stale, err := NewFileOutboxStore(path)
+	staleStore, err := NewFileOutboxStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	current, err := NewFileOutboxStore(path)
+	currentStore, err := NewFileOutboxStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	current.SaveCursor(9)
-	stale.SaveCursor(3)
+	handles := map[string]*DurableStoreOutbox[*FileOutboxStore]{
+		"stale":   NewDurableStoreOutbox(staleStore),
+		"current": NewDurableStoreOutbox(currentStore),
+	}
+	for _, save := range scenario.SaveCursor {
+		handles[save.Handle].AckThrough(save.Epoch)
+	}
+	if cursor := handles["stale"].AckedThrough(); cursor != scenario.Expect.LoadedCursor {
+		t.Fatalf("stale handle observed cursor %d", cursor)
+	}
 	reopened, err := NewFileOutboxStore(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cursor := reopened.LoadCursor(); cursor != 9 {
+	if cursor := reopened.LoadCursor(); cursor != scenario.Expect.LoadedCursor {
 		t.Fatalf("cursor regressed to %d", cursor)
 	}
 }

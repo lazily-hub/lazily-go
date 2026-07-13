@@ -44,7 +44,13 @@ func NewDurableStoreOutbox[S OutboxStore](store S) *DurableStoreOutbox[S] {
 func (o *DurableStoreOutbox[S]) Store() S { return o.store }
 
 // AckedThrough returns the highest loaded or observed peer acknowledgement.
-func (o *DurableStoreOutbox[S]) AckedThrough() Epoch { return o.ackedThrough }
+func (o *DurableStoreOutbox[S]) AckedThrough() Epoch {
+	persisted := o.store.LoadCursor()
+	if persisted > o.ackedThrough {
+		o.ackedThrough = persisted
+	}
+	return o.ackedThrough
+}
 
 // Err returns the most recent frame serialization/decoding error.
 func (o *DurableStoreOutbox[S]) Err() error { return o.err }
@@ -61,17 +67,21 @@ func (o *DurableStoreOutbox[S]) Append(epoch Epoch, msg IpcMessage) {
 
 // AckThrough advances the monotonic cursor and prunes the acknowledged prefix.
 func (o *DurableStoreOutbox[S]) AckThrough(epoch Epoch) {
-	if epoch > o.ackedThrough {
-		o.ackedThrough = epoch
-		o.store.SaveCursor(epoch)
+	target := o.AckedThrough()
+	if epoch > target {
+		target = epoch
 	}
-	o.store.DeleteThrough(o.ackedThrough)
+	if target > o.ackedThrough {
+		o.store.SaveCursor(target)
+		o.ackedThrough = target
+	}
+	o.store.DeleteThrough(target)
 }
 
 // ReplayFrom returns decoded frames after both the caller and durable cursors.
 func (o *DurableStoreOutbox[S]) ReplayFrom(cursor Epoch) []OutboxEntry {
-	if o.ackedThrough > cursor {
-		cursor = o.ackedThrough
+	if ackedThrough := o.AckedThrough(); ackedThrough > cursor {
+		cursor = ackedThrough
 	}
 	out := make([]OutboxEntry, 0)
 	for _, stored := range o.store.ScanAfter(cursor) {
@@ -87,7 +97,7 @@ func (o *DurableStoreOutbox[S]) ReplayFrom(cursor Epoch) []OutboxEntry {
 
 // RetainedEpochs lists the unacknowledged suffix in ascending order.
 func (o *DurableStoreOutbox[S]) RetainedEpochs() []Epoch {
-	stored := o.store.ScanAfter(o.ackedThrough)
+	stored := o.store.ScanAfter(o.AckedThrough())
 	out := make([]Epoch, len(stored))
 	for i, entry := range stored {
 		out[i] = entry.Epoch

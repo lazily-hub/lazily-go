@@ -6,6 +6,15 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.13.1
+
+### Fixed
+
+- **Serialized monotonic outbox cursors.** Every `DurableStoreOutbox` operation
+  refreshes the persisted acknowledgement cursor, so a stale handle cannot
+  regress replay or retention semantics after another handle advances the same
+  durable store.
+
 ## 0.13.0
 
 ### Added
