@@ -25,8 +25,6 @@ package lazily
 // match the conformance/reliable-sync/ fixtures and round-trip through JSON like
 // the state frames.
 
-import "sort"
-
 // ---------------------------------------------------------------------------
 // ResyncCoordinator — receiver decision function
 // ---------------------------------------------------------------------------
@@ -182,60 +180,6 @@ type DurableOutbox interface {
 	ReplayFrom(cursor Epoch) []OutboxEntry
 	// RetainedEpochs lists epochs still retained (not yet acked), ascending.
 	RetainedEpochs() []Epoch
-}
-
-// InMemoryOutbox is the in-memory DurableOutbox — correct within a process
-// lifetime; the default.
-type InMemoryOutbox struct {
-	entries      []OutboxEntry
-	ackedThrough Epoch
-}
-
-// NewInMemoryOutbox returns an empty outbox.
-func NewInMemoryOutbox() *InMemoryOutbox { return &InMemoryOutbox{} }
-
-// AckedThrough returns the highest acked epoch (retention cursor).
-func (o *InMemoryOutbox) AckedThrough() Epoch { return o.ackedThrough }
-
-// Append records msg at epoch (append order preserved).
-func (o *InMemoryOutbox) Append(epoch Epoch, msg IpcMessage) {
-	o.entries = append(o.entries, OutboxEntry{Epoch: epoch, Msg: msg})
-}
-
-// AckThrough advances the retention cursor and prunes frames <= it.
-func (o *InMemoryOutbox) AckThrough(epoch Epoch) {
-	if epoch > o.ackedThrough {
-		o.ackedThrough = epoch
-	}
-	kept := o.entries[:0]
-	for _, e := range o.entries {
-		if e.Epoch > o.ackedThrough {
-			kept = append(kept, e)
-		}
-	}
-	o.entries = kept
-}
-
-// ReplayFrom returns retained frames with epoch > cursor, ascending by epoch.
-func (o *InMemoryOutbox) ReplayFrom(cursor Epoch) []OutboxEntry {
-	out := make([]OutboxEntry, 0, len(o.entries))
-	for _, e := range o.entries {
-		if e.Epoch > cursor {
-			out = append(out, e)
-		}
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Epoch < out[j].Epoch })
-	return out
-}
-
-// RetainedEpochs lists still-retained epochs, ascending.
-func (o *InMemoryOutbox) RetainedEpochs() []Epoch {
-	es := make([]Epoch, 0, len(o.entries))
-	for _, e := range o.entries {
-		es = append(es, e.Epoch)
-	}
-	sort.Slice(es, func(i, j int) bool { return es[i] < es[j] })
-	return es
 }
 
 // ---------------------------------------------------------------------------

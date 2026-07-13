@@ -6,6 +6,17 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+## 0.13.0
+
+### Added
+
+- **`CrdtTree` (`#lzcrdttree`).** `TextCrdt` now implements the generic
+  lossless-document contract with identity-preserving snapshot/delta and merge.
+- **Storage-independent durable outbox (`#lzdurableoutbox`).** `OutboxStore`
+  provides the five ordered-byte operations, `DurableStoreOutbox` owns cursor and
+  replay semantics, and `FileOutboxStore` supplies an append-only crash/restart
+  adapter. Ack records fold by `max`, so stale handles cannot regress the cursor.
+
 ## 0.12.0
 
 ### Added
