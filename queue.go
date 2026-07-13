@@ -26,9 +26,9 @@
 // MPSCQueueCell type — introducing one would imply SPMC/MPMC siblings that in
 // fact differ in semantics, not cardinality (see TopicCell / WorkQueueCell).
 //
-// The shell / storage split: the reactive shell owns the reader-kind version
-// cells and the invalidation logic (storage-agnostic — this is what the formal
-// model LazilyFormal.QueueCell pins); the storage backend owns the actual FIFO
+// The shell / storage split: the reactive shell owns the demand-driven
+// reader-kinds and the invalidation logic (storage-agnostic — this is what the
+// formal model LazilyFormal.QueueCell pins); the storage backend owns the FIFO
 // data structure and is pluggable via the QueueStorage interface. The default
 // VecDequeStorage is an unbounded slice-backed queue; a bounded one exposes a
 // capacity and reactive backpressure via IsFull. Distribution is a
@@ -102,8 +102,14 @@ func (e QueuePopError) String() string { return string(e) }
 //     ring-buffer slot index wraps.
 //
 // Invalidation is the shell's job, not the backend's: the backend reports raw
-// state (Len / Peek / IsClosed / capacity) and the shell layers its own
-// reader-kind version cells above it.
+// state (Len / IsClosed) and the shell layers its own demand-driven reader-kinds
+// above it.
+//
+// Minimal required contract (Phase 0, #relaycell): TryPush / TryPop / Len /
+// IsClosed / Close. Peek and Capacity are OPTIONAL capabilities — a backend that
+// implements PeekableStorage[T] gains a Head reader; one that implements
+// BoundedStorage gains an IsFull reader. A raw-channel-style backend that
+// satisfies only QueueStorage is fully conforming (no Head, never full).
 //
 // Implement QueueStorage with a pointer receiver so mutation is visible to the
 // owning shell; pass that pointer as the QueueCell's S.
@@ -119,22 +125,32 @@ type QueueStorage[T any] interface {
 	// QueuePopClosed (drain-complete). Pop on a closed non-empty queue keeps
 	// draining — it returns the next element, not Closed.
 	TryPop() (T, QueuePopError)
-	// Peek returns the current head element and true, or the zero T and false
-	// when empty. Non-mutating; the shell reads this to materialize the head
-	// reader-kind cell.
-	Peek() (T, bool)
 	// Len reports the number of elements currently held.
 	Len() int
-	// Capacity reports the bound and true for a bounded backend, or 0 and
-	// false for the unbounded default. The shell uses this to decide whether
-	// the is_full reader-kind cell can ever be invalidated.
-	Capacity() (int, bool)
 	// IsClosed reports whether the queue has been closed. Closure is monotonic
 	// (once closed, stays closed).
 	IsClosed() bool
 	// Close marks the queue closed. Idempotent: closing an already-closed
 	// queue is a no-op. Close is terminal: a closed queue cannot reopen.
 	Close()
+}
+
+// PeekableStorage is the OPTIONAL peek capability. A backend implementing it
+// gains a reactive Head reader; a backend without it has no Head (Head returns
+// the zero value and false), exactly as an unbounded backend has no IsFull.
+type PeekableStorage[T any] interface {
+	// Peek returns the current head element and true, or the zero T and false
+	// when empty. Non-mutating.
+	Peek() (T, bool)
+}
+
+// BoundedStorage is the OPTIONAL bound capability. A backend implementing it and
+// reporting a bound gains a reactive IsFull backpressure reader; a backend
+// without it is treated as unbounded (IsFull is always false).
+type BoundedStorage interface {
+	// Capacity reports the bound and true for a bounded backend, or 0 and
+	// false for the unbounded default.
+	Capacity() (int, bool)
 }
 
 // VecDequeStorage is the reference QueueStorage backend: an unbounded (or
@@ -271,13 +287,18 @@ type QueueCell[T comparable, S QueueStorage[T]] struct {
 	ctx     *Context
 	storage S
 
-	head     *Cell[queueHead[T]]
-	lenCell  *Cell[int]
-	empty    *Cell[bool]
-	full     *Cell[bool]
+	// Demand-driven reader-kinds: memoized Slots deriving from storage (were
+	// eagerly-Set Cells). Each re-derives on first Get after invalidation; the
+	// shell invalidates only the ones that provably changed on an op. closed
+	// stays a Cell (a direct input, set by Close).
+	head     *Slot[queueHead[T]]
+	lenCell  *Slot[int]
+	empty    *Slot[bool]
+	full     *Slot[bool]
 	closed   *Cell[bool]
-	bounded  bool // mirrored from storage.Capacity() at construction
-	capacity int  // mirrored from storage.Capacity() at construction
+	bounded  bool             // mirrored from BoundedStorage.Capacity() at construction
+	capacity int              // mirrored from BoundedStorage.Capacity() at construction
+	peek     func() (T, bool) // the backend's Peek, or nil when it has no peek capability
 }
 
 // NewQueueCell builds an unbounded QueueCell with the default VecDequeStorage
@@ -296,24 +317,38 @@ func NewBoundedQueueCell[T comparable](ctx *Context, capacity int) *QueueCell[T,
 }
 
 // NewQueueCellWithStorage builds a QueueCell over an arbitrary QueueStorage
-// backend (custom ring buffer, broker client, consensus log, ...). The shell
-// is storage-agnostic: it reads Len / Peek / IsClosed / Capacity and layers
-// its own reader-kind version cells above. Pass a pointer to your storage so
-// the shell observes its mutations.
+// backend (custom ring buffer, broker client, consensus log, ...). The shell is
+// storage-agnostic: it reads Len / IsClosed (the required contract) and, when
+// the backend offers them, the optional PeekableStorage / BoundedStorage
+// capabilities. Pass a pointer to your storage so the shell observes mutations.
 func NewQueueCellWithStorage[T comparable, S QueueStorage[T]](ctx *Context, storage S) *QueueCell[T, S] {
 	q := &QueueCell[T, S]{ctx: ctx, storage: storage}
-	if cap, ok := storage.Capacity(); ok {
-		q.bounded = true
-		q.capacity = cap
+	// Capacity and Peek are optional capabilities (Phase 0 #relaycell). Cache
+	// the bound once (it is contractually fixed) and resolve Peek to a func, or
+	// nil when the backend cannot peek.
+	if b, ok := any(storage).(BoundedStorage); ok {
+		if cap, ok := b.Capacity(); ok {
+			q.bounded = true
+			q.capacity = cap
+		}
 	}
-	l := storage.Len()
-	head, headOk := storage.Peek()
-	empty := l == 0
-	full := q.bounded && l >= q.capacity
-	q.head = NewCell[queueHead[T]](ctx, queueHead[T]{value: head, ok: headOk})
-	q.lenCell = NewCell[int](ctx, l)
-	q.empty = NewCell[bool](ctx, empty)
-	q.full = NewCell[bool](ctx, full)
+	if p, ok := any(storage).(PeekableStorage[T]); ok {
+		q.peek = p.Peek
+	}
+	// Reader-kinds derive lazily from storage; nothing is materialized until a
+	// reader is observed. Head is trivially empty when the backend has no peek.
+	q.head = NewSlot[queueHead[T]](ctx, func(*Context) queueHead[T] {
+		if q.peek == nil {
+			return queueHead[T]{}
+		}
+		v, ok := q.peek()
+		return queueHead[T]{value: v, ok: ok}
+	})
+	q.lenCell = NewSlot[int](ctx, func(*Context) int { return q.storage.Len() })
+	q.empty = NewSlot[bool](ctx, func(*Context) bool { return q.storage.Len() == 0 })
+	q.full = NewSlot[bool](ctx, func(*Context) bool {
+		return q.bounded && q.storage.Len() >= q.capacity
+	})
 	q.closed = NewCell[bool](ctx, storage.IsClosed())
 	return q
 }
@@ -325,9 +360,11 @@ func NewQueueCellWithStorage[T comparable, S QueueStorage[T]](ctx *Context, stor
 // For MPSC, call TryPush inside a Context.Batch so the per-producer pushes
 // appear as one atomic, coalesced transition to concurrent observers.
 func (q *QueueCell[T, S]) TryPush(value T) QueuePushError {
+	lenBefore := q.storage.Len()
 	err := q.storage.TryPush(value)
 	if err.Ok() {
-		q.syncContent()
+		// Head changes on a push only when the queue was empty.
+		q.invalidateReaders(lenBefore, lenBefore+1, lenBefore == 0)
 	}
 	return err
 }
@@ -337,9 +374,11 @@ func (q *QueueCell[T, S]) TryPush(value T) QueuePushError {
 // QueuePopClosed, and only an open empty queue returns QueuePopEmpty. On
 // success the reader-kind cells are synced; a failed pop invalidates nothing.
 func (q *QueueCell[T, S]) TryPop() (T, QueuePopError) {
+	lenBefore := q.storage.Len()
 	v, err := q.storage.TryPop()
 	if err.Ok() {
-		q.syncContent()
+		// A successful pop always advances head and decrements len.
+		q.invalidateReaders(lenBefore, lenBefore-1, true)
 	}
 	return v, err
 }
@@ -359,24 +398,31 @@ func (q *QueueCell[T, S]) Close() {
 	q.closed.Set(true)
 }
 
-// syncContent re-derives the four content reader-kind cells from storage and
-// writes them inside one Context.Batch. The host Cell's PartialEq (!=) guard
-// suppresses any cell whose value is unchanged, so reader-kind independence is
-// automatic: a push to a non-empty queue leaves Head cached, a pop that does
-// not cross the capacity boundary leaves IsFull cached, and so on. Batching
-// guarantees a concurrent observer never sees a glitch (Len bumped before
-// IsFull flips). The closed cell is intentionally not touched here.
-func (q *QueueCell[T, S]) syncContent() {
-	l := q.storage.Len()
-	head, _ := q.storage.Peek()
-	empty := l == 0
-	full := q.bounded && l >= q.capacity
-	q.ctx.Batch(func() {
-		q.head.Set(queueHead[T]{value: head, ok: !empty})
-		q.lenCell.Set(l)
-		q.empty.Set(empty)
-		q.full.Set(full)
-	})
+// invalidateReaders invalidates exactly the reader-kind Slots whose derived
+// value changed on a successful op that took the queue from lenBefore to
+// lenAfter. No reader value is derived here — invalidating a Slot only drops its
+// cache and cascades to its dependents (each re-derives lazily on its next Get),
+// so an unobserved reader pays effectively nothing. headChanged is passed by the
+// caller because head depends on op direction, not just len (a pop always
+// changes head; a push changes it only from empty) — so no Peek is needed to
+// decide. The changed Slots invalidate together and effects flush once, so a
+// subscriber never sees a partial state (Len bumped before IsFull flips). Inside
+// a Context.Batch the flush is deferred to the batch boundary. The closed cell
+// is intentionally not touched here.
+func (q *QueueCell[T, S]) invalidateReaders(lenBefore, lenAfter int, headChanged bool) {
+	q.lenCell.invalidate() // len always changes on a successful op
+	if (lenBefore == 0) != (lenAfter == 0) {
+		q.empty.invalidate()
+	}
+	if q.bounded && (lenBefore >= q.capacity) != (lenAfter >= q.capacity) {
+		q.full.invalidate()
+	}
+	if headChanged {
+		q.head.invalidate()
+	}
+	if !q.ctx.IsBatching() {
+		q.ctx.flushEffects()
+	}
 }
 
 // Head is the reactive head read. Subscribes the caller to the head reader-kind
@@ -425,18 +471,19 @@ func (q *QueueCell[T, S]) IsClosedUntracked() bool { return q.storage.IsClosed()
 // snapshot, or a consensus backend's anti-entropy handle).
 func (q *QueueCell[T, S]) Storage() S { return q.storage }
 
-// QueueReaderHandles exposes the underlying reader-kind cells directly, for
-// advanced wiring (custom slots, effect dependency tracking, graph bridges).
-// Each Handle is the Cell backing the corresponding reactive read.
+// QueueReaderHandles exposes the underlying reader-kinds directly, for advanced
+// wiring (custom slots, effect dependency tracking, graph bridges). The four
+// derived reader-kinds are demand-driven Slots; IsClosed is the Cell backing the
+// closed flag (a direct input).
 type QueueReaderHandles[T comparable] struct {
-	Head     *Cell[queueHead[T]]
-	Len      *Cell[int]
-	IsEmpty  *Cell[bool]
-	IsFull   *Cell[bool]
+	Head     *Slot[queueHead[T]]
+	Len      *Slot[int]
+	IsEmpty  *Slot[bool]
+	IsFull   *Slot[bool]
 	IsClosed *Cell[bool]
 }
 
-// ReaderHandles returns the five reader-kind cells backing the reactive reads.
+// ReaderHandles returns the five reader-kinds backing the reactive reads.
 func (q *QueueCell[T, S]) ReaderHandles() QueueReaderHandles[T] {
 	return QueueReaderHandles[T]{
 		Head:     q.head,

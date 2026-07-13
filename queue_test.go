@@ -567,3 +567,125 @@ func TestQueueReaderHandlesRoundTrip(t *testing.T) {
 		t.Fatal("ReaderHandles returned mismatched cells")
 	}
 }
+
+// minimalFifoStorage implements ONLY the required QueueStorage contract —
+// TryPush / TryPop / Len / IsClosed / Close — with no Peek and no Capacity. It
+// is the shape of a raw channel; the shell must treat it as fully conforming
+// (Phase 0 #relaycell): no Head reader, never full.
+type minimalFifoStorage[T any] struct {
+	elems  []T
+	closed bool
+}
+
+func (s *minimalFifoStorage[T]) TryPush(v T) QueuePushError {
+	if s.closed {
+		return QueuePushClosed
+	}
+	s.elems = append(s.elems, v)
+	return QueuePushOk
+}
+
+func (s *minimalFifoStorage[T]) TryPop() (T, QueuePopError) {
+	var zero T
+	if len(s.elems) == 0 {
+		if s.closed {
+			return zero, QueuePopClosed
+		}
+		return zero, QueuePopEmpty
+	}
+	v := s.elems[0]
+	s.elems = s.elems[1:]
+	return v, QueuePopOk
+}
+
+func (s *minimalFifoStorage[T]) Len() int       { return len(s.elems) }
+func (s *minimalFifoStorage[T]) IsClosed() bool { return s.closed }
+func (s *minimalFifoStorage[T]) Close()         { s.closed = true }
+
+// (no Peek, no Capacity)
+
+func TestQueueRawChannelBackendConformsToMinimalContract(t *testing.T) {
+	ctx := NewContext()
+	q := NewQueueCellWithStorage[int](ctx, &minimalFifoStorage[int]{})
+
+	if !q.IsEmpty() {
+		t.Fatalf("new minimal queue not empty")
+	}
+	if err := q.TryPush(1); !err.Ok() {
+		t.Fatalf("push 1: %v", err)
+	}
+	q.TryPush(2)
+	if q.Len() != 2 {
+		t.Fatalf("len = %d, want 2", q.Len())
+	}
+
+	// No Peek capability → no Head reader (zero, false); no Capacity → never full.
+	if v, ok := q.Head(); ok || v != 0 {
+		t.Fatalf("Head() = (%d, %v), want (0, false) — no peek capability", v, ok)
+	}
+	if q.IsFull() {
+		t.Fatalf("IsFull() = true, want false (unbounded)")
+	}
+	if _, ok := q.Capacity(); ok {
+		t.Fatalf("Capacity() reported bounded, want unbounded")
+	}
+
+	// FIFO drain from TryPop alone.
+	if v, _ := q.TryPop(); v != 1 {
+		t.Fatalf("pop = %d, want 1", v)
+	}
+	if v, _ := q.TryPop(); v != 2 {
+		t.Fatalf("pop = %d, want 2", v)
+	}
+	if !q.IsEmpty() {
+		t.Fatalf("queue not empty after draining")
+	}
+
+	// Closure lifecycle: Closed distinct from Empty; push-after-close rejected.
+	q.Close()
+	if !q.IsClosed() {
+		t.Fatalf("not closed after Close()")
+	}
+	if err := q.TryPush(3); err != QueuePushClosed {
+		t.Fatalf("push after close = %v, want %v", err, QueuePushClosed)
+	}
+	if _, err := q.TryPop(); err != QueuePopClosed {
+		t.Fatalf("pop on closed empty = %v, want %v", err, QueuePopClosed)
+	}
+}
+
+// A subscribed reader over the minimal backend stays reactive (demand-driven
+// len Slot invalidates each op) even without Peek/Capacity.
+func TestQueueRawChannelReaderKindsStayReactive(t *testing.T) {
+	ctx := NewContext()
+	q := NewQueueCellWithStorage[int](ctx, &minimalFifoStorage[int]{})
+
+	var log []int
+	NewEffect(ctx, func(*Context) func() {
+		log = append(log, q.Len())
+		return nil
+	})
+	if got := []int{0}; !intsEqual(log, got) {
+		t.Fatalf("after setup log=%v, want %v", log, got)
+	}
+	q.TryPush(10)
+	if got := []int{0, 1}; !intsEqual(log, got) {
+		t.Fatalf("after push log=%v, want %v", log, got)
+	}
+	q.TryPop()
+	if got := []int{0, 1, 0}; !intsEqual(log, got) {
+		t.Fatalf("after pop log=%v, want %v", log, got)
+	}
+}
+
+func intsEqual(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
