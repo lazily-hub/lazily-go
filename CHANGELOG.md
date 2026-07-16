@@ -4,7 +4,7 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
-## Unreleased
+## 0.16.0 - 2026-07-16
 
 ### Changed
 
