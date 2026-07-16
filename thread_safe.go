@@ -16,9 +16,9 @@
 package lazily
 
 import (
-	"runtime"
-	"strconv"
 	"sync"
+
+	"github.com/lazily-hub/lazily-go/internal/goid"
 )
 
 // ThreadSafeContext serializes all access to an underlying Context behind a
@@ -163,7 +163,7 @@ type reentrantLock struct {
 }
 
 func (r *reentrantLock) Lock() {
-	gid := goID()
+	gid := goid.Get()
 	r.inner.Lock()
 	if r.owner == gid {
 		r.count++
@@ -188,24 +188,4 @@ func (r *reentrantLock) Unlock() {
 		return
 	}
 	r.inner.Unlock()
-}
-
-// goID returns the current goroutine's id (parsed from the runtime stack
-// header). Used only to make the lock reentrant; not on any hot path.
-func goID() int64 {
-	var buf [64]byte
-	n := runtime.Stack(buf[:], false)
-	// Header format: "goroutine <id> [status]:"
-	s := buf[:n]
-	i := 0
-	for i < len(s) && s[i] != ' ' {
-		i++
-	}
-	i++ // skip the space after "goroutine"
-	j := i
-	for j < len(s) && s[j] >= '0' && s[j] <= '9' {
-		j++
-	}
-	id, _ := strconv.ParseInt(string(s[i:j]), 10, 64)
-	return id
 }

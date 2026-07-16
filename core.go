@@ -73,8 +73,10 @@ func (b *reactiveBase) onInvalidate() {}
 func (b *reactiveBase) track(ctx *Context) {
 	parent := ctx.current()
 	if parent != nil && parent != b.self {
-		b.dependents[parent] = struct{}{}
-		parent.node().dependencies[b.self] = struct{}{}
+		if _, ok := b.dependents[parent]; !ok {
+			b.dependents[parent] = struct{}{}
+			parent.node().dependencies[b.self] = struct{}{}
+		}
 	}
 }
 
@@ -85,7 +87,7 @@ func (b *reactiveBase) detachUpstream() {
 	for dep := range b.dependencies {
 		delete(dep.node().dependents, b.self)
 	}
-	b.dependencies = map[reactiveNode]struct{}{}
+	clear(b.dependencies)
 }
 
 // invalidate is the default cascade: run onInvalidate, snapshot dependents,
@@ -99,7 +101,7 @@ func (b *reactiveBase) invalidate() {
 	for d := range b.dependents {
 		snapshot = append(snapshot, d)
 	}
-	b.dependents = map[reactiveNode]struct{}{}
+	clear(b.dependents)
 	for _, dependent := range snapshot {
 		dependent.invalidate()
 	}
@@ -132,6 +134,7 @@ type Context struct {
 	batchDepth       int
 	batchedCells     map[reactiveNode]struct{}
 	pendingEffects   []*Effect
+	effectsHead      int
 	scheduledEffects map[*Effect]struct{}
 	flushingEffects  bool
 }
@@ -205,7 +208,7 @@ func (c *Context) flushBatch() {
 	for cell := range c.batchedCells {
 		cells = append(cells, cell)
 	}
-	c.batchedCells = map[reactiveNode]struct{}{}
+	clear(c.batchedCells)
 	for _, cell := range cells {
 		cell.invalidate()
 	}
@@ -221,10 +224,10 @@ func (c *Context) scheduleEffect(e *Effect) {
 
 func (c *Context) removePendingEffect(e *Effect) {
 	delete(c.scheduledEffects, e)
-	for i, pe := range c.pendingEffects {
-		if pe == e {
-			c.pendingEffects = append(c.pendingEffects[:i], c.pendingEffects[i+1:]...)
-			break
+	for i := c.effectsHead; i < len(c.pendingEffects); i++ {
+		if c.pendingEffects[i] == e {
+			c.pendingEffects[i] = nil
+			return
 		}
 	}
 }
@@ -235,12 +238,18 @@ func (c *Context) flushEffects() {
 	}
 	c.flushingEffects = true
 	defer func() { c.flushingEffects = false }()
-	for len(c.pendingEffects) > 0 {
-		e := c.pendingEffects[0]
-		c.pendingEffects = c.pendingEffects[1:]
+	for c.effectsHead < len(c.pendingEffects) {
+		e := c.pendingEffects[c.effectsHead]
+		c.pendingEffects[c.effectsHead] = nil
+		c.effectsHead++
+		if e == nil {
+			continue
+		}
 		delete(c.scheduledEffects, e)
 		e.rerun()
 	}
+	c.pendingEffects = c.pendingEffects[:0]
+	c.effectsHead = 0
 }
 
 // Slot is a lazy, cached, dependency-tracking computation.
@@ -323,9 +332,10 @@ func (s *Slot[T]) cachedNow() bool { return s.cached }
 // PartialEq guard. Cell uses Go == for equality, so T must be comparable.
 type Cell[T comparable] struct {
 	reactiveBase
-	ctx       *Context
-	value     T
-	observers []*func(T)
+	ctx            *Context
+	value          T
+	observers      map[uint64]func(T)
+	nextObserverID uint64
 }
 
 // NewCell creates a mutable source value bound to ctx.
@@ -357,15 +367,14 @@ func (c *Cell[T]) Set(newValue T) {
 // change. Returns a disposer; call it to stop observing. Observers are not
 // cleared on invalidation.
 func (c *Cell[T]) Subscribe(observer func(T)) func() {
-	obs := &observer
-	c.observers = append(c.observers, obs)
+	if c.observers == nil {
+		c.observers = map[uint64]func(T){}
+	}
+	id := c.nextObserverID
+	c.nextObserverID++
+	c.observers[id] = observer
 	return func() {
-		for i, o := range c.observers {
-			if o == obs {
-				c.observers = append(c.observers[:i], c.observers[i+1:]...)
-				break
-			}
-		}
+		delete(c.observers, id)
 	}
 }
 
@@ -377,10 +386,15 @@ func (c *Cell[T]) Invalidate() {
 }
 
 func (c *Cell[T]) notifyObservers() {
-	snapshot := make([]*func(T), len(c.observers))
-	copy(snapshot, c.observers)
+	if len(c.observers) == 0 {
+		return
+	}
+	snapshot := make([]func(T), 0, len(c.observers))
+	for _, o := range c.observers {
+		snapshot = append(snapshot, o)
+	}
 	for _, o := range snapshot {
-		(*o)(c.value)
+		o(c.value)
 	}
 }
 
@@ -582,7 +596,7 @@ func (m *Memo[T]) invalidate() {
 	for d := range m.dependents {
 		snapshot = append(snapshot, d)
 	}
-	m.dependents = map[reactiveNode]struct{}{}
+	clear(m.dependents)
 	for _, dependent := range snapshot {
 		dependent.invalidate()
 	}

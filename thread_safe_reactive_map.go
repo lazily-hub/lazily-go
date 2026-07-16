@@ -51,7 +51,7 @@ func (threadSafeSlotHandle) mapEntryKind() EntryKind { return EntryKindSlot }
 // *ThreadSafeReactiveMap. See the package doc for the eager/lazy behavior,
 // observational transparency, present-set monotonicity, and confluence.
 type ThreadSafeReactiveMap[K comparable, V comparable, H ThreadSafeMapHandle] struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	// materialized is the currently-allocated ("present") set and each entry's
 	// cached canonical value. Guarded by mu; grows on materialize, never shrinks.
 	materialized map[K]V
@@ -89,16 +89,16 @@ func (m *ThreadSafeReactiveMap[K, V, H]) GetOrInsertWith(key K, factory func(K) 
 // Observe reads key's cached value if present, without minting. Returns
 // (zero, false) if the key is not materialized.
 func (m *ThreadSafeReactiveMap[K, V, H]) Observe(key K) (V, bool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	v, ok := m.materialized[key]
 	return v, ok
 }
 
 // IsPresent reports whether key is currently materialized. Non-reactive.
 func (m *ThreadSafeReactiveMap[K, V, H]) IsPresent(key K) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	_, ok := m.materialized[key]
 	return ok
 }
@@ -107,8 +107,8 @@ func (m *ThreadSafeReactiveMap[K, V, H]) IsPresent(key K) bool {
 // first-materialization order (a copy — the internal order must not escape the
 // lock).
 func (m *ThreadSafeReactiveMap[K, V, H]) PresentKeys() []K {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	out := make([]K, len(m.order))
 	copy(out, m.order)
 	return out
@@ -116,8 +116,8 @@ func (m *ThreadSafeReactiveMap[K, V, H]) PresentKeys() []K {
 
 // PresentCount returns the number of currently-materialized entries.
 func (m *ThreadSafeReactiveMap[K, V, H]) PresentCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return len(m.order)
 }
 

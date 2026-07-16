@@ -6,6 +6,34 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+### Changed
+
+- **Reactive-core allocation reduction.** Ported the lazily-rs edge-lifetime
+  patterns into the Go core so per-cascade work no longer rebuilds edge maps:
+  dependency/dependent maps are `clear()`-ed in place (reusing backing buckets)
+  instead of re-allocated, `track()` skips re-writing an existing edge, and
+  `Cell` observers drop the `*func` indirection with an early return when there
+  are none. Measured on the hot paths (`make bench`): `SlotRecompute` 4→0
+  allocs/op (512→0 B, ~1.9× faster), `MemoEqualityGuard` 4→0 allocs/op (512→0 B,
+  ~1.9× faster), `BatchCoalesce` 31→1 allocs/op (4,144→160 B, ~2× faster). The
+  zero-alloc steady state (`CellReadWrite`, `CellMapInsertRead`) is unchanged.
+- **O(1) effect-queue drain.** `pendingEffects` is now a head-pointer ring that
+  pops in O(1) and compacts when drained, instead of front re-slicing (which
+  leaked the backing array) plus a linear splice on dispose. Fixes the
+  unbounded growth of the effect queue under long-lived contexts.
+- **`ThreadSafeReactiveMap` read/write split.** The keyed-map lock is now an
+  `sync.RWMutex`: `Observe` / `IsPresent` / `PresentCount` / `PresentKeys` take
+  a read lock; only materialization (`GetOrInsertWith` / `Set`) takes a write
+  lock. Concurrency semantics are unchanged and stay clean under `-race`.
+- **Fast goroutine-id for `ThreadSafeContext`.** The reentrant lock no longer
+  calls `runtime.Stack` (walk + format) on every acquisition. Added
+  `internal/goid`: on amd64 it reads the runtime `g` pointer from TLS and the
+  `goid` field directly (offset probed once at first use, with a two-goroutine
+  consensus that removes false positives); non-amd64 and any probe failure fall
+  back to the portable `runtime.Stack` parse. All unsafe reads live in assembly
+  so `go vet` and `-race`/checkptr stay clean. Verified against `runtime.Stack`
+  across goroutines, under GC, and under `-race`.
+
 ## 0.14.0
 
 ### Added

@@ -39,30 +39,37 @@ cpu: AMD Ryzen 9 9950X3D 16-Core Processor
 
 | Benchmark | ns/op | B/op | allocs/op | What it measures |
 |-----------|------:|-----:|----------:|------------------|
-| `CellReadWrite` | 9.35 | 0 | 0 | `Cell.Set` (PartialEq guard) + `Cell.Get` round trip — the core mutation path, alloc-free. |
-| `CellMapInsertRead` | 16.58 | 0 | 0 | `CellMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
-| `MemoEqualityGuard` | 185.0 | 512 | 4 | `Memo` recompute that yields an equal value, suppressing the downstream cascade (an `Effect` stays put). |
-| `SlotRecompute` | 189.1 | 512 | 4 | Invalidate a `Cell`, then re-pull a dependent `Slot` (edge re-tracking + recompute). |
-| `BatchCoalesce` | 1864 | 4144 | 31 | 10 cell writes inside one `Batch`, coalesced into a single invalidation pass, then one `Slot` recompute. |
-| `SeqCrdtInsert` | 79,162 | 38,863 | 1,809 | Build a move-aware `SeqCrdt` of 100 elements (fractional-index positions + LWW registers). |
-| `TextCrdtInsert` | 687,793 | 1,054,417 | 11,444 | Build a `TextCrdt` of 100 characters (Fugue/RGA ordering rebuilt per insert). |
+| `CellReadWrite` | 7.50 | 0 | 0 | `Cell.Set` (PartialEq guard) + `Cell.Get` round trip — the core mutation path, alloc-free. |
+| `CellMapInsertRead` | 16.2 | 0 | 0 | `CellMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
+| `MemoEqualityGuard` | 96.2 | 0 | 0 | `Memo` recompute that yields an equal value, suppressing the downstream cascade (an `Effect` stays put). |
+| `SlotRecompute` | 98.2 | 0 | 0 | Invalidate a `Cell`, then re-pull a dependent `Slot` (edge re-tracking + recompute). |
+| `BatchCoalesce` | 967 | 160 | 1 | 10 cell writes inside one `Batch`, coalesced into a single invalidation pass, then one `Slot` recompute. |
+| `SeqCrdtInsert` | 77,197 | 38,863 | 1,809 | Build a move-aware `SeqCrdt` of 100 elements (fractional-index positions + LWW registers). |
+| `TextCrdtInsert` | 715,202 | 1,054,421 | 11,444 | Build a `TextCrdt` of 100 characters (Fugue/RGA ordering rebuilt per insert). |
 
 ## Notes
 
 - The reactive core steady-state (`CellReadWrite`, `CellMapInsertRead`) is
   **zero-allocation** — reads and equality-guarded writes don't touch the heap.
-- `SlotRecompute` / `MemoEqualityGuard` allocate a small, constant amount per
-  cascade (dependency-edge sets rebuilt on recompute); the memo guard's win is
-  behavioral — it aborts the downstream cascade when the recomputed value is
-  unchanged, not shown in per-op bytes here.
+- `SlotRecompute` / `MemoEqualityGuard` are now **zero-allocation** per cascade
+  as well: dependency-edge maps are `clear()`-reused in place instead of being
+  re-allocated each recompute, and `track()` skips re-writing an existing edge.
+  (Previously 512 B / 4 allocs per op.) The memo guard's win remains behavioral —
+  it aborts the downstream cascade when the recomputed value is unchanged.
+- `BatchCoalesce` drops to a single allocation (the coalesced invalidation
+  snapshot); the cell-write coalescing map and the pending-effect queue are now
+  reused across batches via in-place `clear()` and a head-pointer ring that
+  compacts on drain. (Previously 4,144 B / 31 allocs per op.)
 - The CRDT builders (`TextCrdtInsert`, `SeqCrdtInsert`) measure *whole-document
   construction* (100 ops), not per-op cost — divide by 100 for per-insert. They
   are the heaviest paths because visible order is recomputed as a pure function
   of the element set on each mutation, matching the spec's determinism
-  requirement.
+  requirement. Their allocation profile is unchanged by the reactive-core work.
 - These are single-threaded micro-benchmarks. The concurrency surfaces
   (`AsyncContext`, `SignalingRoom`, `CrdtPlaneRuntime`) are correctness-tested
-  under the race detector rather than benchmarked here.
+  under the race detector rather than benchmarked here; `ThreadSafeContext`
+  avoids a `runtime.Stack` walk per lock via the fast goid lookup in
+  `internal/goid` (see CHANGELOG).
 
 ## Scale (≥1M cells) — spreadsheet-shaped graph
 
