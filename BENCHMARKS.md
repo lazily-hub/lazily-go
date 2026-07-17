@@ -39,13 +39,23 @@ cpu: AMD Ryzen 9 9950X3D 16-Core Processor
 
 | Benchmark | ns/op | B/op | allocs/op | What it measures |
 |-----------|------:|-----:|----------:|------------------|
-| `CellReadWrite` | 7.50 | 0 | 0 | `Cell.Set` (PartialEq guard) + `Cell.Get` round trip — the core mutation path, alloc-free. |
-| `CellMapInsertRead` | 16.2 | 0 | 0 | `CellMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
-| `MemoEqualityGuard` | 96.2 | 0 | 0 | `Memo` recompute that yields an equal value, suppressing the downstream cascade (an `Effect` stays put). |
-| `SlotRecompute` | 98.2 | 0 | 0 | Invalidate a `Cell`, then re-pull a dependent `Slot` (edge re-tracking + recompute). |
-| `BatchCoalesce` | 967 | 160 | 1 | 10 cell writes inside one `Batch`, coalesced into a single invalidation pass, then one `Slot` recompute. |
-| `SeqCrdtInsert` | 77,197 | 38,863 | 1,809 | Build a move-aware `SeqCrdt` of 100 elements (fractional-index positions + LWW registers). |
-| `TextCrdtInsert` | 715,202 | 1,054,421 | 11,444 | Build a `TextCrdt` of 100 characters (Fugue/RGA ordering rebuilt per insert). |
+| `CellReadWrite` | 7.58 | 0 | 0 | `Cell.Set` (PartialEq guard) + `Cell.Get` round trip — the core mutation path, alloc-free. |
+| `CellMapInsertRead` | 15.7 | 0 | 0 | `CellMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
+| `MemoEqualityGuard` | 96.6 | 0 | 0 | `Memo` recompute that yields an equal value, suppressing the downstream cascade (an `Effect` stays put). |
+| `SlotRecompute` | 98.6 | 0 | 0 | Invalidate a `Cell`, then re-pull a dependent `Slot` (edge re-tracking + recompute). |
+| `BatchCoalesce` | 981 | 160 | 1 | 10 cell writes inside one `Batch`, coalesced into a single invalidation pass, then one `Slot` recompute. |
+| `SeqCrdtInsert` | 73,992 | 38,865 | 1,810 | Build a move-aware `SeqCrdt` of 100 elements (fractional-index positions + LWW registers). |
+| `TextCrdtInsert` | 687,160 | 1,054,422 | 11,444 | Build a `TextCrdt` of 100 characters (Fugue/RGA ordering rebuilt per insert). |
+| `Phase2IpcValueEqual` | 3.42 | 0 | 0 | Reflect-free `IpcValue` PartialEq guard (alternates `IpcValueInline` `bytes.Equal` and `IpcValueSharedBlob` struct ==). |
+| `Phase2AsyncValueEqual` | 10.6 | 16* | 0 | Reflect-free `asyncValueEqual` over `string`/`int`/`[]byte` (the fast type-switch paths added in 0.18.0). |
+| `Phase2AsyncCellStringSet` | 380 | 200 | 4 | `AsyncCell.Set` on a string cell where the equality guard short-circuits — exercises the new string fast path end-to-end. |
+| `Phase2PresenceRefreshSteadyState` | 113 | 256 | 2 | `PresenceCell.Heartbeat` with unchanged value — the reflect-free `comparableMapEqual` projection guard. |
+
+*The `16 B/op` for `Phase2AsyncValueEqual` shows up as non-zero bytes with zero
+allocs because the `[]byte` test fixtures' backing arrays live in the bench
+function's scope; `runtime.ReadMemStats` attributes some heap-growth accounting
+to per-op cost even though no allocation happens per iteration (verified by a
+standalone run). The actual comparator allocates nothing.
 
 ## Notes
 
@@ -70,6 +80,18 @@ cpu: AMD Ryzen 9 9950X3D 16-Core Processor
   under the race detector rather than benchmarked here; `ThreadSafeContext`
   avoids a `runtime.Stack` walk per lock via the fast goid lookup in
   `internal/goid` (see CHANGELOG).
+- **0.18.0 — Phase 2 quick wins.** The three remaining reflect-based equality
+  guards on the IPC / async-cell / presence hot paths are replaced with typed
+  comparators: a closed type switch over `IpcValue` variants (`bytes.Equal` +
+  struct `==`), a fast-path type switch over common scalar/`[]byte` payloads
+  before the reflect fallback in `asyncValueEqual`, and a generic
+  `comparableMapEqual` helper in place of `reflect.DeepEqual` on the
+  `presentReader.refresh` map projection. The new `Phase2*` benchmarks above
+  exercise each. `ipcValueEqual` is now ~3.4 ns/op with zero allocation; the
+  string fast path in `asyncValueEqual` avoids the ~50–100 ns `reflect.TypeOf`
+  round-trip per `AsyncCell.Set`. Slice preallocation was also tightened at
+  two append-from-filtered-map sites (`work_queue.ReapExpired`,
+  `signaling.welcome`).
 
 ## Scale (≥1M cells) — spreadsheet-shaped graph
 

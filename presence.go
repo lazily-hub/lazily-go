@@ -10,8 +10,6 @@ package lazily
 //
 // Port of lazily-rs/src/presence.rs.
 
-import "reflect"
-
 // Plane marks which plane a value lives on. Ephemeral values MUST NOT be
 // persisted; Durable values may be written to the durable outbox. In lazily-rs
 // these are the `Ephemeral`/`Durable` marker traits (a durable sink statically
@@ -189,10 +187,27 @@ func newPresentReader[K comparable, V comparable](ctx *Context, core *EphemeralM
 // projection, it bumps the version (invalidate only on a live-view change).
 func (r *presentReader[K, V]) refresh(now uint64) {
 	next := r.core.Present(now)
-	if !reflect.DeepEqual(next, r.last) {
+	if !comparableMapEqual(next, r.last) {
 		r.last = next
 		r.version.Set(r.version.Peek() + 1)
 	}
+}
+
+// comparableMapEqual reports whether two map[K]V values are structurally equal,
+// using K/V's native == instead of reflect.DeepEqual. Both type parameters are
+// `comparable`, so this is safe and avoids reflect's per-entry boxing/unwrap
+// cost on the presence refresh hot path.
+func comparableMapEqual[K comparable, V comparable](a, b map[K]V) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || av != bv {
+			return false
+		}
+	}
+	return true
 }
 
 // present subscribes to the version cell then returns a fresh snapshot.

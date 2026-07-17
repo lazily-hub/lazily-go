@@ -784,15 +784,51 @@ func asyncPanicError(r any) error {
 }
 
 // asyncValueEqual reports whether two cell values are equal, mirroring Dart's
-// `newValue != _value` change guard. It uses == for comparable types and falls
-// back to reflect.DeepEqual for non-comparable ones (slices, maps, funcs) so
-// Set never panics.
+// `newValue != _value` change guard. Fast paths via a type switch avoid the
+// reflect.TypeOf / reflect.DeepEqual cost (each ≈ 1 alloc + 50–100 ns) on the
+// common comparable cell payloads (scalars, strings, byte slices). The final
+// fallback to reflect.DeepEqual remains for arbitrary non-comparable types
+// (slices, maps, funcs) so Set never panics.
 func asyncValueEqual(a, b any) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
-	if ta != tb {
+	switch av := a.(type) {
+	case string:
+		bv, ok := b.(string)
+		return ok && av == bv
+	case int:
+		bv, ok := b.(int)
+		return ok && av == bv
+	case int64:
+		bv, ok := b.(int64)
+		return ok && av == bv
+	case int32:
+		bv, ok := b.(int32)
+		return ok && av == bv
+	case uint64:
+		bv, ok := b.(uint64)
+		return ok && av == bv
+	case float64:
+		bv, ok := b.(float64)
+		return ok && av == bv
+	case bool:
+		bv, ok := b.(bool)
+		return ok && av == bv
+	case []byte:
+		bv, ok := b.([]byte)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	}
+	ta := reflect.TypeOf(a)
+	if ta != reflect.TypeOf(b) {
 		return false
 	}
 	if ta.Comparable() {

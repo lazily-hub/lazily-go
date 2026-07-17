@@ -839,7 +839,7 @@ func (o *roomOwner) join(out []RoutedFrame, connID any, peer PeerId) []RoutedFra
 	o.peerToConn[peer] = connID
 
 	// Welcome the joiner (roster excludes self).
-	others := make([]PeerId, 0)
+	others := make([]PeerId, 0, len(o.peerToConn))
 	for _, p := range o.roster() {
 		if p != peer {
 			others = append(others, p)

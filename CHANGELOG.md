@@ -4,6 +4,48 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## 0.18.0 - 2026-07-17
+
+### Changed — performance (Phase 2 quick wins)
+
+- **Reflect-free equality guards (`#lzgono reflect`).** Replaced the three
+  remaining `reflect.DeepEqual` / `TypeOf` sites on the IPC / async-cell /
+  presence hot paths with typed comparators:
+  - `ipcValueEqual` (`ipc.go:1499`) is now a closed type switch over the two
+    `IpcValue` variants: `bytes.Equal` for `IpcValueInline` (avoiding reflect's
+    per-byte comparison overhead) and struct `==` for `IpcValueSharedBlob`'s
+    comparable `ShmBlobRef` descriptor. Drops the `reflect` import from `ipc.go`.
+  - `asyncValueEqual` (`async_context.go:790`) adds fast type-switch paths for
+    the common comparable cell payloads (`string`, `int`, `int32`, `int64`,
+    `uint64`, `float64`, `bool`, `[]byte`) before falling back to the existing
+    reflect-based comparable/non-comparable dispatch. `AsyncCell.Set` on a
+    scalar cell no longer pays the ~50–100 ns `reflect.TypeOf` round-trip per
+    write.
+  - `presentReader.refresh` (`presence.go:190`) replaces `reflect.DeepEqual` on
+    the live-view `map[K]V` projection with a new generic
+    `comparableMapEqual[K, V comparable]` helper (direct map lookup + `==`).
+    Drops the `reflect` import from `presence.go`.
+  - New `Phase2*` benchmarks in `bench_test.go` cover all three comparators and
+    the higher-level `AsyncCell.Set` and `PresenceCell.Heartbeat` steady-state
+    paths.
+- **Slice preallocation tidy-ups.** Two append-from-filtered-map sites now
+  preallocate the upper bound: `WorkQueueCell.ReapExpired`
+  (`work_queue.go:195`) uses `make([]uint64, 0, len(q.inFlight))`, and the
+  signaling-room welcome roster (`signaling.go:842`) uses
+  `make([]PeerId, 0, len(o.peerToConn))`. Eliminates the reallocations that
+  previously occurred as the filtered output grew.
+- **`#lzgosecondary-index` audit.** Surveyed the remaining O(N) scans for
+  membership-test / index-style wins comparable to Phase 1's
+  `childrenByParent` (`lossless_tree_crdt.go:736`). No clear algorithmic-class
+  wins were found: the surviving linear scans are either inherent to the
+  operation (`ReactiveMap.removeFromOrder` already needs an O(N) slice shift —
+  a `map[K]int` index would trade comparisons for hash updates with no
+  complexity-class improvement), over tiny slices (`CronCore.offsets`), part
+  of a full reduction (`PhiAccrual.mean`/`std`), in serialization/snapshot
+  paths rather than apply/merge hot paths, or already covered by Phase 1
+  indexing (`liveChildren`, `orderedIds` caches, the per-call `byOrigin`
+  bucketing in `TextCrdt.orderedIds`). Audit-only — no changes.
+
 ## 0.17.0 - 2026-07-17
 
 ### Changed — performance (CRDT plane, Phase 1 of `tasks/agent-doc/plans/lazily-perf-memory-audit.md`)

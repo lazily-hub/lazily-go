@@ -192,7 +192,7 @@ func (q *WorkQueueCell[T]) ReapExpired(now int64) int {
 	if now < 0 {
 		panic("now must be non-negative")
 	}
-	expired := make([]uint64, 0)
+	expired := make([]uint64, 0, len(q.inFlight))
 	for deliveryID, delivery := range q.inFlight {
 		if delivery.Deadline < now {
 			expired = append(expired, deliveryID)

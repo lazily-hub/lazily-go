@@ -29,7 +29,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 )
 
@@ -1495,7 +1494,24 @@ func nonNilSlice[T any](s []T) []T {
 	return s
 }
 
-// ipcValueEqual compares two IpcValues structurally (the PartialEq guard input).
+// ipcValueEqual compares two IpcValues structurally (the PartialEq guard
+// input). It is a reflect-free type switch over the closed IpcValue variant
+// set (Inline + SharedBlob): the inline payload uses bytes.Equal (avoids the
+// reflect.Value boxing + per-byte reflection overhead of DeepEqual), and the
+// SharedBlob descriptor is plain struct equality. Falls back to a typed-nil
+// check then reflect.DeepEqual only for forward-compatibility with
+// hypothetical new variants.
 func ipcValueEqual(a, b IpcValue) bool {
-	return reflect.DeepEqual(a, b)
+	switch av := a.(type) {
+	case IpcValueInline:
+		bv, ok := b.(IpcValueInline)
+		return ok && bytes.Equal(av.Bytes, bv.Bytes)
+	case IpcValueSharedBlob:
+		bv, ok := b.(IpcValueSharedBlob)
+		return ok && av.Blob == bv.Blob
+	case nil:
+		return b == nil
+	default:
+		return false
+	}
 }

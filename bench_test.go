@@ -106,3 +106,82 @@ func BenchmarkSeqCrdtInsert(b *testing.B) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Phase 2 perf quick wins (#lzgono reflect, #lzgosecondary-index audit).
+//
+// These exercise the three reflect-free equality hot paths added in 0.18.0
+// (ipc.go, async_context.go, presence.go). The two `Equal` benchmarks
+// stress the comparators in isolation; the higher-level `AsyncCell*` and
+// `PresenceCell*` benchmarks exercise them through the reactive API.
+// ---------------------------------------------------------------------------
+
+// BenchmarkPhase2IpcValueEqual covers both IpcValue variants through the
+// PartialEq guard (ipcValueEqual). Inline uses bytes.Equal; SharedBlob uses
+// plain struct ==.
+func BenchmarkPhase2IpcValueEqual(b *testing.B) {
+	inlineA := IpcValueInline{Bytes: []byte("hello lazily-go phase 2 reflect-free path")}
+	inlineB := IpcValueInline{Bytes: []byte("hello lazily-go phase 2 reflect-free path")}
+	blobA := IpcValueSharedBlob{Blob: ShmBlobRef{Offset: 42, Len: 1024, Generation: 7, Epoch: 3, Checksum: 999}}
+	blobB := IpcValueSharedBlob{Blob: ShmBlobRef{Offset: 42, Len: 1024, Generation: 7, Epoch: 3, Checksum: 999}}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		// Alternate variants so the type switch hits both branches.
+		if i&1 == 0 {
+			_ = ipcValueEqual(inlineA, inlineB)
+		} else {
+			_ = ipcValueEqual(blobA, blobB)
+		}
+	}
+}
+
+// BenchmarkPhase2AsyncValueEqual exercises the fast type-switch paths in
+// asyncValueEqual (string / int / []byte), which previously paid
+// reflect.TypeOf on every Set.
+func BenchmarkPhase2AsyncValueEqual(b *testing.B) {
+	sA, sB := "phase2", "phase2"
+	iA, iB := 17, 17
+	bA, bB := []byte("phase2-bytes"), []byte("phase2-bytes")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		switch i % 3 {
+		case 0:
+			_ = asyncValueEqual(sA, sB)
+		case 1:
+			_ = asyncValueEqual(iA, iB)
+		case 2:
+			_ = asyncValueEqual(bA, bB)
+		}
+	}
+}
+
+// BenchmarkPhase2AsyncCellStringSet drives AsyncCell.Set on a string cell.
+// The PartialEq guard previously paid reflect.TypeOf per write; the new fast
+// path uses a string type switch and zero reflection.
+func BenchmarkPhase2AsyncCellStringSet(b *testing.B) {
+	ctx := NewAsyncContext()
+	defer ctx.Close()
+	c := NewAsyncCell(ctx, "")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.Set("same") // equality guard short-circuits: no dependents to invalidate.
+	}
+}
+
+// BenchmarkPhase2PresenceRefreshSteadyState heartbeats the same peer with the
+// same value. The refresh path compares the live map to the last projection;
+// previously reflect.DeepEqual, now the typed comparableMapEqual helper.
+func BenchmarkPhase2PresenceRefreshSteadyState(b *testing.B) {
+	ctx := NewContext()
+	cell := NewPresenceCell[int, string](ctx, 1_000)
+	// Seed one peer so refresh compares two single-entry maps each tick.
+	cell.Heartbeat(1, "online", 0)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		cell.Heartbeat(1, "online", uint64(i)) // value unchanged -> projection equal.
+	}
+}
