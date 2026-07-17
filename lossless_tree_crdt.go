@@ -725,21 +725,28 @@ type treeNode struct {
 // Not safe for concurrent use; share across goroutines via a single owner
 // goroutine or wrap in a lock.
 type LosslessTreeCrdt struct {
-	peer     PeerId
-	counter  int64
-	nodes    map[OpId]*treeNode
-	frontier *TreeVersionFrontier
-	log      []TreeOp
-	buffered []TreeOp
+	peer    PeerId
+	counter int64
+	nodes   map[OpId]*treeNode
+	// Secondary parent→children index (#lzlivelchildidx). Stores child ids so
+	// the index survives record-body replacement on LeafEdit / SplitLeaf;
+	// tombstone/reorder mutate the underlying record in place, so the index
+	// only needs parent→child membership. Replaces the O(N) full-scan in
+	// liveChildren that made Render O(N²).
+	childrenByParent map[OpId][]OpId
+	frontier         *TreeVersionFrontier
+	log              []TreeOp
+	buffered         []TreeOp
 }
 
 // NewLosslessTreeCrdt creates an empty replica for the given peer id, seeded
 // with just the document root element.
 func NewLosslessTreeCrdt(peer PeerId) *LosslessTreeCrdt {
 	t := &LosslessTreeCrdt{
-		peer:     peer,
-		nodes:    map[OpId]*treeNode{},
-		frontier: NewTreeVersionFrontier(),
+		peer:             peer,
+		nodes:            map[OpId]*treeNode{},
+		childrenByParent: map[OpId][]OpId{},
+		frontier:         NewTreeVersionFrontier(),
 	}
 	rootParent := (*OpId)(nil)
 	t.nodes[TreeRoot] = &treeNode{
@@ -763,13 +770,29 @@ func (t *LosslessTreeCrdt) get(id OpId) *treeNode {
 	return t.nodes[id]
 }
 
+// indexAdd inserts childID under parent in the secondary index. Idempotent
+// under apply replay (CreateNode on an already-present id returns early).
+func (t *LosslessTreeCrdt) indexAdd(parent, childID OpId) {
+	for _, existing := range t.childrenByParent[parent] {
+		if existing == childID {
+			return
+		}
+	}
+	t.childrenByParent[parent] = append(t.childrenByParent[parent], childID)
+}
+
 // liveChildren returns the live children of parent, in rendered (SortKey)
 // order. A node's identity is the id of the op that created it; the JS impl
 // returns that id, which we store on the record as `id`.
 func (t *LosslessTreeCrdt) liveChildren(parent OpId) []OpId {
+	bucket := t.childrenByParent[parent]
+	if bucket == nil {
+		return nil
+	}
 	var kids []*treeNode
-	for _, r := range t.nodes {
-		if r.parent != nil && *r.parent == parent && r.tomb == nil {
+	for _, id := range bucket {
+		r := t.nodes[id]
+		if r != nil && r.tomb == nil {
 			kids = append(kids, r)
 		}
 	}
@@ -1025,6 +1048,12 @@ func (t *LosslessTreeCrdt) Fork(peer PeerId) *LosslessTreeCrdt {
 			textHead:  r.textHead,
 		}
 	}
+	// Rebuild the parent→children index from the copied node map (#lzlivelchildidx).
+	for id, r := range out.nodes {
+		if r.parent != nil {
+			out.indexAdd(*r.parent, id)
+		}
+	}
 	out.frontier = t.frontier.Copy()
 	out.log = append([]TreeOp(nil), t.log...)
 	out.buffered = append([]TreeOp(nil), t.buffered...)
@@ -1144,6 +1173,7 @@ func (t *LosslessTreeCrdt) applyOp(op TreeOp) {
 			tomb:      nil,
 			textHead:  op.Id,
 		}
+		t.indexAdd(k.Parent, k.Id)
 	case TreeOpTombstone:
 		rec := t.get(k.Node)
 		if rec != nil {
@@ -1204,6 +1234,9 @@ func (t *LosslessTreeCrdt) applySplit(node, newNode OpId, sort TreeSortKey, atCh
 			body:      treeBody{kind: "leaf", leafKind: leafKind, text: TextCrdtFromStr(newNode.Peer, tail)},
 			tomb:      nil,
 			textHead:  opId,
+		}
+		if newParent != nil {
+			t.indexAdd(*newParent, newNode)
 		}
 	}
 }

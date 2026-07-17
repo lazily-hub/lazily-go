@@ -132,6 +132,12 @@ type TextCrdt struct {
 	peer    PeerId
 	counter int64
 	elems   map[OpId]*textElem
+	// Cached visible orderings (#lztextordcache). Both nil after every
+	// mutation; populated lazily on the next read. Repeated Text()/Len()
+	// between mutations drops O(N log N) -> O(1) (after the first rebuild)
+	// instead of rebuilding per call.
+	orderedLiveCache []OpId
+	orderedAllCache  []OpId
 }
 
 // NewTextCrdt creates an empty replica for the given peer id.
@@ -155,11 +161,29 @@ func (t *TextCrdt) nextId() OpId {
 	return OpId{Counter: t.counter, Peer: t.peer}
 }
 
+// invalidateOrdered clears both orderings; callers must invoke after any
+// mutation that changes the element set or origin tree.
+func (t *TextCrdt) invalidateOrdered() {
+	t.orderedLiveCache = nil
+	t.orderedAllCache = nil
+}
+
 // orderedIds returns the visible ordering: pre-order DFS of the origin tree,
 // siblings sorted descending by OpId. When includeDeleted is false, tombstoned
 // elements are omitted from the output but still traversed (their descendants
 // remain reachable).
 func (t *TextCrdt) orderedIds(includeDeleted bool) []OpId {
+	// Cache hit (#lztextordcache).
+	if includeDeleted {
+		if t.orderedAllCache != nil {
+			return t.orderedAllCache
+		}
+	} else {
+		if t.orderedLiveCache != nil {
+			return t.orderedLiveCache
+		}
+	}
+
 	byOrigin := map[OpId][]OpId{}
 	for id, e := range t.elems {
 		ok := textRootKey
@@ -187,6 +211,11 @@ func (t *TextCrdt) orderedIds(includeDeleted bool) []OpId {
 		}
 	}
 	dfs(textRootKey)
+	if includeDeleted {
+		t.orderedAllCache = out
+	} else {
+		t.orderedLiveCache = out
+	}
 	return out
 }
 
@@ -199,16 +228,35 @@ func (t *TextCrdt) Insert(index int, ch string) {
 		origin = &v
 	}
 	id := t.nextId()
+	t.invalidateOrdered()
 	t.elems[id] = &textElem{ch: ch, origin: origin, deleted: nil}
 }
 
-// InsertStr inserts a multi-character string at the visible index, iterating
-// code points.
+// InsertStr inserts a multi-character string at the visible index with origin
+// chaining (#lztextinsertchain): one `orderedIds()` pass + N chain appends
+// instead of N full-tree rebuilds. Sequential chars chain naturally — char i+1's
+// left-origin is char i's just-minted OpId — so DFS visits them in chain order
+// (counter strictly increases under one peer). Concurrent inserts at the same
+// point still sort by peer tiebreak (standard CRDT convergence).
 func (t *TextCrdt) InsertStr(index int, s string) {
-	i := index
+	visible := t.orderedIds(false)
+	var origin *OpId
+	if index != 0 && index-1 < len(visible) {
+		v := visible[index-1]
+		origin = &v
+	}
+	t.invalidateOrdered()
 	for _, r := range s {
-		t.Insert(i, string(r))
-		i++
+		id := t.nextId()
+		// Each iteration needs its own origin pointer (don't alias &id).
+		var originForThis *OpId
+		if origin != nil {
+			v := *origin
+			originForThis = &v
+		}
+		t.elems[id] = &textElem{ch: string(r), origin: originForThis, deleted: nil}
+		next := id
+		origin = &next
 	}
 }
 
@@ -223,6 +271,9 @@ func (t *TextCrdt) Delete(index int) {
 	del := t.nextId()
 	if elem.deleted == nil {
 		elem.deleted = &del
+		// Tombstone flip changes the live (filtered) ordering but not the
+		// full DFS — only invalidate the live cache.
+		t.orderedLiveCache = nil
 	}
 }
 
@@ -265,15 +316,22 @@ func (t *TextCrdt) Clone() *TextCrdt { return t.Fork(t.peer) }
 // visible text changed.
 func (t *TextCrdt) Merge(other *TextCrdt) bool {
 	before := t.Text()
+	anyChange := false
 	for id, e := range other.elems {
-		t.mergeElem(id, e)
+		if t.mergeElem(id, e) {
+			anyChange = true
+		}
+	}
+	if anyChange {
+		t.invalidateOrdered()
 	}
 	return t.Text() != before
 }
 
 // mergeElem is the commutative/associative/idempotent element merge shared by
-// Merge and ApplyDelta.
-func (t *TextCrdt) mergeElem(id OpId, oe *textElem) {
+// Merge and ApplyDelta. Returns true if any state changed (new element adopted
+// or tombstone id updated).
+func (t *TextCrdt) mergeElem(id OpId, oe *textElem) bool {
 	m := t.counter
 	if id.Counter > m {
 		m = id.Counter
@@ -290,13 +348,16 @@ func (t *TextCrdt) mergeElem(id OpId, oe *textElem) {
 			// Concurrent deletes -> smaller delete id wins (sticky on both).
 			if oe.deleted.Compare(*existing.deleted) < 0 {
 				existing.deleted = cloneOpIdPtr(oe.deleted)
+				return true
 			}
-		case oe.deleted != nil:
+		case oe.deleted != nil && existing.deleted == nil:
 			existing.deleted = cloneOpIdPtr(oe.deleted)
+			return true
 		}
-		return
+		return false
 	}
 	t.elems[id] = &textElem{ch: oe.ch, origin: cloneOpIdPtr(oe.origin), deleted: cloneOpIdPtr(oe.deleted)}
+	return true
 }
 
 // GcWith collects stable tombstones. An element is collectable when it is
@@ -327,6 +388,9 @@ func (t *TextCrdt) GcWith(isStable func(deleteOpId OpId) bool) int {
 			delete(t.elems, k)
 			removed++
 		}
+	}
+	if removed > 0 {
+		t.invalidateOrdered()
 	}
 	return removed
 }
@@ -376,8 +440,14 @@ func (t *TextCrdt) DeltaSince(theirVv map[PeerId]int64) []TextOp {
 // algebra as Merge. Returns whether the visible text changed.
 func (t *TextCrdt) ApplyDelta(ops []TextOp) bool {
 	before := t.Text()
+	anyChange := false
 	for _, op := range ops {
-		t.mergeElem(op.Id, &textElem{ch: op.Ch, origin: op.Origin, deleted: op.Deleted})
+		if t.mergeElem(op.Id, &textElem{ch: op.Ch, origin: op.Origin, deleted: op.Deleted}) {
+			anyChange = true
+		}
+	}
+	if anyChange {
+		t.invalidateOrdered()
 	}
 	return t.Text() != before
 }

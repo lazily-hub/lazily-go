@@ -4,6 +4,28 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## 0.17.0 - 2026-07-17
+
+### Changed — performance (CRDT plane, Phase 1 of `tasks/agent-doc/plans/lazily-perf-memory-audit.md`)
+
+- **`TextCrdt.orderedIds` cache (`#lztextordcache`).** The DFS pre-order is now
+  memoized and invalidated on every mutation that changes the element set
+  (`Insert`/`InsertStr`/`Merge`/`ApplyDelta`/`GcWith`). Repeated `Text()` /
+  `Len()` between mutations drops from O(N log N) per call to O(N) total
+  (one rebuild + N filter passes) instead of N × O(N log N). Tombstone flips
+  (`Delete`) only invalidate the live cache (the full DFS includes tombstones).
+- **`TextCrdt.InsertStr` origin chaining (`#lztextinsertchain`).** `InsertStr`
+  rewrites from N per-char `Insert` calls to one `orderedIds()` pass + N chain
+  appends. Drops O(N² log N) → O(N log N); concurrent inserts still sort by
+  peer tiebreak.
+- **`LosslessTreeCrdt` parent→children index (`#lzlivelchildidx`).** A new
+  `childrenByParent` map replaces the O(N) full-scan in `liveChildren`.
+  `Render()` drops from O(N²) to O(N). Maintained at every `CreateNode` /
+  `SplitLeaf` site (idempotent under apply replay); tombstones stay in the
+  bucket (logical delete); `Fork` rebuilds from the copied node map.
+- The Go `TextCrdt` already keyed `elems` by `OpId` directly (Go struct values
+  are comparable), so `#lzopidkeytuple` was a no-op here.
+
 ## 0.16.0 - 2026-07-16
 
 ### Changed
