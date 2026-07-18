@@ -4,6 +4,39 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## 0.19.0 - 2026-07-17
+
+### Changed — performance investigation (`#lzgoslotmap`)
+
+- **Dense-node-arena investigation landed as measurement + deferred design.**
+  The `scale` benchmarks (BENCHMARKS.md → "Note on viewport scaling")
+  document a residual ~2.6× viewport-read growth from 2M→10M cells vs
+  lazily-rs's flatter slotmap-packed curve. The strategic fix is a dense
+  node arena (flat `[]reactiveNode` indexed by `nodeID`) — but a full
+  arena refactor of lazily-go's public reactive types (`*Cell[T]`,
+  `*Slot[T]`, `*Signal[T]`, `*Effect`, `*Memo[T]` each embed
+  `reactiveBase` directly and are returned by reference from the public
+  API) touches every collection, async, and distributed layer and is not
+  a single-turn refactor.
+- **Smaller-scope alternatives were prototyped, measured, and rejected**
+  (full table with before/after numbers in BENCHMARKS.md →
+  "`#lzgoslotmap` investigation"). In summary: lazy edge-map allocation
+  is a net wash (it shifts the same hmap allocations from build into the
+  cold-read path); the inline-stack-snapshot optimization adds stack-frame
+  overhead for no gain (Go's escape analysis already stack-allocates the
+  small-fan-out case); leaving `Cell.dependencies` nil gives a real
+  build-time alloc win but produces a repeatable ~16% regression on
+  `ScaleViewportRecalc` from an unexplained heap-layout effect.
+- **New default-`make-bench`-runnable pointer-chase benchmarks.**
+  `BenchmarkSlotmapChaseViewport` (~2,090 ns/op, 0 allocs) and
+  `BenchmarkSlotmapChaseEdit` (~6.35 ns/op, 0 allocs) in `bench_test.go`
+  capture the slotmap-relevant cost on a 200K-node spreadsheet-shaped
+  graph. The existing `scale_bench_test.go` benchmarks are gated behind
+  the `scalebench` build tag (the heavy multi-million-node build would
+  dominate a default `make bench`); the new benchmarks make the cost
+  visible without opting into the heavy build, and provide a stable
+  baseline future arena work can regress-test against.
+
 ## 0.18.0 - 2026-07-17
 
 ### Changed — performance (Phase 2 quick wins)

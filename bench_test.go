@@ -1,6 +1,9 @@
 package lazily
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // Go testing.B benchmarks for the lazily-go hot paths. These mirror the
 // in-library RunBenchmarkSuite scenarios (instrumentation.go) so the numbers in
@@ -184,4 +187,105 @@ func BenchmarkPhase2PresenceRefreshSteadyState(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		cell.Heartbeat(1, "online", uint64(i)) // value unchanged -> projection equal.
 	}
+}
+
+// ---------------------------------------------------------------------------
+// #lzgoslotmap — pointer-chase cost characterization
+//
+// The scale benchmarks in scale_bench_test.go (gated behind the `scalebench`
+// build tag so a plain `make bench` skips the heavy multi-million-node build)
+// measure the slotmap locality gap end-to-end: the viewport read grows ~2.6×
+// from 2M→10M cells because nodes are scattered across a larger heap. The
+// benchmarks below capture the same shape at a size that fits in the default
+// `make bench` run, so the cost is visible without opting into the heavy
+// build tag. They construct a fan-in-2 spreadsheet-shaped graph (input cell
+// + previous-cell formula) of a tunable size, warm it once, then time a
+// steady-state "edit one input, read a 1,000-cell viewport" iteration —
+// exactly the workload the slotmap dense-arena would address.
+//
+// See BENCHMARKS.md → "#lzgoslotmap investigation" for the analysis of why a
+// full arena refactor is the path that closes the gap (and why smaller-scope
+// alternatives were measured and rejected for this turn).
+// ---------------------------------------------------------------------------
+
+// slotmapChaseSize is the default row count for the pointer-chase benchmarks.
+// 100_000 rows ⇒ 200_000 reactive nodes — large enough for the heap to span
+// many allocator spans (so cache effects show up) but small enough that the
+// default `make bench` finishes in well under a second.
+const slotmapChaseSize = 100_000
+
+// buildSlotmapChase constructs a fan-in-2 spreadsheet-shaped graph with n
+// rows: input[i] + formula[i] = input[i] + input[i-1]. Returns the cells,
+// formulas, and the editable "middle" input index used by the viewport edit.
+func buildSlotmapChase(n int) (cells []*Cell[int64], formulas []*Slot[int64], mid int) {
+	ctx := NewContext()
+	cells = make([]*Cell[int64], n)
+	for i := 0; i < n; i++ {
+		cells[i] = NewCell(ctx, int64(i))
+	}
+	formulas = make([]*Slot[int64], n)
+	for i := 0; i < n; i++ {
+		a := cells[i]
+		prev := i - 1
+		if prev < 0 {
+			prev = 0
+		}
+		b := cells[prev]
+		formulas[i] = NewSlot(ctx, func(*Context) int64 { return a.Get() + b.Get() })
+	}
+	for _, f := range formulas {
+		_ = f.Get() // warm: establish edges and cache
+	}
+	mid = n / 2
+	return
+}
+
+// benchSink is a package-level sink that defeats dead-code elimination of
+// benchmarked reads in this file. (scale_bench_test.go has its own scaleSink
+// behind the scalebench tag.)
+var benchSink int64
+
+// BenchmarkSlotmapChaseViewport is the default-`make-bench`-runnable version
+// of `BenchmarkScaleViewportRecalc`. Edit one input, read a 1,000-cell
+// viewport around the middle, repeat. Stays at zero allocations in the
+// steady state — the timed cost is pure pointer-chase latency across the
+// reactive graph, which is what a dense-arena refactor would address.
+func BenchmarkSlotmapChaseViewport(b *testing.B) {
+	cells, formulas, mid := buildSlotmapChase(slotmapChaseSize)
+	lo := mid - 500
+	if lo < 0 {
+		lo = 0
+	}
+	hi := lo + 1000
+	if hi > len(formulas) {
+		hi = len(formulas)
+	}
+	var tick int64
+	var acc int64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tick++
+		cells[mid].Set(tick)
+		for _, f := range formulas[lo:hi] {
+			acc += f.Get()
+		}
+	}
+	benchSink = acc
+}
+
+// BenchmarkSlotmapChaseEdit measures just the invalidation cascade after a
+// single input edit (no viewport read). In a fan-in-2 graph each edit
+// invalidates exactly 2 formulas; the rest of the cost is downstream-cascade
+// overhead. Useful for isolating the invalidate path from the read path.
+func BenchmarkSlotmapChaseEdit(b *testing.B) {
+	cells, _, mid := buildSlotmapChase(slotmapChaseSize)
+	var tick int64
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		tick++
+		cells[mid].Set(tick)
+	}
+	runtime.KeepAlive(cells)
 }

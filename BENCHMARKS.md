@@ -50,6 +50,8 @@ cpu: AMD Ryzen 9 9950X3D 16-Core Processor
 | `Phase2AsyncValueEqual` | 10.6 | 16* | 0 | Reflect-free `asyncValueEqual` over `string`/`int`/`[]byte` (the fast type-switch paths added in 0.18.0). |
 | `Phase2AsyncCellStringSet` | 380 | 200 | 4 | `AsyncCell.Set` on a string cell where the equality guard short-circuits — exercises the new string fast path end-to-end. |
 | `Phase2PresenceRefreshSteadyState` | 113 | 256 | 2 | `PresenceCell.Heartbeat` with unchanged value — the reflect-free `comparableMapEqual` projection guard. |
+| `SlotmapChaseViewport` | 2,090 | 0 | 0 | Steady-state "edit one input, read a 1,000-cell viewport" on a 200K-node spreadsheet graph. Pure pointer-chase latency (no allocation); the cost a dense-arena refactor would address. |
+| `SlotmapChaseEdit` | 6.35 | 0 | 0 | Just the invalidation cascade after a single input edit on the same 200K-node graph (no viewport read). Isolates the invalidate path. |
 
 *The `16 B/op` for `Phase2AsyncValueEqual` shows up as non-zero bytes with zero
 allocs because the `[]byte` test fixtures' backing arrays live in the bench
@@ -175,5 +177,65 @@ its slotmap packs values into a contiguous array indexed by a dense handle, so
 even the pointer-chase is largely sequential; a contiguous arena keyed by a dense
 node id would close the remaining lazily-go gap. Reported with real before/after
 numbers rather than a claimed flat line.
+
+## `#lzgoslotmap` investigation — dense node arena (0.19.0)
+
+The BENCHMARKS.md note above identifies the win — a contiguous arena keyed by
+a dense node id — but a full slotmap refactor of lazily-go is a deep change:
+the public reactive types (`*Cell[T]`, `*Slot[T]`, `*Signal[T]`, `*Effect`,
+`*Memo[T]`) each embed `reactiveBase` directly and are returned by reference
+from the public API, so the per-node storage cannot be relocated into a flat
+`[]reactiveNode` without either changing every public constructor's return
+type or introducing a wide-reaching ID→`*T` indirection that every
+`Cell.Get`/`Slot.Get`/`Signal.Get` would have to dereference. That is the
+right long-term design, but it touches every collection, async, and
+distributed layer (collections.go, async_context.go, reactive_map.go,
+registers.go, thread_safe*.go, etc.) and is not a single-turn refactor.
+
+For 0.19.0 the smaller-scope alternatives were prototyped, measured on the
+`scalebench` suite (`LAZILY_SCALE_N=2000000`, 4M reactive nodes), and
+rejected because none was a safe net win:
+
+| Attempt | Build allocs | Build time | Cold-read allocs | Cold-read time | Viewport ns | Outcome |
+|---|---:|---:|---:|---:|---:|---|
+| baseline (0.18.0) | 14.0M | 345 ms | 4.0M | 410 ms | 1,960 | — |
+| lazy edge maps (both dirs nil until first write) | 6.0M (-57%) | 166 ms (-52%) | 8.0M (+100%) | 466 ms (+13%) | 2,336 | Net wash — shifts the same hmap allocations from build into the cold-read path. Reverted. |
+| inline-stack snapshot for `invalidate()` | 14.0M | 413 ms | 4.0M | 498 ms | 2,237 | No win — Go's escape analysis already stack-allocates `make([]T, 0, n)` for the small fan-out case; the inline array just grew the recursive stack frame. Reverted. |
+| leave `Cell.dependencies` nil (cells never push onto the stack so the upstream map is never written) | 12.0M (-14%) | 298 ms (-14%) | 4.0M (no change) | 366 ms | 2,282 | Build-time alloc win, but a repeatable ~16% regression on `ScaleViewportRecalc` (1,960 → 2,270 ns) with no change to the steady-state allocation profile — a heap-layout / cache-line effect from removing 2M hmap structs we cannot explain. Not shippable as a perf win when an established benchmark regresses. Reverted. |
+| `make(map, hint≥7)` bucket preallocation | +8M build, −4M cold | worse | 0 | better | — | Trades cold-read time for build time one-for-one (same total alloc count, just relocated). A wash on the spreadsheet workload. Not shipped. |
+
+Two durable deliverables did land for 0.19.0:
+
+- **`BenchmarkSlotmapChaseViewport` / `BenchmarkSlotmapChaseEdit`** in
+  `bench_test.go` capture the pointer-chase cost in the default
+  `make bench` run. The existing `scale_bench_test.go` benchmarks that
+  originally measured the 2.6× viewport growth are gated behind the
+  `scalebench` build tag (the heavy multi-million-node build would
+  dominate a default bench run); the new `SlotmapChase*` benchmarks
+  construct a 200K-node spreadsheet-shaped graph that fits comfortably
+  in `make bench` and exhibits the same shape, so the slotmap cost is
+  visible and re-measurable without opting into the heavy build. Numbers
+  above (~2,090 ns viewport, ~6.35 ns edit-only) become the baseline
+  future arena work can regress-test against.
+- **The investigation table above** records *why* each smaller-scope
+  attempt was rejected, with before/after numbers — so the next attempt
+  doesn't re-walk the same ground.
+
+What a full arena refactor would need to do (deferred):
+
+1. Introduce a `nodeID` (uint32) and a `Context.arena []arenaNode` flat
+   array. Each `reactiveBase` becomes `(id nodeID, ctx *Context)`; the
+   `dependents`/`dependencies` maps move into `arenaNode` keyed by
+   `nodeID` (so a map bucket entry drops from 16-byte `reactiveNode`
+   interface to 4-byte `uint32`).
+2. `Cell.Get`/`Slot.Get`/etc. keep their existing `*T` return types (so
+   the public API is preserved), but the per-node storage lives in the
+   arena and the public `*T` becomes a handle into it.
+3. Every site that embeds `reactiveBase` (collections.go, async_context.go,
+  reactive_map.go, registers.go, thread_safe*.go, signalSlot, Memo) needs
+   its constructors migrated to the arena path.
+
+That is the work that would actually close the slotmap gap. It is the
+recommended next step for `#lzgoslotmap`.
 
 [rs-scale]: https://github.com/lazily-hub/lazily-rs/blob/main/benches/scale.rs
