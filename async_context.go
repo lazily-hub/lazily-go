@@ -526,17 +526,51 @@ func (c *AsyncContext) invalidateDependents(dep any) {
 		c.batchQueue[dep] = struct{}{}
 		return
 	}
-	m := c.dependents[dep]
-	if m == nil {
-		return
+	// Walk the FULL transitive dependent cone, not just one level. A slot that
+	// depends on a slot must itself be invalidated: GetAsync short-circuits on
+	// AsyncSlotResolved, so a downstream slot left Resolved keeps serving its
+	// cached value forever and the pull chain cannot rescue it. Stopping one
+	// level below the written cell is the defect this walk replaces — the sync
+	// side never had it (reactiveBase.invalidate in core.go cascades), only the
+	// async path.
+	//
+	// Termination is by edge consumption rather than a visited set: deleting
+	// c.dependents[cur] on visit means a revisit finds no entry and the branch
+	// dies, so diamonds and cycles terminate. Edges re-register when each slot
+	// recomputes (spawnCompute clears s.deps and the compute re-tracks).
+	stack := []any{dep}
+	// Effects are collected and scheduled AFTER the walk. scheduleEffectRerun
+	// calls runEffect inline, and runEffect detaches the effect's dependency
+	// edges via removeDependent — mutating c.dependents while the walk is still
+	// reading it.
+	var effects []*AsyncEffectHandle
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		m := c.dependents[cur]
+		if m == nil {
+			continue
+		}
+		delete(c.dependents, cur)
+		for d := range m {
+			switch n := d.(type) {
+			case *AsyncEffectHandle:
+				// Frontier leaf: nothing can depend on an effect, so the walk
+				// does not continue through one.
+				effects = append(effects, n)
+			case *asyncSlot:
+				c.invalidateSlot(n)
+				// A slot registers its dependents under its own pointer
+				// (trackDep is called with slot.node), so the node is the key
+				// for the next level.
+				stack = append(stack, n)
+			default:
+				d.onDepInvalidated(c)
+			}
+		}
 	}
-	delete(c.dependents, dep)
-	ds := make([]dependent, 0, len(m))
-	for d := range m {
-		ds = append(ds, d)
-	}
-	for _, d := range ds {
-		d.onDepInvalidated(c)
+	for _, e := range effects {
+		c.scheduleEffectRerun(e)
 	}
 }
 
