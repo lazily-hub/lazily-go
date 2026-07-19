@@ -40,7 +40,7 @@ jobs:
       - name: Guard — canonical fixtures present (#lzspecconf)
         run: |
           test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — the conformance tests would silently skip"; exit 1; }
-          for corpus in collections coordination presence reliable-sync signaling statechart temporal windowing; do
+          for corpus in collections coordination presence reactive-graph reliable-sync signaling statechart temporal windowing; do
             test -d "../lazily-spec/conformance/$corpus" || { echo "::error::../lazily-spec/conformance/$corpus missing — its conformance runner would silently skip"; exit 1; }
           done
 
@@ -69,6 +69,27 @@ jobs:
             echo "::error::only $ran conformance subtests ran (expected >= 100) — the corpus is not being replayed"
             exit 1
           fi
+
+          # The reactive-graph corpus must reach EVERY context this binding
+          # ships. The cascade defect fixed in bdfdbce was correct in Context
+          # and broken in AsyncContext, so a replay that covers only the
+          # default context passes while the async path is broken — exactly
+          # how that defect shipped. Require a non-zero fixture count from
+          # each model by name; deleting a model's coverage fails here rather
+          # than quietly shrinking the total subtest count.
+          for model in Context AsyncContext; do
+            line=$(echo "$out" | grep -E "reactive-graph\[$model\]: [0-9]+ fixtures replayed" || true)
+            if [ -z "$line" ]; then
+              echo "::error::reactive-graph corpus was not replayed against $model"
+              exit 1
+            fi
+            n=$(echo "$line" | sed -E 's/.*\[('"$model"')\]: ([0-9]+) fixtures.*/\2/')
+            echo "reactive-graph[$model]: $n fixtures replayed"
+            if [ "$n" -lt 1 ]; then
+              echo "::error::reactive-graph[$model] replayed $n fixtures — the runner executed nothing"
+              exit 1
+            fi
+          done
 
       - name: race (cgo)
         run: CGO_ENABLED=1 go test -race ./...
