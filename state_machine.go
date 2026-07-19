@@ -66,12 +66,30 @@ func (m *StateMachine[S, E]) Send(event E) bool {
 // OnTransition registers a handler fired with (old, new) on a transition to a
 // different state. It is not called on registration. It returns a disposer;
 // call it to stop observing.
+//
+// This is an EFFECT, not a callback registered on the Cell — observation in a
+// reactive graph is a declared dependency edge. The effect reads the state cell,
+// which is what makes it a dependent; a captured `prev` turns the level-triggered
+// rerun into an edge-triggered (old, new) pair. Mirrors lazily-rs
+// StateMachine::on_transition (src/state_machine.rs).
+//
+// Batching consequence: an effect reruns once per settled cascade, so a batch
+// that walks A -> B -> C reports the single transition (A, C) rather than
+// (A, B) and (B, C). That is intended — a batch asserts atomicity, and the
+// intermediate B was never an observable state of the graph.
 func (m *StateMachine[S, E]) OnTransition(handler func(oldState, newState S)) func() {
-	prev := m.cell.Peek()
-	return m.cell.Subscribe(func(value S) {
-		if value != prev {
-			handler(prev, value)
+	var prev S
+	primed := false
+	effect := NewEffect(m.ctx, func(ctx *Context) func() {
+		current := m.cell.Get()
+		// The first run only establishes the baseline — OnTransition is not
+		// called on registration.
+		if primed && current != prev {
+			handler(prev, current)
 		}
-		prev = value
+		prev = current
+		primed = true
+		return nil
 	})
+	return effect.Dispose
 }

@@ -204,7 +204,9 @@ func TestReactiveEqualWriteInsideBatchAbsorbed(t *testing.T) {
 // --- properties (reactive_properties_test.dart, mirroring Lean theorems) ---
 
 // Lean setCell_equal_preserves_graph: an equal setCell invalidates no dependent
-// (neither the lazy slot recomputes nor the observer fires).
+// — neither the lazy slot recomputes nor the eager effect reruns. Both arms are
+// dependency edges declared by reading the cell, which is the only way to
+// observe a Cell.
 func TestReactiveEqualSetPreservesGraph(t *testing.T) {
 	ctx := NewContext()
 	a := NewCell(ctx, 2)
@@ -213,13 +215,17 @@ func TestReactiveEqualSetPreservesGraph(t *testing.T) {
 		slotFires++
 		return a.Get()
 	})
-	observerFires := 0
-	a.Subscribe(func(int) { observerFires++ })
+	effectFires := 0
+	NewEffect(ctx, func(*Context) func() {
+		effectFires++
+		a.Get()
+		return nil
+	})
 
 	if got := dependent.Get(); got != 2 {
 		t.Fatalf("dependent = %d, want 2", got)
 	}
-	slotBefore, obsBefore := slotFires, observerFires
+	slotBefore, effectBefore := slotFires, effectFires
 
 	a.Set(2) // equal — must be a no-op
 
@@ -229,8 +235,8 @@ func TestReactiveEqualSetPreservesGraph(t *testing.T) {
 	if slotFires != slotBefore {
 		t.Fatalf("slot recomputed on equal set: %d != %d", slotFires, slotBefore)
 	}
-	if observerFires != obsBefore {
-		t.Fatalf("observer fired on equal set: %d != %d", observerFires, obsBefore)
+	if effectFires != effectBefore {
+		t.Fatalf("effect reran on equal set: %d != %d", effectFires, effectBefore)
 	}
 }
 
@@ -379,21 +385,6 @@ func TestReactiveSignalDisposeRevertsToLazy(t *testing.T) {
 	}
 }
 
-// Cell.Subscribe delivers each new value and the returned disposer stops it.
-func TestReactiveCellSubscribeAndDispose(t *testing.T) {
-	ctx := NewContext()
-	a := NewCell(ctx, 0)
-	var seen []int
-	unsub := a.Subscribe(func(v int) { seen = append(seen, v) })
-	a.Set(1)
-	a.Set(2)
-	unsub()
-	a.Set(3)
-	if len(seen) != 2 || seen[0] != 1 || seen[1] != 2 {
-		t.Fatalf("seen = %v, want [1 2]", seen)
-	}
-}
-
 // --- state machine (state_machine.go, ported from state_machine.dart) ------
 
 func TestReactiveStateMachineTransitions(t *testing.T) {
@@ -481,5 +472,30 @@ func TestReactiveStateMachineOnTransition(t *testing.T) {
 	}
 	if edges[0] != (edge{"a", "b"}) || edges[1] != (edge{"b", "c"}) {
 		t.Fatalf("edges = %v, want [{a b} {b c}]", edges)
+	}
+}
+
+// OnTransition is an effect, so a batch that walks several states reports one
+// transition from the pre-batch state to the settled state. Intermediate states
+// are not observable — that is what a batch asserts. This pins the behavior
+// change from the removed Cell observer registry, which delivered per-write.
+func TestReactiveStateMachineOnTransitionCoalescesUnderBatch(t *testing.T) {
+	ctx := NewContext()
+	m := NewStateMachine(ctx, "a", func(state, event string) (string, bool) {
+		return event, true
+	})
+	type edge struct{ from, to string }
+	var edges []edge
+	defer m.OnTransition(func(oldState, newState string) {
+		edges = append(edges, edge{oldState, newState})
+	})()
+
+	ctx.Batch(func() {
+		m.Send("b")
+		m.Send("c")
+	})
+
+	if len(edges) != 1 || edges[0] != (edge{"a", "c"}) {
+		t.Fatalf("edges = %v, want [{a c}] — a batch settles to one transition", edges)
 	}
 }

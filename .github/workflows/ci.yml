@@ -40,21 +40,35 @@ jobs:
       - name: Guard — canonical fixtures present (#lzspecconf)
         run: |
           test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — the conformance tests would silently skip"; exit 1; }
-          test -d ../lazily-spec/conformance/reactive-graph || { echo "::error::../lazily-spec/conformance/reactive-graph missing — observer_conformance_test.go would silently skip"; exit 1; }
-          ls ../lazily-spec/conformance/reactive-graph/observer_*.json >/dev/null 2>&1 || { echo "::error::no observer_*.json fixtures in ../lazily-spec/conformance/reactive-graph"; exit 1; }
+          for corpus in collections coordination presence reliable-sync signaling statechart temporal windowing; do
+            test -d "../lazily-spec/conformance/$corpus" || { echo "::error::../lazily-spec/conformance/$corpus missing — its conformance runner would silently skip"; exit 1; }
+          done
 
       - name: test
         run: go test ./...
 
-      # Run the observer conformance replay explicitly and require it to have
-      # actually run, so a future refactor of the skip path cannot hide it.
-      - name: Reactive-graph observer conformance (#lzdartobservercow)
+      # Every conformance runner in this repo t.Skip()s when the sibling spec
+      # checkout is absent, so "green" and "ran nothing" are indistinguishable
+      # from the exit code alone. Replay the whole conformance suite verbosely
+      # and require BOTH that it executed a substantial number of fixtures and
+      # that not one of them skipped. This asserts against the corpora lazily-go
+      # actually consumes — it is not pinned to any single runner, so removing or
+      # adding one cannot quietly turn it into a no-op.
+      - name: Conformance replay executed, zero skips (#lzspecconf)
         run: |
-          out=$(go test -run TestReactiveGraphObserverConformance -v . 2>&1) || { echo "$out"; exit 1; }
+          out=$(go test -run Conformance -v . 2>&1) || { echo "$out"; exit 1; }
           echo "$out"
-          echo "$out" | grep -q "^=== RUN   TestReactiveGraphObserverConformance/observer_" || { echo "::error::observer conformance replay executed no fixtures"; exit 1; }
-          echo "$out" | grep -q "SKIP" && { echo "::error::observer conformance replay skipped"; exit 1; }
-          exit 0
+          if echo "$out" | grep -q -- "--- SKIP"; then
+            echo "::error::a conformance runner skipped — fixtures were not reachable"
+            echo "$out" | grep -- "--- SKIP"
+            exit 1
+          fi
+          ran=$(echo "$out" | grep -c "^=== RUN   ")
+          echo "conformance subtests executed: $ran"
+          if [ "$ran" -lt 100 ]; then
+            echo "::error::only $ran conformance subtests ran (expected >= 100) — the corpus is not being replayed"
+            exit 1
+          fi
 
       - name: race (cgo)
         run: CGO_ENABLED=1 go test -race ./...

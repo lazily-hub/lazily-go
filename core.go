@@ -325,17 +325,6 @@ func (s *Slot[T]) clearCache() { s.cached = false }
 // cachedNow reports whether this slot currently holds a cached value.
 func (s *Slot[T]) cachedNow() bool { return s.cached }
 
-// observerSlot is one registered Cell.Subscribe observer (#lzdartobservercow).
-//
-// The disposer returned by Subscribe captures this struct pointer rather than a
-// bare index, which is what makes removal O(1) *and* compaction safe:
-// compactObserverSlots rewrites index in place, so every outstanding disposer
-// stays valid. A nil callback marks a disposed (tombstoned) slot.
-type observerSlot[T any] struct {
-	callback func(T)
-	index    int
-}
-
 // Cell is a mutable source value that invalidates dependents when it changes.
 //
 // Reading Get inside a Slot/Signal computation registers a dependency. Set
@@ -345,51 +334,7 @@ type Cell[T comparable] struct {
 	reactiveBase
 	ctx   *Context
 	value T
-
-	// Observer storage (#lzdartobservercow). Slots are appended and tombstoned
-	// in place; a cached snapshot is rebuilt only when the live set actually
-	// changed since the last notification.
-	//
-	// This replaced a map[uint64]func(T), which bought O(1) subscribe and
-	// unsubscribe at the price of materializing an O(W) snapshot slice on
-	// *every* notify — the map cannot be iterated safely while an observer
-	// subscribes or disposes reentrantly. Notify is now allocation-free in the
-	// steady state because snapshotDirty is only set when the set changes, so a
-	// stable subscriber set reuses snapshot forever.
-	//
-	// Reentrancy splits the two directions, per lazily-spec:
-	//   - subscribe during notify is DEFERRED — a rebuild allocates a *fresh*
-	//     slice and notifyObservers holds it in a local, so an append cannot
-	//     extend the pass in flight (and a self-feeding observer terminates).
-	//   - unsubscribe during notify takes effect IMMEDIATELY — the loop re-checks
-	//     each slot's callback before calling it, so an observer disposed by an
-	//     earlier callback is skipped even though it is still in the snapshot.
-	//
-	// Observers fire in registration order, which falls out of the slot slice.
-	// Map iteration order was randomized per notification, so no caller could
-	// have depended on it; registration order matches lazily-dart and is pinned
-	// by TestCellObserverFiringOrderIsRegistrationOrder.
-	// The snapshot holds slot pointers, not bare callbacks, so notifyObservers can
-	// re-check liveness before each call: an observer disposed mid-notification
-	// MUST be skipped by the pass that removed it, even when the cursor has not
-	// reached it yet (lazily-spec "Unsubscribing during a notification takes
-	// effect immediately"). Membership is snapshotted; liveness is not.
-	slots         []*observerSlot[T]
-	liveObservers int
-	snapshot      []*observerSlot[T]
-	snapshotDirty bool
 }
-
-// observerCompactThreshold is the slot count at or above which a disposal with
-// at least half the slots tombstoned triggers compaction. Below it the scan
-// costs more than the tombstones do.
-const observerCompactThreshold = 32
-
-// observerRetainCap is the largest slot-slice capacity kept across a full
-// teardown. Retaining the array makes repeated subscribe/tear-down cycles
-// allocation-free in the slice; the bound stops a cell that briefly had a huge
-// fan-out from pinning that array forever.
-const observerRetainCap = 64
 
 // NewCell creates a mutable source value bound to ctx.
 func NewCell[T comparable](ctx *Context, initial T) *Cell[T] {
@@ -411,69 +356,8 @@ func (c *Cell[T]) Peek() T { return c.value }
 func (c *Cell[T]) Set(newValue T) {
 	if newValue != c.value {
 		c.value = newValue
-		c.notifyObservers()
 		c.ctx.cellChanged(c.self)
 	}
-}
-
-// Subscribe registers a persistent observer fired with the new value on each
-// change. Returns a disposer; call it to stop observing. Observers are not
-// cleared on invalidation.
-// Observers fire in registration order.
-func (c *Cell[T]) Subscribe(observer func(T)) func() {
-	slot := &observerSlot[T]{callback: observer, index: len(c.slots)}
-	c.slots = append(c.slots, slot)
-	c.liveObservers++
-	c.snapshotDirty = true
-	return func() {
-		// The disposer holds its own slot, so removal is O(1) — no scan.
-		// Idempotent: a disposed slot has a nil callback.
-		if slot.callback == nil {
-			return
-		}
-		slot.callback = nil
-		c.slots[slot.index] = nil
-		c.liveObservers--
-		c.snapshotDirty = true
-		if c.liveObservers == 0 {
-			// Full teardown — the common churn shape. Truncating to zero length
-			// clears every tombstone, so a repeatedly rebuilt observer set
-			// cannot accumulate them. The backing array is retained up to
-			// observerRetainCap so the subscribe/tear-down/re-subscribe cycle
-			// does not re-grow it from nil each round; above that the array is
-			// released rather than pinning a former high-water mark.
-			if cap(c.slots) > observerRetainCap {
-				c.slots = nil
-			} else {
-				clear(c.slots)
-				c.slots = c.slots[:0]
-			}
-		} else if len(c.slots) >= observerCompactThreshold && c.liveObservers*2 <= len(c.slots) {
-			c.compactObserverSlots()
-		}
-	}
-}
-
-// compactObserverSlots drops tombstones, rewriting each surviving slot's index.
-//
-// Outstanding disposers hold the slot *pointer*, not a bare integer, so
-// rewriting the index keeps every live disposer valid across compaction. This
-// is what bounds memory under interleaved subscribe/unsubscribe that never
-// reaches zero live observers.
-func (c *Cell[T]) compactObserverSlots() {
-	write := 0
-	for _, slot := range c.slots {
-		if slot == nil {
-			continue
-		}
-		slot.index = write
-		c.slots[write] = slot
-		write++
-	}
-	for i := write; i < len(c.slots); i++ {
-		c.slots[i] = nil // release references for GC
-	}
-	c.slots = c.slots[:write]
 }
 
 // Invalidate force-invalidates this cell's dependents without changing the
@@ -481,59 +365,6 @@ func (c *Cell[T]) compactObserverSlots() {
 func (c *Cell[T]) Invalidate() {
 	c.invalidate()
 	c.ctx.flushEffects()
-}
-
-func (c *Cell[T]) notifyObservers() {
-	if c.liveObservers == 0 {
-		return
-	}
-	if c.snapshotDirty {
-		// Rebuild into a *fresh* slice — never mutate the old one, which an
-		// enclosing notification may still be iterating (#lzdartobservercow).
-		rebuilt := make([]*observerSlot[T], 0, c.liveObservers)
-		for _, slot := range c.slots {
-			if slot != nil && slot.callback != nil {
-				rebuilt = append(rebuilt, slot)
-			}
-		}
-		c.snapshot = rebuilt
-		c.snapshotDirty = false
-	}
-	// Held in a local so a reentrant subscribe — which appends to c.slots and
-	// only marks the snapshot dirty — leaves this iteration stable. That is the
-	// "subscribing during a notification is deferred" clause, and it also bounds
-	// the pass so a self-feeding observer terminates.
-	observers := c.snapshot
-	for _, slot := range observers {
-		// Liveness check before each call. The snapshot fixes MEMBERSHIP — which
-		// observers this pass may run — but deliberately not LIVENESS: an
-		// observer disposed from inside an earlier callback MUST NOT be invoked
-		// by the notification in flight, including when the cursor has not yet
-		// reached it (lazily-spec docs/reactive-graph.md, "Unsubscribing during a
-		// notification takes effect immediately").
-		//
-		// The snapshot holds slot POINTERS rather than bare callbacks precisely
-		// so this check is possible: a disposer nils slot.callback, which is
-		// visible here immediately. Disposal is not retroactive — observers this
-		// loop already visited ran before the disposal and those invocations
-		// stand.
-		//
-		// This is a liveness check rather than a tombstone-and-skip over the live
-		// list because the slot slice already tombstones in place, and iterating
-		// the snapshot (not c.slots) is what keeps reentrant subscribe deferred.
-		// It also cannot relocate an unvisited observer behind the cursor, which
-		// the spec makes a MUST NOT: compaction only ever runs from a disposer,
-		// and it rewrites c.slots, never the snapshot this loop holds.
-		//
-		// Reading the callback into a local before testing it also gives an
-		// observer that disposes ITSELF the required behavior: it completes the
-		// call it is in and never runs again.
-		cb := slot.callback
-		if cb == nil {
-			continue
-		}
-		cb(c.value)
-	}
 }
 
 func (c *Cell[T]) onInvalidate() {} // cells hold their value directly

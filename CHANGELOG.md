@@ -4,6 +4,33 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## Unreleased
+
+### Removed — BREAKING: the `Cell` observer API
+
+- **`Cell.Subscribe` and its disposer are gone**, along with the observer slot
+  storage, the notification snapshot, and the compaction machinery. lazily will
+  not carry a `Cell` observer API in any binding: observation in a reactive graph
+  is a declared dependency edge, not a registered callback. A callback registry
+  on `Cell` bypasses the graph, ignores batching, breaks glitch-freedom, and
+  costs memory on *every* cell whether or not anyone subscribes. Four of the
+  eight bindings (rs, cpp, js, kt) never had it.
+- **Migration:** read the cell inside an `Effect` — the `Get` is what subscribes,
+  and `Effect.Dispose` replaces the disposer. Where you need every individual
+  transition delivered as a stream, that is a `TopicCell`, which is unaffected.
+- **`TopicCell`/`QueueCell` `Subscribe` is unchanged** — the stream primitive is
+  the supported answer here, not a casualty of this removal.
+
+### Changed
+
+- **`StateMachine.OnTransition` is now backed by an `Effect`** rather than a cell
+  observer, mirroring lazily-rs `StateMachine::on_transition`. The signature is
+  unchanged (handler of `(old, new)`, not called on registration, returns a
+  disposer). **Behavior change:** an effect reruns once per settled cascade, so a
+  batch that walks `A -> B -> C` now reports the single transition `(A, C)`
+  rather than `(A, B)` and `(B, C)`. This is intended — a batch asserts
+  atomicity, and the intermediate `B` was never an observable state of the graph.
+
 ## 0.19.0 - 2026-07-17
 
 ### Changed — performance investigation (`#lzgoslotmap`)

@@ -57,14 +57,22 @@ a.Set(11)
 parity.Get() // "odd" (already updated before the read)
 ```
 
-A `Cell` also supports persistent observers (the hook for UI bridges):
+To react to a `Cell` from outside the graph (the hook for UI bridges), declare a
+dependency edge with an `Effect` — a `Cell` has no callback registry:
 
 ```go
 count := lazily.NewCell(ctx, 0)
-dispose := count.Subscribe(func(v int) { fmt.Println("now", v) })
+effect := lazily.NewEffect(ctx, func(*lazily.Context) func() {
+	fmt.Println("now", count.Get()) // the Get is what subscribes
+	return nil
+})
 count.Set(1) // prints "now 1"
-dispose()
+effect.Dispose()
 ```
+
+An `Effect` runs once at creation and then once per settled cascade, so under
+`Batch` it observes the settled value rather than each intermediate write. When
+you need every individual transition delivered as a stream, use `TopicCell`.
 
 Batch coalesces cascades so dependent `Effect`s flush once:
 
