@@ -315,6 +315,26 @@ func convergedEqual(t *testing.T, a, b []ConvergedEntry) bool {
 // CrdtSync frame serde
 // ---------------------------------------------------------------------------
 
+// canonicalizeCrdtSyncWire normalizes a fixture wire into the same canonical form
+// the binding emits: an omitted `CrdtSync.frontier` is filled in as `[]`, which
+// schemas/distributed.json declares equivalent (#lzspecfrontiersuppress).
+func canonicalizeCrdtSyncWire(t *testing.T, wire json.RawMessage) any {
+	t.Helper()
+	normalized := normalizeJSON(t, wire)
+	envelope, ok := normalized.(map[string]any)
+	if !ok {
+		return normalized
+	}
+	inner, ok := envelope["CrdtSync"].(map[string]any)
+	if !ok {
+		return normalized
+	}
+	if _, present := inner["frontier"]; !present {
+		inner["frontier"] = []any{}
+	}
+	return normalized
+}
+
 func TestDistributedCrdtSyncFramesConformance(t *testing.T) {
 	raw := loadConformanceFixture(t, "distributed", "crdt_sync_frames.json")
 
@@ -322,10 +342,11 @@ func TestDistributedCrdtSyncFramesConformance(t *testing.T) {
 		Frames []struct {
 			Label      string `json:"label"`
 			Assertions struct {
-				FrontierLen  int   `json:"frontier_len"`
-				OpCount      int   `json:"op_count"`
-				HasKeyedOp   *bool `json:"has_keyed_op"`
-				HasKeylessOp *bool `json:"has_keyless_op"`
+				FrontierLen     *int  `json:"frontier_len"`
+				FrontierOmitted *bool `json:"frontier_omitted"`
+				OpCount         int   `json:"op_count"`
+				HasKeyedOp      *bool `json:"has_keyed_op"`
+				HasKeylessOp    *bool `json:"has_keyless_op"`
 			} `json:"assertions"`
 			Wire json.RawMessage `json:"wire"`
 		} `json:"frames"`
@@ -349,8 +370,19 @@ func TestDistributedCrdtSyncFramesConformance(t *testing.T) {
 				t.Fatalf("decoded %T, want IpcMessageCrdtSync", msg)
 			}
 
-			if got := len(sync.Value.Frontier); got != frame.Assertions.FrontierLen {
-				t.Fatalf("frontier_len = %d, want %d", got, frame.Assertions.FrontierLen)
+			if frame.Assertions.FrontierLen != nil {
+				if got := len(sync.Value.Frontier); got != *frame.Assertions.FrontierLen {
+					t.Fatalf("frontier_len = %d, want %d", got, *frame.Assertions.FrontierLen)
+				}
+			}
+			// #lzspecfrontiersuppress: an omitted frontier decodes as empty.
+			if frame.Assertions.FrontierOmitted != nil {
+				if !*frame.Assertions.FrontierOmitted {
+					t.Fatal("frontier_omitted must assert true")
+				}
+				if len(sync.Value.Frontier) != 0 {
+					t.Fatalf("frontier = %v, want empty for an omitted frontier", sync.Value.Frontier)
+				}
 			}
 			if got := len(sync.Value.Ops); got != frame.Assertions.OpCount {
 				t.Fatalf("op_count = %d, want %d", got, frame.Assertions.OpCount)
@@ -372,11 +404,15 @@ func TestDistributedCrdtSyncFramesConformance(t *testing.T) {
 			}
 
 			// JSON round-trip: re-encode and compare structurally to the fixture.
+			// Byte-for-byte except for schema-declared-equivalent encodings (see
+			// lazily-spec docs/conformance.md § Round-trip equivalence exemptions):
+			// `CrdtSync.frontier` omitted is equivalent to `[]`.
 			encoded, err := msg.EncodeJSON()
 			if err != nil {
 				t.Fatalf("EncodeJSON: %v", err)
 			}
-			if !reflect.DeepEqual(normalizeJSON(t, encoded), normalizeJSON(t, frame.Wire)) {
+			want := canonicalizeCrdtSyncWire(t, frame.Wire)
+			if !reflect.DeepEqual(normalizeJSON(t, encoded), want) {
 				t.Fatalf("round-trip mismatch:\n got: %s\nwant: %s", encoded, frame.Wire)
 			}
 		})
