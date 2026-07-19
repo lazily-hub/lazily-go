@@ -26,7 +26,35 @@ jobs:
         run: go vet ./...
       - name: build
         run: go build ./...
+
+      # The conformance tests resolve fixtures through the sibling-relative path
+      # ../lazily-spec/conformance and t.Skip when it is absent, so without this
+      # clone every conformance test in the suite reports green while executing
+      # nothing. Fixtures are never vendored into this repo — bundled copies
+      # drift from the spec.
+      - name: Fetch canonical lazily-spec conformance fixtures (#lzspecconf)
+        run: git clone --depth 1 https://github.com/lazily-hub/lazily-spec.git ../lazily-spec
+
+      # Assert the fixtures are actually present BEFORE running the suite. A
+      # skip-if-absent runner with no guard is worse than no runner at all.
+      - name: Guard — canonical fixtures present (#lzspecconf)
+        run: |
+          test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — the conformance tests would silently skip"; exit 1; }
+          test -d ../lazily-spec/conformance/reactive-graph || { echo "::error::../lazily-spec/conformance/reactive-graph missing — observer_conformance_test.go would silently skip"; exit 1; }
+          ls ../lazily-spec/conformance/reactive-graph/observer_*.json >/dev/null 2>&1 || { echo "::error::no observer_*.json fixtures in ../lazily-spec/conformance/reactive-graph"; exit 1; }
+
       - name: test
         run: go test ./...
+
+      # Run the observer conformance replay explicitly and require it to have
+      # actually run, so a future refactor of the skip path cannot hide it.
+      - name: Reactive-graph observer conformance (#lzdartobservercow)
+        run: |
+          out=$(go test -run TestReactiveGraphObserverConformance -v . 2>&1) || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "^=== RUN   TestReactiveGraphObserverConformance/observer_" || { echo "::error::observer conformance replay executed no fixtures"; exit 1; }
+          echo "$out" | grep -q "SKIP" && { echo "::error::observer conformance replay skipped"; exit 1; }
+          exit 0
+
       - name: race (cgo)
         run: CGO_ENABLED=1 go test -race ./...

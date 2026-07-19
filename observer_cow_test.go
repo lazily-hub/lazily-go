@@ -8,9 +8,17 @@ import (
 // Equivalence and ordering tests for Cell observer storage (#lzdartobservercow).
 //
 // Every test in this file except TestCellObserverFiringOrderIsRegistrationOrder
-// passes identically against the previous map[uint64]func(T) implementation and
-// the slot-list one that replaced it; they are the evidence that the perf change
-// altered no observable behavior.
+// and TestCellObserverDisposeDuringNotifySkipsInFlight passes identically
+// against the previous map[uint64]func(T) implementation and the slot-list one
+// that replaced it; they are the evidence that the perf change altered no
+// observable behavior.
+//
+// TestCellObserverDisposeDuringNotifySkipsInFlight is the later exception: it
+// asserted the opposite until lazily-go migrated onto the spec's
+// "unsubscribe during notify takes effect immediately" clause. See its own
+// doc comment, and the fixture runner in observer_conformance_test.go, which is
+// the canonical gate — it executes the lazily-spec JSON directly rather than
+// transcribing it.
 //
 // The ordering test is deliberately NOT an equivalence test. The map
 // implementation fired observers in Go's randomized map-iteration order, so it
@@ -155,7 +163,23 @@ func TestCellObserverSubscribeDuringNotifyDefersToNextNotify(t *testing.T) {
 	}
 }
 
-func TestCellObserverDisposeDuringNotifyStillFiresInFlight(t *testing.T) {
+// TestCellObserverDisposeDuringNotifySkipsInFlight pins the migrated behavior:
+// an observer disposed from inside an earlier callback is NOT invoked by the
+// notification in flight, even though the loop had not yet reached it.
+//
+// This test previously asserted the opposite (as
+// TestCellObserverDisposeDuringNotifyStillFiresInFlight), which was lazily-go's
+// entry in the lazily-spec "Known divergences" table: a stable pre-notification
+// snapshot delivered one final call to an observer that had asked to stop. The
+// family settled against that — see the rationale under "Unsubscribing during a
+// notification takes effect immediately" in docs/reactive-graph.md — because in
+// a manually-managed binding unsubscribe is routinely the step immediately
+// before freeing the state the callback reads.
+//
+// The canonical assertion lives in the fixture runner
+// (observer_conformance_test.go); this keeps the unit-level pin alongside the
+// other Cell observer tests.
+func TestCellObserverDisposeDuringNotifySkipsInFlight(t *testing.T) {
 	ctx := NewContext()
 	c := NewCell(ctx, 0)
 	later := 0
@@ -163,12 +187,12 @@ func TestCellObserverDisposeDuringNotifyStillFiresInFlight(t *testing.T) {
 	c.Subscribe(func(int) { disposeLater() })
 	disposeLater = c.Subscribe(func(int) { later++ })
 	c.Set(1)
-	if later != 1 {
-		t.Fatalf("later = %d, want 1 (the in-flight snapshot still delivers to an observer disposed mid-notification)", later)
+	if later != 0 {
+		t.Fatalf("later = %d, want 0 (an observer disposed mid-notification must not be invoked by the pass that removed it)", later)
 	}
 	c.Set(2)
-	if later != 1 {
-		t.Fatalf("later = %d, want 1 after the second Set", later)
+	if later != 0 {
+		t.Fatalf("later = %d, want 0 after the second Set", later)
 	}
 }
 

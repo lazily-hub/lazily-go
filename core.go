@@ -357,18 +357,26 @@ type Cell[T comparable] struct {
 	// steady state because snapshotDirty is only set when the set changes, so a
 	// stable subscriber set reuses snapshot forever.
 	//
-	// Reentrancy is preserved by the same argument the snapshot copy used: a
-	// rebuild allocates a *fresh* slice and notifyObservers holds it in a local,
-	// so a subscribe or dispose during notification cannot mutate the in-flight
-	// iteration.
+	// Reentrancy splits the two directions, per lazily-spec:
+	//   - subscribe during notify is DEFERRED — a rebuild allocates a *fresh*
+	//     slice and notifyObservers holds it in a local, so an append cannot
+	//     extend the pass in flight (and a self-feeding observer terminates).
+	//   - unsubscribe during notify takes effect IMMEDIATELY — the loop re-checks
+	//     each slot's callback before calling it, so an observer disposed by an
+	//     earlier callback is skipped even though it is still in the snapshot.
 	//
 	// Observers fire in registration order, which falls out of the slot slice.
 	// Map iteration order was randomized per notification, so no caller could
 	// have depended on it; registration order matches lazily-dart and is pinned
 	// by TestCellObserverFiringOrderIsRegistrationOrder.
+	// The snapshot holds slot pointers, not bare callbacks, so notifyObservers can
+	// re-check liveness before each call: an observer disposed mid-notification
+	// MUST be skipped by the pass that removed it, even when the cursor has not
+	// reached it yet (lazily-spec "Unsubscribing during a notification takes
+	// effect immediately"). Membership is snapshotted; liveness is not.
 	slots         []*observerSlot[T]
 	liveObservers int
-	snapshot      []func(T)
+	snapshot      []*observerSlot[T]
 	snapshotDirty bool
 }
 
@@ -482,20 +490,49 @@ func (c *Cell[T]) notifyObservers() {
 	if c.snapshotDirty {
 		// Rebuild into a *fresh* slice — never mutate the old one, which an
 		// enclosing notification may still be iterating (#lzdartobservercow).
-		rebuilt := make([]func(T), 0, c.liveObservers)
+		rebuilt := make([]*observerSlot[T], 0, c.liveObservers)
 		for _, slot := range c.slots {
 			if slot != nil && slot.callback != nil {
-				rebuilt = append(rebuilt, slot.callback)
+				rebuilt = append(rebuilt, slot)
 			}
 		}
 		c.snapshot = rebuilt
 		c.snapshotDirty = false
 	}
-	// Held in a local so a reentrant subscribe/dispose (which only marks the
-	// snapshot dirty) leaves this iteration stable.
+	// Held in a local so a reentrant subscribe — which appends to c.slots and
+	// only marks the snapshot dirty — leaves this iteration stable. That is the
+	// "subscribing during a notification is deferred" clause, and it also bounds
+	// the pass so a self-feeding observer terminates.
 	observers := c.snapshot
-	for _, o := range observers {
-		o(c.value)
+	for _, slot := range observers {
+		// Liveness check before each call. The snapshot fixes MEMBERSHIP — which
+		// observers this pass may run — but deliberately not LIVENESS: an
+		// observer disposed from inside an earlier callback MUST NOT be invoked
+		// by the notification in flight, including when the cursor has not yet
+		// reached it (lazily-spec docs/reactive-graph.md, "Unsubscribing during a
+		// notification takes effect immediately").
+		//
+		// The snapshot holds slot POINTERS rather than bare callbacks precisely
+		// so this check is possible: a disposer nils slot.callback, which is
+		// visible here immediately. Disposal is not retroactive — observers this
+		// loop already visited ran before the disposal and those invocations
+		// stand.
+		//
+		// This is a liveness check rather than a tombstone-and-skip over the live
+		// list because the slot slice already tombstones in place, and iterating
+		// the snapshot (not c.slots) is what keeps reentrant subscribe deferred.
+		// It also cannot relocate an unvisited observer behind the cursor, which
+		// the spec makes a MUST NOT: compaction only ever runs from a disposer,
+		// and it rewrites c.slots, never the snapshot this loop holds.
+		//
+		// Reading the callback into a local before testing it also gives an
+		// observer that disposes ITSELF the required behavior: it completes the
+		// call it is in and never runs again.
+		cb := slot.callback
+		if cb == nil {
+			continue
+		}
+		cb(c.value)
 	}
 }
 
