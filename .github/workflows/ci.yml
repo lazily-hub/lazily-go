@@ -77,8 +77,14 @@ jobs:
           # how that defect shipped. Require a non-zero fixture count from
           # each model by name; deleting a model's coverage fails here rather
           # than quietly shrinking the total subtest count.
+          # The matched string is emitted by reactive_graph_conformance_test.go's
+          # per-model summary t.Logf. Keep the two in sync: this guard previously
+          # looked for "fixtures replayed" while the runner emitted "fixtures,",
+          # so it failed with "corpus was not replayed against Context" on a
+          # green corpus — the wording drifted when the runner was rewritten and
+          # nothing coupled them.
           for model in Context AsyncContext; do
-            line=$(echo "$out" | grep -E "reactive-graph\[$model\]: [0-9]+ fixtures replayed" || true)
+            line=$(echo "$out" | grep -E "reactive-graph\[$model\]: [0-9]+ fixtures" || true)
             if [ -z "$line" ]; then
               echo "::error::reactive-graph corpus was not replayed against $model"
               exit 1
