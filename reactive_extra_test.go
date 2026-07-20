@@ -262,16 +262,43 @@ func TestReactiveDifferentSetInvalidatesDependents(t *testing.T) {
 	}
 }
 
-// Lean recomputeSlot_equal_preserves_dependents, applied to a Signal, does NOT
-// hold in this binding: Signal is backed by a plain Slot (core.go), so an equal
-// recompute does not suppress the downstream cascade. The property is recorded
-// as a known divergence, asserted bidirectionally, in
-// TestKnownDivergenceSignalEqualRecomputeDoesNotSuppressDownstream
-// (known_divergences_test.go), which also carries the mechanism and the
-// conditions for restoring the original assertion.
+// Lean recomputeSlot_equal_preserves_dependents: a signal recompute that yields
+// a value equal to the previous one leaves its dependents untouched — they keep
+// their caches and do not re-run.
 //
-// The same Lean property DOES hold for Memo itself — see
-// TestMemoEqualitySuppression in core_test.go, which is unaffected.
+// This holds because Signal is backed by a Memo (core.go) whose `==` guard is a
+// pull-time check: the invalidating write only marks the cone, and the read
+// that recomputes the memo compares before deciding whether anything downstream
+// is actually stale.
+func TestReactiveSignalEqualRecomputePreservesDependents(t *testing.T) {
+	ctx := NewContext()
+	toggle := NewCell(ctx, "x")
+	stable := NewSignal(ctx, func(*Context) int {
+		_ = toggle.Get() // register the edge; output is constant
+		return 42
+	})
+	downstreamFires := 0
+	downstream := NewSlot(ctx, func(*Context) int {
+		downstreamFires++
+		return stable.Get()
+	})
+	if got := downstream.Get(); got != 42 {
+		t.Fatalf("downstream = %d, want 42", got)
+	}
+	before := downstreamFires
+
+	toggle.Set("y") // input flips → signal recomputes → equal output
+
+	if got := stable.Get(); got != 42 {
+		t.Fatalf("stable = %d, want 42", got)
+	}
+	if got := downstream.Get(); got != 42 {
+		t.Fatalf("downstream = %d, want 42", got)
+	}
+	if got := downstreamFires - before; got != 0 {
+		t.Fatalf("downstream recomputed %d extra times on an equal signal recompute, want 0", got)
+	}
+}
 
 // Lean recomputeSlot_different_invalidates_dependents: a strictly-different
 // signal recompute invalidates every direct dependent.

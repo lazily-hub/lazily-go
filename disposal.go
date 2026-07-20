@@ -89,10 +89,11 @@ type GraphNode interface {
 //
 // Returns 0 for a disposed node, and for *Effect, which is a pure sink.
 //
-// Note that this counts *live* edges. Because invalidation in this binding
-// consumes the reverse edge (a dependent re-registers when it recomputes),
-// reading a degree immediately after a write and before the dependents are
-// pulled reports the post-cascade state, not the pre-cascade one.
+// Note that this counts *live* edges. Invalidation does not consume them: the
+// cascade is a non-consuming mark-frontier walk (core.go, markCone), so a
+// degree read immediately after a write and before the dependents are pulled
+// reports the same edges as before the write. An edge changes only when a node
+// recomputes and re-tracks, or when disposal detaches it.
 func (c *Context) DependentCount(n GraphNode) int {
 	b := n.node()
 	if b.disposed {

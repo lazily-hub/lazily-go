@@ -34,12 +34,16 @@ package lazily
 type reactiveNode interface {
 	// node returns the embedded dependency-tracking state.
 	node() *reactiveBase
-	// onInvalidate is the hook run when this node is invalidated, before the
-	// downstream cascade.
+	// onInvalidate is the hook run when this node is marked stale by the
+	// frontier walk, before the walk descends to its dependents.
 	onInvalidate()
-	// invalidate runs onInvalidate, snapshots dependents, clears them, and
-	// cascades. Memo overrides this to add its equality guard.
+	// invalidate marks this node and its transitive dependent cone stale. It
+	// does not consume edges and computes nothing; see markCone.
 	invalidate()
+	// refresh brings a stale node up to date at pull time and reports whether
+	// its value actually CHANGED. Non-value-bearing nodes (Cell, Effect,
+	// Signal) are never stale and always report false.
+	refresh() bool
 }
 
 // reactiveBase holds the bidirectional dependency edges shared by every
@@ -60,6 +64,24 @@ type reactiveBase struct {
 	// A disposed node has no edges in either direction, reads as an error,
 	// and reports zero degree. See disposal.go.
 	disposed bool
+
+	// dirty and forceRecompute are the two staleness levels of the
+	// mark-frontier walk, mirroring lazily-rs's SlotNode.{dirty,force_recompute}.
+	//
+	//   dirty          — "check me": something in my ancestry changed, but it
+	//                    may recompute to an equal value, so my own cached
+	//                    value is not yet known to be wrong.
+	//   forceRecompute — "I am definitely wrong": I read the node that was
+	//                    actually written, so I must recompute.
+	//
+	// Direct dependents of a written node become force roots; every deeper
+	// node is merely dirty. A dirty-but-not-forced node is resolved at pull
+	// time by refreshing its dependencies: if none of them report a changed
+	// value, it is marked clean WITHOUT recomputing (the equality guard's
+	// downstream suppression). Only value-bearing nodes (Slot, Memo) carry
+	// these; a Cell is a source and an Effect is a sink.
+	dirty          bool
+	forceRecompute bool
 	// slotIndex is this node's position in Context.slots, or -1 when the node
 	// is not value-bearing. Disposal swap-removes by this index so a
 	// subscribe/unsubscribe workload does not grow the registry without bound
@@ -102,20 +124,101 @@ func (b *reactiveBase) detachUpstream() {
 	clear(b.dependencies)
 }
 
-// invalidate is the default cascade: run onInvalidate, snapshot dependents,
-// clear them, and cascade downstream.
+// refresh is the default pull-time hook: a node that bears no value is never
+// stale and never reports a change.
+func (b *reactiveBase) refresh() bool { return false }
+
+// markEntry is one node on the frontier walk's explicit stack, paired with the
+// staleness level to apply to it.
+type markEntry struct {
+	node  reactiveNode
+	force bool
+}
+
+// invalidate marks this node's transitive dependent cone stale.
+//
+// This is a NON-CONSUMING mark-frontier walk (the lazily-rs model, see
+// Context::mark_frontier_locked). It reads `dependents` and leaves every edge
+// in place; nothing is recomputed and no value is produced. It is what makes
+// pull-time suppression possible: a dependent can be marked clean again
+// WITHOUT recomputing and still be reachable from its source, so the next
+// genuine change is not lost at depth two.
+//
+// The walk terminates on a staleness short-circuit rather than on edge
+// consumption: a node already at or above the level being applied does not
+// need its cone re-walked, because that cone was marked when it was first
+// reached and nothing has cleaned it since (a dependent can only be cleaned
+// through refresh, which refreshes — and so cleans — all of its dependencies).
+//
+// A source (Cell) carries no staleness of its own, so its DIRECT dependents
+// are the force roots. A value-bearing node invalidated directly (a teardown
+// survivor, Cell.Invalidate) is itself a force root.
 func (b *reactiveBase) invalidate() {
+	if _, markable := b.self.(cacheable); markable {
+		markCone([]markEntry{{node: b.self, force: true}}, true)
+		return
+	}
 	b.self.onInvalidate()
+	b.markDependents(true)
+}
+
+// markDependents force-marks this node's direct dependents and dirties
+// everything below them, leaving this node itself alone. It is the walk used
+// when a node's own value has just been established as changed: by a Cell
+// write, or by a pull-time recompute that did not compare equal.
+//
+// scheduleEffects is false on the pull-time path. An effect reached there was
+// already reached by the write's own cascade — a node only becomes stale
+// through that cascade — so re-scheduling it would run an effect a second time
+// merely because one of its dependencies happened to recompute while the
+// effect itself was mid-flush.
+func (b *reactiveBase) markDependents(scheduleEffects bool) {
 	if len(b.dependents) == 0 {
 		return
 	}
-	snapshot := make([]reactiveNode, 0, len(b.dependents))
+	stack := make([]markEntry, 0, len(b.dependents))
 	for d := range b.dependents {
-		snapshot = append(snapshot, d)
+		stack = append(stack, markEntry{node: d, force: true})
 	}
-	clear(b.dependents)
-	for _, dependent := range snapshot {
-		dependent.invalidate()
+	markCone(stack, scheduleEffects)
+}
+
+// markCone is the iterative frontier walk shared by every invalidation path.
+// Roots arrive at the level their caller chose; every node reached from a root
+// is merely dirty, never forced.
+func markCone(stack []markEntry, scheduleEffects bool) {
+	for len(stack) > 0 {
+		entry := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		n := entry.node
+		nb := n.node()
+		if nb.disposed {
+			continue
+		}
+		if eff, isEffect := n.(*Effect); isEffect {
+			// Effects are sinks: they are scheduled (or, during teardown,
+			// deliberately not), never marked, and never descended through.
+			if scheduleEffects {
+				eff.markStale(entry.force)
+			}
+			continue
+		}
+		propagate := true
+		if _, markable := n.(cacheable); markable {
+			// Re-walk only when this node learns something new: it was clean,
+			// or it is being raised from dirty to forced.
+			propagate = !nb.dirty || (entry.force && !nb.forceRecompute)
+			if entry.force {
+				nb.forceRecompute = true
+			}
+		}
+		n.onInvalidate()
+		if !propagate {
+			continue
+		}
+		for d := range nb.dependents {
+			stack = append(stack, markEntry{node: d, force: false})
+		}
 	}
 }
 
@@ -287,6 +390,14 @@ func (c *Context) flushEffects() {
 			continue
 		}
 		delete(c.scheduledEffects, e)
+		force := e.forceRun
+		e.forceRun = false
+		if !force && e.active && !e.dependenciesChanged() {
+			// Every dependency recomputed to an equal value (a Memo guard
+			// upstream suppressed the change), so there is nothing new to
+			// react to.
+			continue
+		}
 		e.rerun()
 	}
 	c.pendingEffects = c.pendingEffects[:0]
@@ -303,13 +414,38 @@ func (c *Context) flushEffects() {
 // The cached value lives on the Slot itself (value/cached fields), not in a
 // shared Context map — so a Get is a direct field read on the node you already
 // hold, and read latency does not grow with the total number of nodes.
+// The cache is three-state, which pull-time checking requires and a lone
+// `cached bool` cannot express:
+//
+//	hasValue=false                — no value has ever been computed.
+//	hasValue=true,  cached=false  — a PREVIOUS value is still held, but it is
+//	                                stale. The value is kept precisely so a
+//	                                recompute can compare against it (the
+//	                                equality guard) instead of blindly
+//	                                cascading.
+//	hasValue=true,  cached=true   — the value is current.
+//
+// `cached` keeps its original meaning — "this value is current" — so Peek,
+// cachedNow, Context.Size, and every collection layer built on them are
+// unchanged. `hasValue` is the added state.
 type Slot[T any] struct {
 	reactiveBase
 	ctx     *Context
 	compute func(ctx *Context) T
-	value   T    // last computed value (valid iff cached)
+	value   T    // last computed value (valid iff hasValue)
 	cached  bool // whether value is current
-	Name    string
+	// hasValue reports whether value holds a previous computation, current or
+	// not. Invariant: cached implies hasValue.
+	hasValue bool
+	// equals is the optional equality guard. When set (Memo) and a recompute
+	// yields a value equal to the previous one, the node reports "unchanged"
+	// and its dependents are left holding their caches. nil (plain Slot) means
+	// every recompute counts as a change. Mirrors lazily-rs SlotNode.equals.
+	equals func(prev, next T) bool
+	// refreshing guards the pull-time dependency walk against a cyclic graph
+	// re-entering the same node.
+	refreshing bool
+	Name       string
 }
 
 // NewSlot creates a lazy slot bound to ctx.
@@ -340,14 +476,92 @@ func (s *Slot[T]) Get() T {
 	if s.cached {
 		return s.value
 	}
+	s.refresh()
+	return s.value
+}
+
+// refresh brings this slot up to date and reports whether its value CHANGED.
+//
+// This is the pull half of the model (lazily-rs Context::refresh_slot). A
+// stale slot first refreshes its dependencies. If none of them actually
+// changed value, the slot is marked clean WITHOUT recomputing — that is the
+// suppression a Memo's equality guard buys its whole downstream cone, and it
+// is decided per-dependency, so a slot with a second, genuinely-changed
+// dependency still recomputes.
+//
+// Only a forced slot (one that directly read the written node) skips the
+// dependency check, because for it "something upstream changed" is already
+// known.
+func (s *Slot[T]) refresh() bool {
+	if s.disposed || s.cached {
+		return false
+	}
+	if s.refreshing {
+		return false // cyclic graph: treat the back-edge as unchanged
+	}
+	dependencyChanged := false
+	if s.hasValue && !s.forceRecompute {
+		deps := make([]reactiveNode, 0, len(s.dependencies))
+		for d := range s.dependencies {
+			deps = append(deps, d)
+		}
+		s.refreshing = true
+		for _, d := range deps {
+			if d.refresh() {
+				dependencyChanged = true
+			}
+		}
+		s.refreshing = false
+		if !dependencyChanged {
+			// Nothing upstream moved: the cached value is still correct.
+			s.markClean()
+			return false
+		}
+	}
+	return s.recomputeNow()
+}
+
+// markClean records that this slot's existing value is current again, without
+// running its compute.
+func (s *Slot[T]) markClean() {
+	s.dirty = false
+	s.forceRecompute = false
+	if !s.cached {
+		s.cached = true
+		s.ctx.cachedCount++
+	}
+}
+
+// recomputeNow runs the compute, refreshes the dependency edges, and reports
+// whether the value changed. A first-ever computation reports false: nothing
+// downstream can be holding a stale value of a slot that never had one.
+func (s *Slot[T]) recomputeNow() bool {
 	s.detachUpstream()
 	s.ctx.push(s.self)
 	v := s.compute(s.ctx)
 	s.ctx.pop()
+
+	hadValue := s.hasValue
+	unchanged := hadValue && s.equals != nil && s.equals(s.value, v)
+	s.markClean()
+	if unchanged {
+		return false
+	}
 	s.value = v
-	s.cached = true
-	s.ctx.cachedCount++
-	return v
+	s.hasValue = true
+	if !hadValue {
+		// First computation: nothing downstream can be holding a stale value.
+		return false
+	}
+	// The value really moved, so every dependent must recompute rather than
+	// merely re-check. Raising them from dirty to forced here is what makes
+	// the pull walk order-independent: a dependent that refreshes its
+	// dependencies in an unlucky order — reaching this slot after some other
+	// path already refreshed and cleaned it — would otherwise see "no
+	// dependency changed" and keep a stale cache. lazily-rs raises them the
+	// same way (notify_slot_value_changed from recompute_slot_now).
+	s.markDependents(false)
+	return true
 }
 
 // Peek returns the cached value without recomputing, and whether it was cached.
@@ -359,16 +573,29 @@ func (s *Slot[T]) Peek() (T, bool) {
 	return zero, false
 }
 
+// onInvalidate marks this slot stale. The previous value is deliberately KEPT
+// (hasValue stays true) so a later recompute can compare against it; only its
+// currency is dropped.
 func (s *Slot[T]) onInvalidate() {
+	s.dirty = true
 	if s.cached {
 		s.cached = false
 		s.ctx.cachedCount--
 	}
 }
 
-// clearCache drops the memoized value (used by Context.Clear); does not touch
-// cachedCount, which Clear resets wholesale.
-func (s *Slot[T]) clearCache() { s.cached = false }
+// clearCache drops the memoized value outright (used by Context.Clear and by
+// teardown); does not touch cachedCount, which Clear resets wholesale. Unlike
+// invalidation this discards the value itself, so the next read must recompute
+// rather than compare.
+func (s *Slot[T]) clearCache() {
+	s.cached = false
+	s.hasValue = false
+	s.dirty = true
+	s.forceRecompute = true
+	var zero T
+	s.value = zero
+}
 
 // cachedNow reports whether this slot currently holds a cached value.
 func (s *Slot[T]) cachedNow() bool { return s.cached }
@@ -438,21 +665,20 @@ func (c *Cell[T]) onInvalidate() {} // cells hold their value directly
 // single scheduled pull at the flush — the signal re-materializes once at batch
 // exit, not once per write (clause 3).
 //
-// Reads go straight to the backing slot, so a reader's dependency edge is on
-// the slot; the Signal wrapper carries no edges of its own.
+// Reads go straight to the backing memo, so a reader's dependency edge is on
+// the memo; the Signal wrapper carries no edges of its own.
 //
-// Known deviation: the backing is a plain Slot rather than the `memo` the spec
-// names, so a recompute yielding an equal value does NOT suppress the
-// downstream cascade. lazily-go's Memo implements its `==` guard by recomputing
-// during invalidation, which is eager — backing a Signal with it re-materializes
-// once per invalidating source inside a batch (breaking clause 3) and keeps
-// re-materializing after the puller is disposed (breaking clause 4). The two
-// cannot both hold until Memo's guard becomes a pull-time check. See
-// reactive_graph_conformance_test.go.
+// The backing is the `memo` the spec names, so a recompute yielding an equal
+// value suppresses the downstream cascade. That is only possible now that the
+// memo's `==` guard is a pull-time check: the guard no longer recomputes
+// during invalidation, so it cannot re-materialize the signal once per
+// invalidating source inside a batch (clause 3) nor keep re-materializing
+// after the puller Effect is disposed (clause 4). Eagerness comes entirely
+// from the puller, and the guard from the memo.
 type Signal[T comparable] struct {
 	reactiveBase
 	ctx     *Context
-	backing *Slot[T]
+	backing *Memo[T]
 	puller  *Effect
 }
 
@@ -460,8 +686,8 @@ type Signal[T comparable] struct {
 func NewSignal[T comparable](ctx *Context, compute func(ctx *Context) T) *Signal[T] {
 	s := &Signal[T]{reactiveBase: newReactiveBase(), ctx: ctx}
 	s.self = s
-	s.backing = NewSlot(ctx, compute)
-	// The puller reads the slot now — so there is no intermediate unset value
+	s.backing = NewMemo(ctx, compute)
+	// The puller reads the memo now — so there is no intermediate unset value
 	// and the dependency edges exist immediately — and again on every
 	// invalidation, from inside the invalidating write's effect flush.
 	s.puller = NewEffect(ctx, func(*Context) func() {
@@ -505,6 +731,13 @@ type Effect struct {
 	cleanup func()
 	active  bool
 	running bool
+	// forceRun marks a scheduled effect that must rerun without a dependency
+	// freshness check, because it read the node that was actually written.
+	// An effect scheduled only transitively — reached through a Memo, say —
+	// clears its check at flush time instead: if every dependency refreshes to
+	// an unchanged value, it does not rerun. That is how the equality guard
+	// reaches effects, and it mirrors lazily-rs's EffectNode.force_run.
+	forceRun bool
 }
 
 // NewEffect creates and immediately runs a side-effect observer.
@@ -552,102 +785,73 @@ func (e *Effect) rerun() {
 	e.cleanup = e.run(e.ctx)
 }
 
-func (e *Effect) onInvalidate() {
+func (e *Effect) onInvalidate() { e.markStale(true) }
+
+// markStale schedules this effect to rerun after the current cascade. force
+// reports whether it read the written node directly; see Effect.forceRun.
+func (e *Effect) markStale(force bool) {
 	if e.ctx.disposing > 0 {
 		// Teardown, not a publish: mark only, never schedule. Running the
 		// effect here would re-enter a compute that reads the node being
 		// disposed. The contract is that the effect errors on its *next*
 		// recompute (spec: reactive-graph/read_after_dispose_is_an_error).
 		//
-		// The cascade that reached us consumed our incoming edges (Go's
-		// invalidate clears `dependents` and relies on the dependent's
-		// recompute to re-register). Since we deliberately are not rerunning,
-		// re-attach them ourselves, or this effect would be silently orphaned
-		// from every surviving dependency. lazily-rs has nothing to do here
-		// because its mark-frontier walk does not consume edges.
-		e.relinkDependencies()
+		// Nothing needs re-attaching here. The frontier walk that reached us
+		// does not consume edges, so an effect that deliberately does not
+		// rerun keeps every edge to its surviving dependencies — the same
+		// reason lazily-rs has nothing to do on this path.
 		return
+	}
+	if force {
+		e.forceRun = true
 	}
 	e.ctx.scheduleEffect(e)
 }
 
-// relinkDependencies restores the reverse edges for this effect's still-live
-// dependencies. Only used on the teardown path (see onInvalidate).
-func (e *Effect) relinkDependencies() {
-	for dep := range e.dependencies {
-		if dep.node().disposed {
-			delete(e.dependencies, dep)
-			continue
-		}
-		dep.node().dependents[e.self] = struct{}{}
+// dependenciesChanged refreshes every node this effect read on its last run and
+// reports whether any of them produced a different value. Used at flush time to
+// decide whether a transitively-scheduled effect actually needs to rerun.
+func (e *Effect) dependenciesChanged() bool {
+	deps := make([]reactiveNode, 0, len(e.dependencies))
+	for d := range e.dependencies {
+		deps = append(deps, d)
 	}
+	changed := false
+	for _, d := range deps {
+		if d.refresh() {
+			changed = true
+		}
+	}
+	return changed
 }
 
 // Memo is a lazy, cached, dependency-tracking computation with an equality
-// guard. It behaves like Slot but suppresses downstream invalidation when a
-// recompute yields a value equal (==) to the previous one. On invalidation it
-// eagerly recomputes to check equality rather than waiting for a read.
+// guard. It behaves like Slot but suppresses downstream recomputation when a
+// recompute yields a value equal (==) to the previous one.
+//
+// The guard is a PULL-TIME check, matching the rest of the family:
+// invalidation marks the dependent cone stale and computes nothing; a read
+// recomputes the memo, compares against the previous value, and if they are
+// equal leaves its dependents holding their caches (they are marked clean
+// without recomputing — see Slot.refresh). Because the invalidation walk does
+// not consume edges, a dependent suppressed this way is still reachable from
+// its source, so the next genuine change still arrives.
+//
+// Structurally a Memo is exactly "a Slot whose equals is set", which is how
+// lazily-rs models it too; it overrides no behavior of its own.
 type Memo[T comparable] struct {
 	Slot[T]
-	guardActive bool
 }
 
 // NewMemo creates a memoized slot with an equality guard bound to ctx.
 func NewMemo[T comparable](ctx *Context, compute func(ctx *Context) T) *Memo[T] {
-	m := &Memo[T]{Slot: Slot[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}}
+	m := &Memo[T]{Slot: Slot[T]{
+		reactiveBase: newReactiveBase(),
+		ctx:          ctx,
+		compute:      compute,
+		equals:       func(prev, next T) bool { return prev == next },
+	}}
 	m.self = m
 	ctx.registerSlot(m)
 	return m
 }
-
-// invalidate overrides the default cascade with the memo equality guard.
-func (m *Memo[T]) invalidate() {
-	if m.guardActive {
-		return
-	}
-	if m.ctx.disposing > 0 {
-		// Teardown: the equality guard is an eager recompute, and recomputing
-		// here would read the node being disposed. Degrade to plain Slot
-		// behaviour — drop the cache and cascade — so the memo errors on its
-		// next read instead of during the dispose call. Memo.onInvalidate is a
-		// no-op (it normally manages its cache inside this method), so the
-		// cache is dropped here explicitly.
-		if m.cached {
-			m.cached = false
-			m.ctx.cachedCount--
-		}
-		m.reactiveBase.invalidate()
-		return
-	}
-	m.guardActive = true
-	defer func() { m.guardActive = false }()
-
-	m.detachUpstream()
-	m.ctx.push(m.self)
-	newValue := m.compute(m.ctx)
-	m.ctx.pop()
-
-	if m.cached {
-		if newValue == m.value {
-			// Value unchanged — suppress the downstream cascade.
-			return
-		}
-	} else {
-		m.ctx.cachedCount++
-	}
-	m.value = newValue
-	m.cached = true
-	if len(m.dependents) == 0 {
-		return
-	}
-	snapshot := make([]reactiveNode, 0, len(m.dependents))
-	for d := range m.dependents {
-		snapshot = append(snapshot, d)
-	}
-	clear(m.dependents)
-	for _, dependent := range snapshot {
-		dependent.invalidate()
-	}
-}
-
-func (m *Memo[T]) onInvalidate() {} // Memo manages its own cache in invalidate

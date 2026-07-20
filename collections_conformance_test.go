@@ -431,24 +431,54 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 				}
 			}
 
+			// The memo-guard contract is "downstream did not RE-RUN", so it is
+			// asserted with a real downstream consumer and a run counter, the
+			// way lazily-rs (tests/collections_conformance.rs) and lazily-js
+			// (test/sem-tree.test.js) assert it. It used to be approximated
+			// here by IsCached("root"), which is only equivalent under eager
+			// invalidation: with the pull-time memo guard the root is marked
+			// stale by the write and becomes clean again when it is read, so
+			// the cached flag measures whether a read has happened yet rather
+			// than whether the fold re-ran. That proxy also made the outcome
+			// depend on Go's randomized map iteration order over expect_after,
+			// since the root's value is read from the same loop.
+			after := jsMap(scenario["expect_after"])
+			downstreamRuns := 0
+			var downstream *Slot[int]
+			if _, checked := after["downstream_consumer_reran"]; checked {
+				root := tree.RootHandle()
+				downstream = NewSlot(ctx, func(*Context) int {
+					downstreamRuns++
+					return root.Get()
+				})
+				downstream.Get() // prime
+			}
+			runsBefore := downstreamRuns
+
 			if edit := jsMap(scenario["edit"]); edit != nil {
 				if err := tree.SetValue(jsStr(edit["id"]), jsInt(edit["value"])); err != nil {
 					t.Fatalf("edit: %v", err)
 				}
-				checkSemTreeAfter(t, tree, jsMap(scenario["expect_after"]))
+				if downstream != nil {
+					downstream.Get() // pull the consumer, as rs and js do
+				}
+				checkSemTreeAfter(t, tree, after, downstreamRuns > runsBefore)
 			}
 
 			if rc := jsMap(scenario["remove_child"]); rc != nil {
 				if err := tree.RemoveChild(jsStr(rc["parent"]), jsStr(rc["child"])); err != nil {
 					t.Fatalf("remove_child: %v", err)
 				}
-				checkSemTreeAfter(t, tree, jsMap(scenario["expect_after"]))
+				if downstream != nil {
+					downstream.Get() // pull the consumer, as rs and js do
+				}
+				checkSemTreeAfter(t, tree, after, downstreamRuns > runsBefore)
 			}
 		})
 	}
 }
 
-func checkSemTreeAfter(t *testing.T, tree *SemTree[int, int], after map[string]any) {
+func checkSemTreeAfter(t *testing.T, tree *SemTree[int, int], after map[string]any, didRerun bool) {
 	t.Helper()
 	if after == nil {
 		return
@@ -460,9 +490,9 @@ func checkSemTreeAfter(t *testing.T, tree *SemTree[int, int], after map[string]a
 				t.Errorf("sibling_a_cached = %v, want %v", got, want)
 			}
 		case "downstream_consumer_reran":
-			// A non-changing edit must leave the root memo cached (no rerun).
-			if want == false && !tree.IsCached("root") {
-				t.Errorf("downstream_consumer_reran: root not cached (memo guard failed)")
+			if didRerun != (want == true) {
+				t.Errorf("downstream_consumer_reran = %v, want %v (memo guard)",
+					didRerun, want)
 			}
 		default:
 			if got, _ := tree.NodeValue(id); got != jsInt(want) {
