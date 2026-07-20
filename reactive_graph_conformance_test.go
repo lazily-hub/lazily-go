@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -46,10 +47,13 @@ var reactiveGraphReplayed = []string{
 	"disarm_disposes_nothing.json",
 	"disposal_does_not_run_surviving_effects.json",
 	"dispose_detaches_edges_both_directions.json",
+	"dispose_signal_reverts_to_lazy.json",
 	"read_after_dispose_is_an_error.json",
 	"recycled_id_inherits_nothing.json",
 	"scope_teardown_equals_fold_of_disposals.json",
 	"scoping_bounds_teardown_not_visibility.json",
+	"signal_materializes_once_per_batch.json",
+	"signal_materializes_without_a_read.json",
 	"teardown_runs_members_in_reverse_creation_order.json",
 	"transitive_invalidation_reaches_depth.json",
 }
@@ -63,6 +67,21 @@ var reactiveGraphReplayed = []string{
 // Empty since the disposal/teardown/degree surface landed (disposal.go,
 // async_disposal.go). It must stay empty unless a real gap reappears.
 var reactiveGraphUnsupported = map[string]string{}
+
+// reactiveGraphModelUnsupported names fixture/model pairs one execution model
+// cannot run, keyed "<model>/<fixture>". Same discipline as the ledger above:
+// each entry is a gap in lazily-go's public surface, reported loudly, and the
+// per-model completeness assertion subtracts exactly these — so a pair that
+// becomes runnable is not silently left unrun, and one that stops being runnable
+// cannot be hidden by adding an entry without also stating why.
+var reactiveGraphModelUnsupported = map[string]string{
+	"AsyncContext/dispose_signal_reverts_to_lazy.json": "AsyncContext ships no signal constructor " +
+		"(no NewAsyncSignal), so the `signal` op has nothing to build on that plane",
+	"AsyncContext/signal_materializes_once_per_batch.json": "AsyncContext ships no signal constructor " +
+		"(no NewAsyncSignal), so the `signal` op has nothing to build on that plane",
+	"AsyncContext/signal_materializes_without_a_read.json": "AsyncContext ships no signal constructor " +
+		"(no NewAsyncSignal), so the `signal` op has nothing to build on that plane",
+}
 
 // reactiveGraphDivergences records fixture assertions an execution model does
 // not satisfy, keyed `<model>/<fixture><label>#<step>:<key>`.
@@ -83,6 +102,7 @@ const (
 	kindCell nodeKind = iota
 	kindSlot
 	kindEffect
+	kindSignal
 )
 
 // nodeRef names one node in whichever graph is under test. The handle is opaque
@@ -125,6 +145,17 @@ type graphModel interface {
 	dependentCount(n nodeRef) int
 	dependencyCount(n nodeRef) int
 	isEffectActive(n nodeRef) bool
+	// signal builds the derived eager construct (#lzsignaleager). Separate from
+	// nodeFactory because the corpus never creates one inside a teardown scope.
+	signal(id string, reads []nodeRef, offset int) nodeRef
+	// disposeSignal removes only the eager puller — the narrower operation the
+	// corpus spells `dispose_signal`, not a graph teardown.
+	disposeSignal(n nodeRef)
+	batch(run func())
+	// computesOf is the cumulative number of times a node's compute body ran.
+	// It is the only observable that separates an eager signal from the lazy
+	// slot it is built on: their values are identical for every read sequence.
+	computesOf(id string) int
 	scope() scopeModel
 	// settle drives the model to quiescence before assertions are evaluated.
 	// Synchronous models are already quiescent when an op returns; async
@@ -170,12 +201,37 @@ func (l *effectLog) snapshotCleanups() []string {
 	return append([]string(nil), l.cleanups...)
 }
 
+// --- compute counter, shared by both models ---------------------------------
+
+// computeLog counts compute-body executions per node id. Async computes are
+// spawned, so the counter is mutex-guarded like effectLog.
+type computeLog struct {
+	mu sync.Mutex
+	n  map[string]int
+}
+
+func (c *computeLog) tick(id string) {
+	c.mu.Lock()
+	if c.n == nil {
+		c.n = map[string]int{}
+	}
+	c.n[id]++
+	c.mu.Unlock()
+}
+
+func (c *computeLog) count(id string) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n[id]
+}
+
 // --- sync model -------------------------------------------------------------
 
 // syncModel replays against the default single-threaded *Context.
 type syncModel struct {
-	ctx *Context
-	log effectLog
+	ctx      *Context
+	log      effectLog
+	computes computeLog
 }
 
 func newSyncModel() graphModel { return &syncModel{ctx: NewContext()} }
@@ -199,6 +255,8 @@ func (m *syncModel) trackRead(r nodeRef) int {
 		return r.h.(*Cell[int]).Get()
 	case kindSlot:
 		return r.h.(*Slot[int]).Get()
+	case kindSignal:
+		return r.h.(*Signal[int]).Get()
 	}
 	panic(fmt.Sprintf("reactive-graph: cannot read effect %q", r.id))
 }
@@ -206,6 +264,7 @@ func (m *syncModel) trackRead(r nodeRef) int {
 func (m *syncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
 	s := NewNamedSlot(m.ctx, id, func(*Context) int {
+		m.computes.tick(id)
 		sum := offset
 		for _, d := range deps {
 			sum += m.trackRead(d)
@@ -214,6 +273,25 @@ func (m *syncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	})
 	return nodeRef{kind: kindSlot, id: id, h: s}
 }
+
+func (m *syncModel) signal(id string, reads []nodeRef, offset int) nodeRef {
+	deps := append([]nodeRef(nil), reads...)
+	s := NewSignal(m.ctx, func(*Context) int {
+		m.computes.tick(id)
+		sum := offset
+		for _, d := range deps {
+			sum += m.trackRead(d)
+		}
+		return sum
+	})
+	return nodeRef{kind: kindSignal, id: id, h: s}
+}
+
+func (m *syncModel) disposeSignal(r nodeRef) { r.h.(*Signal[int]).Dispose() }
+
+func (m *syncModel) batch(run func()) { m.ctx.Batch(run) }
+
+func (m *syncModel) computesOf(id string) int { return m.computes.count(id) }
 
 func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
@@ -248,6 +326,8 @@ func (m *syncModel) read(r nodeRef) (int, error) {
 		return r.h.(*Cell[int]).TryGet()
 	case kindSlot:
 		return r.h.(*Slot[int]).TryGet()
+	case kindSignal:
+		return r.h.(*Signal[int]).TryGet()
 	}
 	return 0, fmt.Errorf("reactive-graph: cannot read effect %q", r.id)
 }
@@ -260,6 +340,10 @@ func (m *syncModel) dispose(r nodeRef) {
 		r.h.(*Cell[int]).Dispose()
 	case kindSlot:
 		r.h.(*Slot[int]).Dispose()
+	case kindSignal:
+		// `dispose` is the graph teardown; `dispose_signal` is the narrower
+		// puller removal.
+		r.h.(*Signal[int]).DisposeNode()
 	case kindEffect:
 		r.h.(*Effect).Dispose()
 	}
@@ -271,6 +355,8 @@ func (m *syncModel) graphNode(r nodeRef) GraphNode {
 		return r.h.(*Cell[int])
 	case kindSlot:
 		return r.h.(*Slot[int])
+	case kindSignal:
+		return r.h.(*Signal[int])
 	}
 	return r.h.(*Effect)
 }
@@ -313,8 +399,9 @@ func (sc *syncScope) closeScope() { sc.s.Close() }
 // (bdfdbce) this corpus pins, and the plane where a disposal leak is hardest to
 // reproduce by hand.
 type asyncModel struct {
-	ctx *AsyncContext
-	log effectLog
+	ctx      *AsyncContext
+	log      effectLog
+	computes computeLog
 }
 
 func newAsyncModel() graphModel { return &asyncModel{ctx: NewAsyncContext()} }
@@ -381,6 +468,7 @@ func (m *asyncModel) trackRead(cc *AsyncComputeContext, r nodeRef) (v int, err e
 func (m *asyncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
 	s := NewAsyncSlot(m.ctx, func(cc *AsyncComputeContext) (int, error) {
+		m.computes.tick(id)
 		sum := offset
 		for _, d := range deps {
 			v, err := m.trackRead(cc, d)
@@ -393,6 +481,26 @@ func (m *asyncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	})
 	return nodeRef{kind: kindSlot, id: id, h: s}
 }
+
+// signal and disposeSignal are unreachable on this plane: AsyncContext ships no
+// signal constructor, so every signal fixture is gated out per-model in
+// reactiveGraphModelUnsupported rather than quietly degraded to a slot here.
+// Degrading would be the worst option — the fixtures assert compute counts, and
+// a slot standing in for a signal reports plausible-looking numbers that pass
+// two of the three assertions.
+func (m *asyncModel) signal(id string, reads []nodeRef, offset int) nodeRef {
+	panic("reactive-graph: AsyncContext ships no signal — this fixture must be gated " +
+		"in reactiveGraphModelUnsupported")
+}
+
+func (m *asyncModel) disposeSignal(r nodeRef) {
+	panic("reactive-graph: AsyncContext ships no signal — this fixture must be gated " +
+		"in reactiveGraphModelUnsupported")
+}
+
+func (m *asyncModel) batch(run func()) { m.ctx.Batch(run) }
+
+func (m *asyncModel) computesOf(id string) int { return m.computes.count(id) }
 
 func (m *asyncModel) effect(id string, reads []nodeRef) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
@@ -492,6 +600,15 @@ type reactiveGraphOp struct {
 	Mode       string   `json:"mode"`
 	HandleOf   string   `json:"handle_of"`
 	HandleKind string   `json:"handle_kind"`
+	// Writes is the batch op's write list: an ordered sequence of cell writes
+	// applied inside one batch, so the corpus can pin coalescing.
+	Writes []reactiveGraphWrite `json:"writes"`
+}
+
+// reactiveGraphWrite is one cell write inside a `batch` op.
+type reactiveGraphWrite struct {
+	ID    string `json:"id"`
+	Value int    `json:"value"`
 }
 
 type reactiveGraphStep struct {
@@ -675,6 +792,29 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 			e.t.Fatalf("%s#%d: set_cell on non-cell %q", e.fixture, e.step, op.ID)
 		}
 		e.m.setCell(n, *op.Value)
+	case "signal":
+		r := e.m.signal(op.ID, e.refs(op.Reads), op.Offset)
+		e.put(op.ID, r)
+		// Creation materializes the value (clause 1), so the op has a value to
+		// assert on without a separate read step — and reading it here must not
+		// itself compute, which is what the fixture's `computes_of` pins.
+		v, err := e.m.read(r)
+		if err != nil {
+			return nil, true
+		}
+		return &v, false
+	case "dispose_signal":
+		e.m.disposeSignal(e.node(op.ID))
+	case "batch":
+		e.m.batch(func() {
+			for _, w := range op.Writes {
+				n := e.node(w.ID)
+				if n.kind != kindCell {
+					e.t.Fatalf("%s#%d: batch writes non-cell %q", e.fixture, e.step, w.ID)
+				}
+				e.m.setCell(n, w.Value)
+			}
+		})
 	case "dispose":
 		// The entry stays in the map: a disposed id remains readable-as-an-
 		// error, and disposing it again must be a no-op.
@@ -813,6 +953,12 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 				e.unmarshal(key, raw, &want)
 				for _, id := range sortedBoolKeys(want) {
 					e.check("readable."+id, e.readable(id), want[id])
+				}
+			case "computes_of":
+				var want map[string]int
+				e.unmarshal(key, raw, &want)
+				for _, id := range sortedIntKeys(want) {
+					e.check("computes_of."+id, e.m.computesOf(id), want[id])
 				}
 			case "dependents_of":
 				var want map[string]int
@@ -1040,6 +1186,13 @@ func TestReactiveGraphConformance(t *testing.T) {
 	for _, f := range reactiveGraphLedgerKeys(reactiveGraphUnsupported) {
 		t.Logf("UNSUPPORTED reactive-graph/%s — %s", f, reactiveGraphUnsupported[f])
 	}
+	for _, k := range reactiveGraphLedgerKeys(reactiveGraphModelUnsupported) {
+		t.Logf("UNSUPPORTED %s — %s", k, reactiveGraphModelUnsupported[k])
+		if f := k[strings.Index(k, "/")+1:]; !onDisk[f] {
+			t.Errorf("per-model ledger entry %s names a fixture missing from %s — stale entry",
+				k, reactiveGraphSpecDir)
+		}
+	}
 
 	models := []struct {
 		name string
@@ -1060,6 +1213,9 @@ func TestReactiveGraphConformance(t *testing.T) {
 		t.Run(mdl.name, func(t *testing.T) {
 			totalOps, totalChecks := 0, 0
 			for _, name := range reactiveGraphReplayed {
+				if _, gated := reactiveGraphModelUnsupported[mdl.name+"/"+name]; gated {
+					continue
+				}
 				t.Run(name, func(t *testing.T) {
 					raw, err := os.ReadFile(filepath.Join(reactiveGraphSpecDir, name))
 					if err != nil {
@@ -1133,9 +1289,15 @@ func TestReactiveGraphConformance(t *testing.T) {
 			t.Fatalf("%s: replayed zero reactive-graph fixtures — the runner executed nothing",
 				mdl.name)
 		}
-		if got != len(reactiveGraphReplayed) {
-			t.Errorf("%s: replayed %d of %d reactive-graph fixtures",
-				mdl.name, got, len(reactiveGraphReplayed))
+		gated := 0
+		for k := range reactiveGraphModelUnsupported {
+			if strings.HasPrefix(k, mdl.name+"/") {
+				gated++
+			}
+		}
+		if want := len(reactiveGraphReplayed) - gated; got != want {
+			t.Errorf("%s: replayed %d of %d reactive-graph fixtures (%d gated per-model)",
+				mdl.name, got, want, gated)
 		}
 	}
 

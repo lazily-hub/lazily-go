@@ -22,8 +22,9 @@
 //  2. Effects (and other eager nodes) reached by that walk are marked, not run.
 //     Disposal is not a publish: running an effect mid-teardown re-enters a
 //     compute that reads the node being disposed, which breaks idempotence.
-//     Context.disposing gates this; see Effect.onInvalidate,
-//     signalSlot.onInvalidate, and Memo.invalidate in core.go.
+//     Context.disposing gates this; see Effect.onInvalidate and Memo.invalidate
+//     in core.go. A Signal's eager pull is an ordinary Effect, so it is covered
+//     by the Effect case rather than needing a rule of its own.
 //
 //  3. Scope teardown is reverse creation order. Graph state is order
 //     independent, but effect *cleanups* are side effects with an observable

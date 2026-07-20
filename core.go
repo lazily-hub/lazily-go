@@ -12,8 +12,9 @@
 //     dependencies and recomputes only when read after an upstream change.
 //   - Cell[T]   — a mutable source value that invalidates dependent Slots/Signals
 //     when it changes.
-//   - Signal[T] — an eager derived value that recomputes the instant a
-//     dependency changes, with no intermediate unset value.
+//   - Signal[T] — an eager derived value, materialized by the time the
+//     invalidating write returns, with no intermediate unset value. Not a
+//     primitive: it is a Slot plus a puller Effect (Signal ≡ Slot.eager).
 //
 // Values are lazy by default: dependents are marked dirty on invalidation but
 // only recompute when accessed. When you need eager push-style semantics, reach
@@ -426,31 +427,47 @@ func (c *Cell[T]) Invalidate() {
 
 func (c *Cell[T]) onInvalidate() {} // cells hold their value directly
 
-// Signal is an eager derived value — recomputes immediately when a dependency
-// changes. A recompute that yields an equal value (!= guard) suppresses the
-// downstream cascade. T must be comparable for the equality guard.
+// Signal is an eager derived value: its value is materialized by the time the
+// invalidating write returns, with no intermediate unset state.
+//
+// Signal is NOT a core primitive and holds no value state of its own. It is
+// `Signal ≡ Slot.eager` (lazily-spec reactive-graph.md, #lzsignaleager): a
+// backing Slot plus a puller Effect that reads the slot on creation and after
+// every invalidation. Because the puller is an ordinary Effect, and effects are
+// scheduled rather than inline, N invalidations inside a Batch coalesce into a
+// single scheduled pull at the flush — the signal re-materializes once at batch
+// exit, not once per write (clause 3).
+//
+// Reads go straight to the backing slot, so a reader's dependency edge is on
+// the slot; the Signal wrapper carries no edges of its own.
+//
+// Known deviation: the backing is a plain Slot rather than the `memo` the spec
+// names, so a recompute yielding an equal value does NOT suppress the
+// downstream cascade. lazily-go's Memo implements its `==` guard by recomputing
+// during invalidation, which is eager — backing a Signal with it re-materializes
+// once per invalidating source inside a batch (breaking clause 3) and keeps
+// re-materializing after the puller is disposed (breaking clause 4). The two
+// cannot both hold until Memo's guard becomes a pull-time check. See
+// reactive_graph_conformance_test.go.
 type Signal[T comparable] struct {
 	reactiveBase
-	ctx         *Context
-	backing     *signalSlot[T]
-	value       T
-	active      bool
-	recomputing bool
-	// stale is set when a teardown cascade reached this signal. The eager
-	// re-pull was deliberately skipped (see signalSlot.onInvalidate), so the
-	// next Get must re-pull rather than serve the pre-disposal value.
-	stale bool
+	ctx     *Context
+	backing *Slot[T]
+	puller  *Effect
 }
 
 // NewSignal creates an eager signal bound to ctx. The value is computed now.
 func NewSignal[T comparable](ctx *Context, compute func(ctx *Context) T) *Signal[T] {
-	s := &Signal[T]{reactiveBase: newReactiveBase(), ctx: ctx, active: true}
+	s := &Signal[T]{reactiveBase: newReactiveBase(), ctx: ctx}
 	s.self = s
-	s.backing = newSignalSlot(ctx, compute)
-	s.backing.signal = s
-	// Eager activation: compute once now so there is no intermediate unset
-	// value and dependency edges are established immediately.
-	s.value = s.backing.Get()
+	s.backing = NewSlot(ctx, compute)
+	// The puller reads the slot now — so there is no intermediate unset value
+	// and the dependency edges exist immediately — and again on every
+	// invalidation, from inside the invalidating write's effect flush.
+	s.puller = NewEffect(ctx, func(*Context) func() {
+		s.backing.Get()
+		return nil
+	})
 	return s
 }
 
@@ -460,79 +477,17 @@ func (s *Signal[T]) Get() T {
 	if s.disposed {
 		panic(&DisposedError{Kind: "signal"})
 	}
-	s.track(s.ctx)
-	if !s.active {
-		return s.backing.Get()
-	}
-	if s.stale {
-		s.stale = false
-		s.value = s.backing.Get()
-	}
-	return s.value
-}
-
-// markStale defers the eager re-pull to the next read (teardown path only).
-func (s *Signal[T]) markStale() { s.stale = true }
-
-func (s *Signal[T]) eagerRecompute() {
-	if !s.active || s.recomputing {
-		return
-	}
-	s.recomputing = true
-	newValue := s.backing.Get()
-	s.recomputing = false
-	if newValue != s.value {
-		s.value = newValue
-		s.invalidate()
-	}
+	return s.backing.Get()
 }
 
 // Dispose removes the eager puller. The value remains readable but reverts to
 // lazy behavior.
-func (s *Signal[T]) Dispose() {
-	s.active = false
-	s.backing.signal = nil
-}
+func (s *Signal[T]) Dispose() { s.puller.Dispose() }
 
 // IsActive reports whether the eager puller is still installed.
-func (s *Signal[T]) IsActive() bool { return s.active }
+func (s *Signal[T]) IsActive() bool { return s.puller.IsActive() }
 
-func (s *Signal[T]) onInvalidate() {} // signal holds its value directly
-
-// signalSlot backs a Signal. Its invalidation eagerly re-pulls the signal
-// instead of leaving it dirty.
-type signalSlot[T comparable] struct {
-	Slot[T]
-	signal *Signal[T]
-}
-
-func newSignalSlot[T comparable](ctx *Context, compute func(ctx *Context) T) *signalSlot[T] {
-	ss := &signalSlot[T]{Slot: Slot[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}}
-	ss.self = ss
-	ctx.registerSlot(ss)
-	return ss
-}
-
-func (ss *signalSlot[T]) onInvalidate() {
-	// Drop the cached slot value so the re-pull recomputes, then eagerly
-	// recompute the owning signal.
-	if ss.cached {
-		ss.cached = false
-		ss.ctx.cachedCount--
-	}
-	if ss.signal == nil {
-		return
-	}
-	if ss.ctx.disposing > 0 {
-		// Same rule as Effect: an eager re-pull during teardown would read the
-		// node being disposed. Mark the signal stale so the next Get re-pulls
-		// (and errors then, if a dependency is gone) instead of serving the
-		// value it cached before the disposal.
-		ss.signal.markStale()
-		return
-	}
-	ss.signal.eagerRecompute()
-}
+func (s *Signal[T]) onInvalidate() {} // the backing slot owns the value
 
 // EffectRun is a side-effect function that may return a cleanup callback. The
 // cleanup (if non-nil) is invoked before the next rerun and on Dispose.
