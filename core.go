@@ -54,12 +54,23 @@ type reactiveBase struct {
 	dependents   map[reactiveNode]struct{}
 	dependencies map[reactiveNode]struct{}
 	self         reactiveNode
+
+	// disposed marks a node torn down by Dispose (or by a TeardownScope).
+	// A disposed node has no edges in either direction, reads as an error,
+	// and reports zero degree. See disposal.go.
+	disposed bool
+	// slotIndex is this node's position in Context.slots, or -1 when the node
+	// is not value-bearing. Disposal swap-removes by this index so a
+	// subscribe/unsubscribe workload does not grow the registry without bound
+	// (#lzspecedgeindex).
+	slotIndex int
 }
 
 func newReactiveBase() reactiveBase {
 	return reactiveBase{
 		dependents:   map[reactiveNode]struct{}{},
 		dependencies: map[reactiveNode]struct{}{},
+		slotIndex:    -1,
 	}
 }
 
@@ -116,6 +127,9 @@ func (b *reactiveBase) invalidate() {
 type cacheable interface {
 	clearCache()
 	cachedNow() bool
+	// node is what makes this interface unexported-sealed and lets the
+	// registry swap-remove a disposed entry in O(1).
+	node() *reactiveBase
 }
 
 // Context is a reactive scope: the computation stack for automatic dependency
@@ -137,6 +151,14 @@ type Context struct {
 	effectsHead      int
 	scheduledEffects map[*Effect]struct{}
 	flushingEffects  bool
+
+	// disposing is the teardown depth. While it is non-zero the invalidation
+	// cascade marks nodes dirty but must not *run* anything: an effect rerun or
+	// an eager (Signal/Memo) recompute during teardown re-enters a compute that
+	// reads the node being disposed, which breaks teardown idempotence. The
+	// contract is "errors on next recompute", not "errors during the dispose
+	// call". See disposal.go.
+	disposing int
 }
 
 // NewContext creates an empty reactive scope.
@@ -149,7 +171,25 @@ func NewContext() *Context {
 
 // registerSlot records a value-bearing slot so Clear can reset it. Called once
 // per slot at construction; not on any read path.
-func (c *Context) registerSlot(s cacheable) { c.slots = append(c.slots, s) }
+func (c *Context) registerSlot(s cacheable) {
+	s.node().slotIndex = len(c.slots)
+	c.slots = append(c.slots, s)
+}
+
+// unregisterSlot swap-removes a disposed slot from the registry in O(1).
+func (c *Context) unregisterSlot(b *reactiveBase) {
+	i := b.slotIndex
+	if i < 0 || i >= len(c.slots) {
+		return
+	}
+	last := len(c.slots) - 1
+	moved := c.slots[last]
+	c.slots[i] = moved
+	moved.node().slotIndex = i
+	c.slots[last] = nil
+	c.slots = c.slots[:last]
+	b.slotIndex = -1
+}
 
 // Size reports the number of slots currently holding a cached value.
 func (c *Context) Size() int { return c.cachedCount }
@@ -287,7 +327,14 @@ func NewNamedSlot[T any](ctx *Context, name string, compute func(ctx *Context) T
 }
 
 // Get reads (and caches if needed) the value.
+//
+// Panics with a *DisposedError if this slot has been disposed. Use TryGet for
+// the checked form; see disposal.go for why a read of a torn-down node is a
+// panic rather than a returned error.
 func (s *Slot[T]) Get() T {
+	if s.disposed {
+		panic(&DisposedError{Name: s.Name, Kind: "slot"})
+	}
 	s.track(s.ctx)
 	if s.cached {
 		return s.value
@@ -344,7 +391,13 @@ func NewCell[T comparable](ctx *Context, initial T) *Cell[T] {
 }
 
 // Get reads the value. Reading inside a computation subscribes the reader.
+//
+// Panics with a *DisposedError if this cell has been disposed; use TryGet for
+// the checked form.
 func (c *Cell[T]) Get() T {
+	if c.disposed {
+		panic(&DisposedError{Kind: "cell"})
+	}
 	c.track(c.ctx)
 	return c.value
 }
@@ -353,7 +406,11 @@ func (c *Cell[T]) Get() T {
 func (c *Cell[T]) Peek() T { return c.value }
 
 // Set assigns a new value. If newValue != old, dependents are invalidated.
+// Writing a disposed cell is a no-op: it has no dependents left to notify.
 func (c *Cell[T]) Set(newValue T) {
+	if c.disposed {
+		return
+	}
 	if newValue != c.value {
 		c.value = newValue
 		c.ctx.cellChanged(c.self)
@@ -379,6 +436,10 @@ type Signal[T comparable] struct {
 	value       T
 	active      bool
 	recomputing bool
+	// stale is set when a teardown cascade reached this signal. The eager
+	// re-pull was deliberately skipped (see signalSlot.onInvalidate), so the
+	// next Get must re-pull rather than serve the pre-disposal value.
+	stale bool
 }
 
 // NewSignal creates an eager signal bound to ctx. The value is computed now.
@@ -396,12 +457,22 @@ func NewSignal[T comparable](ctx *Context, compute func(ctx *Context) T) *Signal
 // Get reads the current materialized value. Reading inside a computation
 // subscribes the reader.
 func (s *Signal[T]) Get() T {
+	if s.disposed {
+		panic(&DisposedError{Kind: "signal"})
+	}
 	s.track(s.ctx)
 	if !s.active {
 		return s.backing.Get()
 	}
+	if s.stale {
+		s.stale = false
+		s.value = s.backing.Get()
+	}
 	return s.value
 }
+
+// markStale defers the eager re-pull to the next read (teardown path only).
+func (s *Signal[T]) markStale() { s.stale = true }
 
 func (s *Signal[T]) eagerRecompute() {
 	if !s.active || s.recomputing {
@@ -449,9 +520,18 @@ func (ss *signalSlot[T]) onInvalidate() {
 		ss.cached = false
 		ss.ctx.cachedCount--
 	}
-	if ss.signal != nil {
-		ss.signal.eagerRecompute()
+	if ss.signal == nil {
+		return
 	}
+	if ss.ctx.disposing > 0 {
+		// Same rule as Effect: an eager re-pull during teardown would read the
+		// node being disposed. Mark the signal stale so the next Get re-pulls
+		// (and errors then, if a dependency is gone) instead of serving the
+		// value it cached before the disposal.
+		ss.signal.markStale()
+		return
+	}
+	ss.signal.eagerRecompute()
 }
 
 // EffectRun is a side-effect function that may return a cleanup callback. The
@@ -487,6 +567,7 @@ func (e *Effect) Dispose() {
 		return
 	}
 	e.active = false
+	e.disposed = true
 	e.ctx.removePendingEffect(e)
 	e.detachUpstream()
 	c := e.cleanup
@@ -516,7 +597,36 @@ func (e *Effect) rerun() {
 	e.cleanup = e.run(e.ctx)
 }
 
-func (e *Effect) onInvalidate() { e.ctx.scheduleEffect(e) }
+func (e *Effect) onInvalidate() {
+	if e.ctx.disposing > 0 {
+		// Teardown, not a publish: mark only, never schedule. Running the
+		// effect here would re-enter a compute that reads the node being
+		// disposed. The contract is that the effect errors on its *next*
+		// recompute (spec: reactive-graph/read_after_dispose_is_an_error).
+		//
+		// The cascade that reached us consumed our incoming edges (Go's
+		// invalidate clears `dependents` and relies on the dependent's
+		// recompute to re-register). Since we deliberately are not rerunning,
+		// re-attach them ourselves, or this effect would be silently orphaned
+		// from every surviving dependency. lazily-rs has nothing to do here
+		// because its mark-frontier walk does not consume edges.
+		e.relinkDependencies()
+		return
+	}
+	e.ctx.scheduleEffect(e)
+}
+
+// relinkDependencies restores the reverse edges for this effect's still-live
+// dependencies. Only used on the teardown path (see onInvalidate).
+func (e *Effect) relinkDependencies() {
+	for dep := range e.dependencies {
+		if dep.node().disposed {
+			delete(e.dependencies, dep)
+			continue
+		}
+		dep.node().dependents[e.self] = struct{}{}
+	}
+}
 
 // Memo is a lazy, cached, dependency-tracking computation with an equality
 // guard. It behaves like Slot but suppresses downstream invalidation when a
@@ -538,6 +648,20 @@ func NewMemo[T comparable](ctx *Context, compute func(ctx *Context) T) *Memo[T] 
 // invalidate overrides the default cascade with the memo equality guard.
 func (m *Memo[T]) invalidate() {
 	if m.guardActive {
+		return
+	}
+	if m.ctx.disposing > 0 {
+		// Teardown: the equality guard is an eager recompute, and recomputing
+		// here would read the node being disposed. Degrade to plain Slot
+		// behaviour — drop the cache and cascade — so the memo errors on its
+		// next read instead of during the dispose call. Memo.onInvalidate is a
+		// no-op (it normally manages its cache inside this method), so the
+		// cache is dropped here explicitly.
+		if m.cached {
+			m.cached = false
+			m.ctx.cachedCount--
+		}
+		m.reactiveBase.invalidate()
 		return
 	}
 	m.guardActive = true

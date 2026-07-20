@@ -6,6 +6,59 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+### Added — disposal, teardown scopes, and edge-degree introspection (`#lzspecedgeindex`)
+
+- **`Slot.Dispose`, `Cell.Dispose`, `Memo.DisposeNode`, `Signal.DisposeNode`.**
+  A Go handle is a pointer, and dropping the last pointer to a node reclaimed
+  nothing: the reverse edge each dependency holds is a strong reference, so a
+  long-lived source retained every node that ever read it and a
+  subscribe/unsubscribe workload grew without bound in both memory and
+  propagation cost. Disposal detaches both edge directions and is idempotent.
+  `Signal.Dispose` keeps its older, narrower meaning — deactivate the eager
+  puller, stay readable — so graph teardown for a `Signal` is `DisposeNode`.
+- **`Context.Scope() *TeardownScope`**, with `Own`, `Len`, `Disarm`, and
+  `Close`, plus `Context.WithScope` for the lexical case. Go has no
+  destructors, so a scope ends at `defer scope.Close()` rather than at a drop.
+  Close tears members down in reverse creation order, which is observable
+  through effect cleanups.
+- **`Context.DependentCount` / `Context.DependencyCount`**, over a sealed
+  `GraphNode` interface. Counts only — no path to the edge sets and no way to
+  mutate the graph through them.
+- **`Slot.TryGet` / `Cell.TryGet` / `Signal.TryGet`** and `ErrDisposed` /
+  `*DisposedError`. A read of a disposed node panics, which is how the error
+  crosses a user compute closure that has no error channel; `TryGet` is the
+  checked form at the boundary and repairs the tracking stack.
+- **The whole surface again on `AsyncContext`**: `DisposeAsync` on slot and cell
+  handles, `AsyncTeardownScope` with `OwnAsync`, `DependentCount` /
+  `DependencyCount`, `AsyncCellHandle.TryGet`, and
+  `AsyncEffectHandle.IsActive`.
+- Disposal dirties the surviving dependent cone on **both** the sync and async
+  paths — detaching edges without marking dependents leaves a live reader frozen
+  on its pre-disposal cache. Effects reached by that walk are marked but never
+  scheduled: teardown is not a publish, and running an effect mid-teardown would
+  re-enter a compute that reads the node being disposed. The same rule defers
+  `Memo`'s equality recompute and `Signal`'s eager re-pull to the next read.
+
+### Fixed
+
+- **AsyncContext: a late dependency registration could resurrect a disposed
+  node's edge.** A compute or effect body runs on its own goroutine and could
+  reach `trackDep` after its owner was torn down, rebuilding an edge the
+  disposal had just removed and leaking it for the life of the context.
+  `trackDep` now refuses to build an edge onto or out of a disposed node.
+
+### Testing
+
+- The reactive-graph conformance runner now replays **all nine** fixtures
+  against both `Context` and `AsyncContext` — previously one of nine, with the
+  other eight recorded as blocked on the missing public API. The runner gained
+  the `dispose`, `fanout`, `dispose_fanout`, `churn`, `begin_scope`,
+  `end_scope`, `disarm`, and `dispose_stale_handle` ops, the `dependents_of`,
+  `dependencies_of`, `readable`, `error`, `observed_by`, `observed_count`,
+  `cleanup_order`, and `scope_owned_count` assertions, and the `scenarios`
+  fixture shape with its `observationally_equal` relation. A divergence ledger
+  asserts in both directions, so a new divergence and a stale entry both fail.
+
 ### Removed — BREAKING: the `Cell` observer API
 
 - **`Cell.Subscribe` and its disposer are gone**, along with the observer slot

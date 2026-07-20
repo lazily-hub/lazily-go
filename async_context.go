@@ -109,7 +109,8 @@ type depOwner interface {
 
 // asyncCell is the loop-owned state of a mutable input cell.
 type asyncCell struct {
-	value any
+	value    any
+	disposed bool
 }
 
 // asyncSlot is the loop-owned state of a computed async slot. All fields are
@@ -126,6 +127,7 @@ type asyncSlot struct {
 	inFlight *inFlight
 	waiters  []chan asyncResult
 	deps     map[any]struct{}
+	disposed bool
 }
 
 func (s *asyncSlot) onDepInvalidated(c *AsyncContext) { c.invalidateSlot(s) }
@@ -156,9 +158,30 @@ func NewAsyncCell[T any](c *AsyncContext, value T) *AsyncCellHandle[T] {
 // Peek returns the current value without registering a dependency
 // (non-reactive). Use TrackCell to read reactively inside an async compute.
 func (h *AsyncCellHandle[T]) Peek() T {
-	var v T
-	h.c.do(func() { v = h.node.value.(T) })
+	v, err := h.TryGet()
+	if err != nil {
+		panic(err)
+	}
 	return v
+}
+
+// TryGet is the checked read: it returns a *DisposedError instead of panicking
+// when this cell has been disposed.
+func (h *AsyncCellHandle[T]) TryGet() (T, error) {
+	var v T
+	var disposed bool
+	h.c.do(func() {
+		if h.node.disposed {
+			disposed = true
+			return
+		}
+		v = h.node.value.(T)
+	})
+	if disposed {
+		var zero T
+		return zero, &DisposedError{Kind: "cell"}
+	}
+	return v, nil
 }
 
 // Get returns the current value. It does NOT register a dependency (there is no
@@ -170,7 +193,7 @@ func (h *AsyncCellHandle[T]) Get() T { return h.Peek() }
 // async slots/effects are invalidated (or queued when inside Batch).
 func (h *AsyncCellHandle[T]) Set(value T) {
 	h.c.do(func() {
-		if h.c.disposed {
+		if h.c.disposed || h.node.disposed {
 			return
 		}
 		if asyncValueEqual(h.node.value, value) {
@@ -266,6 +289,11 @@ func (s *AsyncSlotHandle[T]) GetAsync(ctx context.Context) (T, error) {
 				done = true
 				return
 			}
+			if n.disposed {
+				outErr = &DisposedError{Kind: "slot"}
+				done = true
+				return
+			}
 			switch n.state {
 			case AsyncSlotResolved:
 				outVal = n.value
@@ -328,12 +356,25 @@ func (cc *AsyncComputeContext) Context() context.Context { return cc.goctx }
 // dependency edge before returning the value (Dart AsyncComputeContext.getCell).
 func TrackCell[T any](cc *AsyncComputeContext, cell *AsyncCellHandle[T]) T {
 	var v T
+	var disposed bool
 	cc.c.do(func() {
+		if cell.node.disposed {
+			disposed = true
+			return
+		}
 		if cc.goctx.Err() == nil {
 			cc.c.trackDep(cc.owner, cell.node)
 		}
 		v = cell.node.value.(T)
 	})
+	if disposed {
+		// Panic, not a returned error: TrackCell returns a bare T so a compute
+		// body has no error channel here. runComputeSafe / runBodySafe already
+		// recover panics into the compute's error, which is exactly the
+		// "errors on next recompute" contract. Mirrors the synchronous
+		// Cell.Get panic (see disposal.go).
+		panic(&DisposedError{Kind: "cell"})
+	}
 	return v
 }
 
@@ -511,6 +552,16 @@ func (c *AsyncContext) trackDep(owner depOwner, dep any) {
 	if c.disposed {
 		return
 	}
+	// Never build an edge onto or out of a torn-down node. A compute or effect
+	// body runs on its own goroutine and can reach this point *after* its owner
+	// was disposed — the disposal already removed the owner's edges, so a late
+	// registration would resurrect one and leak it for the life of the context.
+	// This is the exact shape #lzspecedgeindex's churn fixture measures. Both
+	// this check and the disposal run inside the owner goroutine, so the test
+	// is race-free.
+	if c.isDisposedNode(dep) || c.isDisposedNode(owner) {
+		return
+	}
 	d := owner.depSet()
 	if _, ok := d[dep]; !ok {
 		d[dep] = struct{}{}
@@ -526,6 +577,19 @@ func (c *AsyncContext) invalidateDependents(dep any) {
 		c.batchQueue[dep] = struct{}{}
 		return
 	}
+	c.propagate(dep, true)
+}
+
+// propagate walks the dependent cone rooted at dep.
+//
+// schedule distinguishes the two callers. A write (schedule=true) invalidates
+// and then reruns the effects it reached — that is a publish. A disposal
+// (schedule=false) invalidates and deliberately does NOT rerun them: running an
+// effect during teardown re-enters a compute that reads the node being
+// disposed, which breaks teardown idempotence. The contract is "errors on next
+// recompute", so teardown marks only. Same rule as the synchronous path's
+// Context.disposing (see disposal.go).
+func (c *AsyncContext) propagate(dep any, schedule bool) {
 	// Walk the FULL transitive dependent cone, not just one level. A slot that
 	// depends on a slot must itself be invalidated: GetAsync short-circuits on
 	// AsyncSlotResolved, so a downstream slot left Resolved keeps serving its
@@ -570,7 +634,21 @@ func (c *AsyncContext) invalidateDependents(dep any) {
 		}
 	}
 	for _, e := range effects {
-		c.scheduleEffectRerun(e)
+		if schedule {
+			c.scheduleEffectRerun(e)
+			continue
+		}
+		// Teardown: mark, do not run. The walk above consumed this effect's
+		// incoming edges, so re-attach the ones whose dependency is still
+		// alive — without this the effect would be silently orphaned from
+		// every surviving dependency and never rerun again.
+		for d := range e.deps {
+			if c.isDisposedNode(d) {
+				delete(e.deps, d)
+				continue
+			}
+			c.addDependent(d, e)
+		}
 	}
 }
 
