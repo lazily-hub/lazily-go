@@ -64,9 +64,30 @@ var reactiveGraphReplayed = []string{
 // skipped silently, and a fixture becoming executable fails the ledger
 // assertion until it is promoted into reactiveGraphReplayed.
 //
-// Empty since the disposal/teardown/degree surface landed (disposal.go,
-// async_disposal.go). It must stay empty unless a real gap reappears.
-var reactiveGraphUnsupported = map[string]string{}
+// The merge-feed fixtures landed on spec main (#lzmergefeed, Step 3): they drive
+// the `merge_cell` op — the accumulate/fold write surface (RelayCell / merge
+// policy) — which this reactive-graph runner does not model. The runner has no
+// `merge_cell` node kind, so replaying them would Fatalf on an unsupported op;
+// they are accounted-for skips, not silent gaps, and each stays here until the
+// op is implemented and the fixture promoted into reactiveGraphReplayed.
+//
+// feedback_drain_bound_reports_exhaustion uses only supported ops (cell / effect
+// / read / set_cell) but asserts the novel `drain_exhausted` / `writes_own_cone`
+// keys — the bounded-feedback drain semantics carried forward under #lzmergefeed.
+// It is parked here rather than mis-replayed against expectation keys the runner
+// cannot check (they would Fatalf in the assertion switch's default arm).
+//
+// merge ops are NOT implemented and the drift assertion is NOT loosened: these
+// entries are exactly what makes the on-disk corpus drift check pass without
+// running fixtures this binding cannot honestly execute.
+var reactiveGraphUnsupported = map[string]string{
+	"exact_fold_paths_stay_exact.json":             "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
+	"merge_cell_acquires_no_dependency_edge.json":  "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
+	"merge_feed_through_a_formula_coalesces.json":  "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
+	"merge_folds_synchronously_in_batch.json":      "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
+	"merge_per_settled_cone_not_per_write.json":    "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
+	"feedback_drain_bound_reports_exhaustion.json": "drain_exhausted/writes_own_cone assertion keys (#lzmergefeed) — bounded-feedback drain not modeled",
+}
 
 // reactiveGraphModelUnsupported names fixture/model pairs one execution model
 // cannot run, keyed "<model>/<fixture>". Same discipline as the ledger above:
