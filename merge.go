@@ -112,22 +112,12 @@ func RawFifo[E any]() MergePolicy[[]E] {
 	}
 }
 
-// MergeCell is retained as a compatibility alias for a Source. Under the
-// Cell kernel a MergeCell is just a Source whose policy is not KeepLatest —
-// "one kind, the policy in a field" — so the two collapse into Source and
-// this alias keeps existing call sites compiling. Prefer Source.
+// v2 (#lzcellkernel): the compatibility shims `MergeCell` (type alias for
+// Source) and `NewMergeCell` (alias for NewSourceWithPolicy) are removed. Under
+// the Cell kernel a "merge cell" is just a Source whose policy is not KeepLatest
+// — "one kind, the policy in a field" — so the two collapse into Source with no
+// separate handle. Use Source / NewSourceWithPolicy directly.
 //
-// Deprecated: use Source (NewSourceWithPolicy) directly.
-type MergeCell[T comparable] = Source[T]
-
-// NewMergeCell creates a Source folding writes under policy. This is the
-// design's source::<M>(v); equivalent to NewSourceWithPolicy.
-//
-// Deprecated: use NewSourceWithPolicy.
-func NewMergeCell[T comparable](ctx *Context, initial T, policy MergePolicy[T]) *Source[T] {
-	return NewSourceWithPolicy(ctx, initial, policy)
-}
-
 // v2 (#lzcellkernel): the `Cell[T]` read-genus interface is dropped. `Cell` is a
 // conceptual word for a value-bearing reactive node (Source / Computed), not a
 // type. v2 no longer needs a genus for write-protection — the two concrete

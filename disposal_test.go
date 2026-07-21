@@ -158,10 +158,10 @@ func TestSignalDisposalDefersItsEagerPull(t *testing.T) {
 	other := NewComputed(ctx, func(*Context) int { return 5 }).Eager()
 	other.Lazy()
 	if other.IsEager() {
-		t.Fatal("Undrive should deactivate the eager puller")
+		t.Fatal("Lazy() should deactivate the eager puller")
 	}
 	if ctx.IsDisposed(other) {
-		t.Fatal("Undrive must not tear the node out of the graph")
+		t.Fatal("Lazy() must not tear the node out of the graph")
 	}
 	other.Dispose()
 	if !ctx.IsDisposed(other) {

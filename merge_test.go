@@ -88,7 +88,7 @@ func TestSetUnionAndRawFifoFlags(t *testing.T) {
 func TestCellIsMergeCellKeepLatest(t *testing.T) {
 	ctx := NewContext()
 	cell := NewSource(ctx, 0)
-	mc := NewMergeCell(ctx, 0, KeepLatest[int]())
+	mc := NewSourceWithPolicy(ctx, 0, KeepLatest[int]())
 	for _, v := range []int{3, 3, 7, 7, 1} {
 		cell.Set(v)
 		mc.Merge(v)
@@ -104,11 +104,11 @@ func TestCellIsMergeCellKeepLatest(t *testing.T) {
 func TestSumConvergesRegardlessOfOrder(t *testing.T) {
 	ctx := NewContext()
 	ops := []int{5, -3, 8, 2, -1}
-	a := NewMergeCell(ctx, 0, Sum[int]())
+	a := NewSourceWithPolicy(ctx, 0, Sum[int]())
 	for _, d := range ops {
 		a.Merge(d)
 	}
-	b := NewMergeCell(ctx, 0, Sum[int]())
+	b := NewSourceWithPolicy(ctx, 0, Sum[int]())
 	for i := len(ops) - 1; i >= 0; i-- {
 		b.Merge(ops[i])
 	}
@@ -119,7 +119,7 @@ func TestSumConvergesRegardlessOfOrder(t *testing.T) {
 
 func TestIdempotentMergeNoOpsViaGuard(t *testing.T) {
 	ctx := NewContext()
-	mc := NewMergeCell(ctx, 10, Max[int]())
+	mc := NewSourceWithPolicy(ctx, 10, Max[int]())
 	runs := 0
 	NewEffect(ctx, func(ctx *Context) func() {
 		mc.Get()
@@ -188,7 +188,7 @@ func TestMergeCellAlgebraFixture(t *testing.T) {
 			t.Fatalf("%s flags mismatch", sc.Policy)
 		}
 		ctx := NewContext()
-		mc := NewMergeCell(ctx, sc.Initial, p)
+		mc := NewSourceWithPolicy(ctx, sc.Initial, p)
 		runs := 0
 		NewEffect(ctx, func(ctx *Context) func() {
 			mc.Get()
