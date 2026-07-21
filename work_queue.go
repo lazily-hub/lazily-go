@@ -37,10 +37,10 @@ type WorkQueueDeadLetter[T any] struct {
 }
 
 type WorkQueueReaderHandles struct {
-	PendingLen    *Slot[int]
-	IsEmpty       *Slot[bool]
-	InFlightLen   *Slot[int]
-	DeadLetterLen *Slot[int]
+	PendingLen    *FormulaCell[int]
+	IsEmpty       *FormulaCell[bool]
+	InFlightLen   *FormulaCell[int]
+	DeadLetterLen *FormulaCell[int]
 }
 
 // WorkQueueCell is a process-local competing-consumer work queue.
@@ -61,10 +61,10 @@ type WorkQueueCell[T any] struct {
 	deadLetters       []WorkQueueDeadLetter[T]
 	nextItemID        uint64
 	nextDeliveryID    uint64
-	pendingLen        *Slot[int]
-	isEmpty           *Slot[bool]
-	inFlightLen       *Slot[int]
-	deadLetterLen     *Slot[int]
+	pendingLen        *FormulaCell[int]
+	isEmpty           *FormulaCell[bool]
+	inFlightLen       *FormulaCell[int]
+	deadLetterLen     *FormulaCell[int]
 }
 
 // NewWorkQueueCell creates an empty queue. It panics for invalid configuration.
@@ -81,10 +81,10 @@ func NewWorkQueueCell[T any](ctx *Context, visibilityTimeout int64, maxDeliverie
 		MaxDeliveries:     maxDeliveries,
 		inFlight:          make(map[uint64]WorkQueueDelivery[T]),
 	}
-	q.pendingLen = NewSlot[int](ctx, func(*Context) int { return len(q.pending) })
-	q.isEmpty = NewSlot[bool](ctx, func(*Context) bool { return len(q.pending) == 0 })
-	q.inFlightLen = NewSlot[int](ctx, func(*Context) int { return len(q.inFlight) })
-	q.deadLetterLen = NewSlot[int](ctx, func(*Context) int { return len(q.deadLetters) })
+	q.pendingLen = NewFormulaCell[int](ctx, func(*Context) int { return len(q.pending) })
+	q.isEmpty = NewFormulaCell[bool](ctx, func(*Context) bool { return len(q.pending) == 0 })
+	q.inFlightLen = NewFormulaCell[int](ctx, func(*Context) int { return len(q.inFlight) })
+	q.deadLetterLen = NewFormulaCell[int](ctx, func(*Context) int { return len(q.deadLetters) })
 	return q
 }
 

@@ -209,14 +209,14 @@ func (c *SessionCore[T]) Flush(now uint64) Opt[T] {
 // emitted aggregate.
 type TumblingCountWindow[T comparable] struct {
 	core   *TumblingCountCore[T]
-	output *Cell[Opt[T]]
+	output *SourceCell[Opt[T]]
 }
 
 // TumblingCount constructs a reactive count-tumbling window over ctx.
 func TumblingCount[T comparable](ctx *Context, n uint64, policy MergePolicy[T]) *TumblingCountWindow[T] {
 	return &TumblingCountWindow[T]{
 		core:   NewTumblingCountCore(n, policy),
-		output: NewCell(ctx, Opt[T]{}),
+		output: NewSourceCell(ctx, Opt[T]{}),
 	}
 }
 
@@ -231,7 +231,7 @@ func (w *TumblingCountWindow[T]) Push(v T) Opt[T] {
 }
 
 // OutputCell returns the reactive cell holding the last emitted aggregate.
-func (w *TumblingCountWindow[T]) OutputCell() *Cell[Opt[T]] { return w.output }
+func (w *TumblingCountWindow[T]) OutputCell() *SourceCell[Opt[T]] { return w.output }
 
 // Output reads the last emitted aggregate (subscribes in a computation).
 func (w *TumblingCountWindow[T]) Output() Opt[T] { return w.output.Get() }
@@ -239,14 +239,14 @@ func (w *TumblingCountWindow[T]) Output() Opt[T] { return w.output.Get() }
 // TumblingTimeWindow is a reactive time-tumbling window (Push(now,v) + Tick(now)).
 type TumblingTimeWindow[T comparable] struct {
 	core   *TumblingTimeCore[T]
-	output *Cell[Opt[T]]
+	output *SourceCell[Opt[T]]
 }
 
 // TumblingTime constructs a reactive time-tumbling window over ctx.
 func TumblingTime[T comparable](ctx *Context, period uint64, policy MergePolicy[T]) *TumblingTimeWindow[T] {
 	return &TumblingTimeWindow[T]{
 		core:   NewTumblingTimeCore(period, policy),
-		output: NewCell(ctx, Opt[T]{}),
+		output: NewSourceCell(ctx, Opt[T]{}),
 	}
 }
 
@@ -263,7 +263,7 @@ func (w *TumblingTimeWindow[T]) Tick(now uint64) Opt[T] {
 }
 
 // OutputCell returns the reactive cell holding the last emitted aggregate.
-func (w *TumblingTimeWindow[T]) OutputCell() *Cell[Opt[T]] { return w.output }
+func (w *TumblingTimeWindow[T]) OutputCell() *SourceCell[Opt[T]] { return w.output }
 
 // Output reads the last emitted aggregate (subscribes in a computation).
 func (w *TumblingTimeWindow[T]) Output() Opt[T] { return w.output.Get() }
@@ -272,14 +272,14 @@ func (w *TumblingTimeWindow[T]) Output() Opt[T] { return w.output.Get() }
 // emitted aggregate.
 type SlidingWindow[T comparable] struct {
 	core   *SlidingCore[T]
-	output *Cell[Opt[T]]
+	output *SourceCell[Opt[T]]
 }
 
 // Sliding constructs a reactive sliding window over ctx.
 func Sliding[T comparable](ctx *Context, size int, slide uint64, policy MergePolicy[T]) *SlidingWindow[T] {
 	return &SlidingWindow[T]{
 		core:   NewSlidingCore(size, slide, policy),
-		output: NewCell(ctx, Opt[T]{}),
+		output: NewSourceCell(ctx, Opt[T]{}),
 	}
 }
 
@@ -293,7 +293,7 @@ func (w *SlidingWindow[T]) Push(v T) Opt[T] {
 }
 
 // OutputCell returns the reactive cell holding the last emitted aggregate.
-func (w *SlidingWindow[T]) OutputCell() *Cell[Opt[T]] { return w.output }
+func (w *SlidingWindow[T]) OutputCell() *SourceCell[Opt[T]] { return w.output }
 
 // Output reads the last emitted aggregate (subscribes in a computation).
 func (w *SlidingWindow[T]) Output() Opt[T] { return w.output.Get() }
@@ -301,14 +301,14 @@ func (w *SlidingWindow[T]) Output() Opt[T] { return w.output.Get() }
 // SessionWindow is a reactive gap-based session window (Push(now,v) + Flush(now)).
 type SessionWindow[T comparable] struct {
 	core   *SessionCore[T]
-	output *Cell[Opt[T]]
+	output *SourceCell[Opt[T]]
 }
 
 // Session constructs a reactive session window over ctx.
 func Session[T comparable](ctx *Context, gap uint64, policy MergePolicy[T]) *SessionWindow[T] {
 	return &SessionWindow[T]{
 		core:   NewSessionCore(gap, policy),
-		output: NewCell(ctx, Opt[T]{}),
+		output: NewSourceCell(ctx, Opt[T]{}),
 	}
 }
 
@@ -332,7 +332,7 @@ func (w *SessionWindow[T]) Flush(now uint64) Opt[T] {
 }
 
 // OutputCell returns the reactive cell holding the last emitted aggregate.
-func (w *SessionWindow[T]) OutputCell() *Cell[Opt[T]] { return w.output }
+func (w *SessionWindow[T]) OutputCell() *SourceCell[Opt[T]] { return w.output }
 
 // Output reads the last emitted aggregate (subscribes in a computation).
 func (w *SessionWindow[T]) Output() Opt[T] { return w.output.Get() }

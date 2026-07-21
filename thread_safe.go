@@ -68,7 +68,7 @@ func (t *ThreadSafeContext) Batch(fn func()) {
 // TSSetCell writes a cell's value under the lock. Outside a batch it applies
 // immediately (a singleton batch ≡ Cell.Set); inside a Batch it defers to the
 // coalesced flush. It is a free function because Go methods cannot be generic.
-func TSSetCell[T comparable](t *ThreadSafeContext, cell *Cell[T], value T) {
+func TSSetCell[T comparable](t *ThreadSafeContext, cell *SourceCell[T], value T) {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 	cell.Set(value)

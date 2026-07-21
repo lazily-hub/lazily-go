@@ -83,14 +83,14 @@ func (c *HealthCore) Health() Health {
 // HealthCell is the reactive health projection onto a Cell for /health.
 type HealthCell struct {
 	core   *HealthCore
-	health *Cell[Health]
+	health *SourceCell[Health]
 }
 
 // NewHealthCell creates a reactive health cell bound to ctx.
 func NewHealthCell(ctx *Context) *HealthCell {
 	return &HealthCell{
 		core:   NewHealthCore(),
-		health: NewCell(ctx, Healthy),
+		health: NewSourceCell(ctx, Healthy),
 	}
 }
 
@@ -110,7 +110,7 @@ func (h *HealthCell) Health() Health {
 }
 
 // HealthCell returns the underlying reactive cell for /health.
-func (h *HealthCell) HealthCell() *Cell[Health] {
+func (h *HealthCell) HealthCell() *SourceCell[Health] {
 	return h.health
 }
 
@@ -147,14 +147,14 @@ func (c *ReadinessCore) Ready() bool {
 // ReadinessCell is the reactive readiness projection onto a Cell for /ready.
 type ReadinessCell struct {
 	core  *ReadinessCore
-	ready *Cell[bool]
+	ready *SourceCell[bool]
 }
 
 // NewReadinessCell creates a reactive readiness cell bound to ctx.
 func NewReadinessCell(ctx *Context) *ReadinessCell {
 	return &ReadinessCell{
 		core:  NewReadinessCore(),
-		ready: NewCell(ctx, true),
+		ready: NewSourceCell(ctx, true),
 	}
 }
 
@@ -174,7 +174,7 @@ func (r *ReadinessCell) Ready() bool {
 }
 
 // ReadyCell returns the underlying reactive cell for /ready.
-func (r *ReadinessCell) ReadyCell() *Cell[bool] {
+func (r *ReadinessCell) ReadyCell() *SourceCell[bool] {
 	return r.ready
 }
 
@@ -241,7 +241,7 @@ func (c *DiscoveryCore[P]) Discovery() map[string]string {
 // the projected map structurally changes.
 type DiscoveryCell[P comparable] struct {
 	core    *DiscoveryCore[P]
-	version *Cell[uint64]
+	version *SourceCell[uint64]
 	last    map[string]string
 }
 
@@ -249,7 +249,7 @@ type DiscoveryCell[P comparable] struct {
 func NewDiscoveryCell[P comparable](ctx *Context) *DiscoveryCell[P] {
 	return &DiscoveryCell[P]{
 		core:    NewDiscoveryCore[P](),
-		version: NewCell[uint64](ctx, 0),
+		version: NewSourceCell[uint64](ctx, 0),
 		last:    map[string]string{},
 	}
 }
@@ -293,7 +293,7 @@ func (d *DiscoveryCell[P]) Discovery() map[string]string {
 }
 
 // DiscoveryCell returns the underlying version cell (the reactive handle).
-func (d *DiscoveryCell[P]) DiscoveryCell() *Cell[uint64] {
+func (d *DiscoveryCell[P]) DiscoveryCell() *SourceCell[uint64] {
 	return d.version
 }
 
@@ -377,7 +377,7 @@ func (c *ServiceRegistryCore) Projection() map[string]string {
 // collection reader, so it uses the version-cell pattern.
 type ServiceRegistry struct {
 	core    *ServiceRegistryCore
-	version *Cell[uint64]
+	version *SourceCell[uint64]
 	last    map[string]string
 }
 
@@ -385,7 +385,7 @@ type ServiceRegistry struct {
 func NewServiceRegistry(ctx *Context) *ServiceRegistry {
 	return &ServiceRegistry{
 		core:    NewServiceRegistryCore(),
-		version: NewCell[uint64](ctx, 0),
+		version: NewSourceCell[uint64](ctx, 0),
 		last:    map[string]string{},
 	}
 }
@@ -424,7 +424,7 @@ func (r *ServiceRegistry) Projection() map[string]string {
 }
 
 // ProjectionCell returns the underlying version cell (the reactive handle).
-func (r *ServiceRegistry) ProjectionCell() *Cell[uint64] {
+func (r *ServiceRegistry) ProjectionCell() *SourceCell[uint64] {
 	return r.version
 }
 

@@ -79,19 +79,19 @@ const (
 // field is a cell, so an operator or adaptive controller retunes it live and
 // dependent relays react. Hysteresis (HighWater ≠ LowWater) prevents flapping.
 type BackpressurePolicy struct {
-	Dimension *Cell[BoundDim]
-	HighWater *Cell[uint64]
-	LowWater  *Cell[uint64]
-	Overflow  *Cell[Overflow]
+	Dimension *SourceCell[BoundDim]
+	HighWater *SourceCell[uint64]
+	LowWater  *SourceCell[uint64]
+	Overflow  *SourceCell[Overflow]
 }
 
 // NewBackpressurePolicy builds a reactive backpressure policy over ctx.
 func NewBackpressurePolicy(ctx *Context, dimension BoundDim, highWater, lowWater uint64, overflow Overflow) BackpressurePolicy {
 	return BackpressurePolicy{
-		Dimension: NewCell(ctx, dimension),
-		HighWater: NewCell(ctx, highWater),
-		LowWater:  NewCell(ctx, lowWater),
-		Overflow:  NewCell(ctx, overflow),
+		Dimension: NewSourceCell(ctx, dimension),
+		HighWater: NewSourceCell(ctx, highWater),
+		LowWater:  NewSourceCell(ctx, lowWater),
+		Overflow:  NewSourceCell(ctx, overflow),
 	}
 }
 
@@ -111,13 +111,13 @@ type RelayCell[T comparable] struct {
 	merge  MergePolicy[T]
 
 	// Hot head: current window's coalesced value (present=false = empty window).
-	head *Cell[headOpt[T]]
+	head *SourceCell[headOpt[T]]
 	// Ops merged into the current window since the last drain (the Count bound).
-	pending *Cell[uint64]
+	pending *SourceCell[uint64]
 
-	depth   *Slot[uint64]
-	isFull  *Slot[bool]
-	isEmpty *Slot[bool]
+	depth   *FormulaCell[uint64]
+	isFull  *FormulaCell[bool]
+	isEmpty *FormulaCell[bool]
 }
 
 // NewRelayCell builds a relay over policy, validating the initial overflow
@@ -131,14 +131,14 @@ func NewRelayCell[T comparable](ctx *Context, policy BackpressurePolicy, merge M
 		ctx:     ctx,
 		policy:  policy,
 		merge:   merge,
-		head:    NewCell(ctx, headOpt[T]{}),
-		pending: NewCell(ctx, uint64(0)),
+		head:    NewSourceCell(ctx, headOpt[T]{}),
+		pending: NewSourceCell(ctx, uint64(0)),
 	}
-	r.depth = NewSlot(ctx, func(c *Context) uint64 { return r.pending.Get() })
-	r.isFull = NewSlot(ctx, func(c *Context) bool {
+	r.depth = NewFormulaCell(ctx, func(c *Context) uint64 { return r.pending.Get() })
+	r.isFull = NewFormulaCell(ctx, func(c *Context) bool {
 		return r.depth.Get() >= policy.HighWater.Get()
 	})
-	r.isEmpty = NewSlot(ctx, func(c *Context) bool { return !r.head.Get().present })
+	r.isEmpty = NewFormulaCell(ctx, func(c *Context) bool { return !r.head.Get().present })
 	return r, nil
 }
 
@@ -160,9 +160,9 @@ func (r *RelayCell[T]) IsEmpty() bool { return r.isEmpty.Get() }
 
 // DepthSlot / IsFullSlot / IsEmptySlot expose the reader slots for wiring into
 // effects and computations.
-func (r *RelayCell[T]) DepthSlot() *Slot[uint64] { return r.depth }
-func (r *RelayCell[T]) IsFullSlot() *Slot[bool]  { return r.isFull }
-func (r *RelayCell[T]) IsEmptySlot() *Slot[bool] { return r.isEmpty }
+func (r *RelayCell[T]) DepthSlot() *FormulaCell[uint64] { return r.depth }
+func (r *RelayCell[T]) IsFullSlot() *FormulaCell[bool]  { return r.isFull }
+func (r *RelayCell[T]) IsEmptySlot() *FormulaCell[bool] { return r.isEmpty }
 
 func (r *RelayCell[T]) readFull() bool {
 	return r.pending.Peek() >= r.policy.HighWater.Peek()
@@ -471,7 +471,7 @@ func (o *Outbox[T]) Drain() (T, bool) { return o.relay.Drain() }
 func (o *Outbox[T]) IsFull() bool { return o.relay.IsFull() }
 
 // IsFullSlot exposes the backpressure reader slot.
-func (o *Outbox[T]) IsFullSlot() *Slot[bool] { return o.relay.IsFullSlot() }
+func (o *Outbox[T]) IsFullSlot() *FormulaCell[bool] { return o.relay.IsFullSlot() }
 
 // Relay accesses the underlying relay (for wiring extra egress stages).
 func (o *Outbox[T]) Relay() *RelayCell[T] { return o.relay }

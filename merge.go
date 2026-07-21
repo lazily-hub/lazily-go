@@ -111,46 +111,33 @@ func RawFifo[E any]() MergePolicy[[]E] {
 	}
 }
 
-// MergeCell is a cell whose write is a merge under a policy rather than a
-// replace. Cell ≡ MergeCell(KeepLatest). Reads track like any cell; Merge routes
-// through the cell's ==-guarded Set, so an idempotent policy's no-op merge fires
-// no cascade (free dedup) and store-without-cascade still applies.
-type MergeCell[T comparable] struct {
-	cell   *Cell[T]
-	policy MergePolicy[T]
+// MergeCell is retained as a compatibility alias for a SourceCell. Under the
+// Cell kernel a MergeCell is just a SourceCell whose policy is not KeepLatest —
+// "one kind, the policy in a field" — so the two collapse into SourceCell and
+// this alias keeps existing call sites compiling. Prefer SourceCell.
+//
+// Deprecated: use SourceCell (NewSourceCellWithPolicy) directly.
+type MergeCell[T comparable] = SourceCell[T]
+
+// NewMergeCell creates a SourceCell folding writes under policy. This is the
+// design's source::<M>(v); equivalent to NewSourceCellWithPolicy.
+//
+// Deprecated: use NewSourceCellWithPolicy.
+func NewMergeCell[T comparable](ctx *Context, initial T, policy MergePolicy[T]) *SourceCell[T] {
+	return NewSourceCellWithPolicy(ctx, initial, policy)
 }
 
-// NewMergeCell creates a MergeCell over ctx with the given initial value and policy.
-func NewMergeCell[T comparable](ctx *Context, initial T, policy MergePolicy[T]) *MergeCell[T] {
-	return &MergeCell[T]{cell: NewCell(ctx, initial), policy: policy}
-}
-
-// Cell returns the underlying reactive cell (for wiring derived readers).
-func (m *MergeCell[T]) Cell() *Cell[T] { return m.cell }
-
-// Policy returns the merge policy.
-func (m *MergeCell[T]) Policy() MergePolicy[T] { return m.policy }
-
-// Get reads the current converged value (tracks a dependency in a computation).
-func (m *MergeCell[T]) Get() T { return m.cell.Get() }
-
-// Set replaces the value outright (the keep-latest write), bypassing the policy.
-func (m *MergeCell[T]) Set(value T) { m.cell.Set(value) }
-
-// Merge folds op into the current value under the policy. Reads the current
-// value untracked (Peek) and writes the merged result.
-func (m *MergeCell[T]) Merge(op T) { m.cell.Set(m.policy.Merge(m.cell.Peek(), op)) }
-
-// Reactive is the read supertype: get + subscribe (analysis §4.0). Every reader
-// (Slot/Signal/Cell/MergeCell) satisfies it.
-type Reactive[T any] interface {
+// Cell is the read genus of the reactive graph: every value-bearing node — a
+// SourceCell or a FormulaCell (including a driven one) — satisfies it. Effects
+// are sinks with no value and stay outside the genus, so nothing can depend on
+// one.
+//
+// Go cannot restrict a method to a type parameter, so unlike the other bindings
+// the genus is an interface rather than the concrete type; the two kinds are the
+// SourceCell and FormulaCell structs. That reintroduces the read abstraction the
+// trait-capable bindings delete, but under the genus name Cell[T], so it is a
+// mechanism difference, not a vocabulary fork (design §4). The former Reactive[T]
+// read trait is gone; this is its replacement.
+type Cell[T any] interface {
 	Get() T
-}
-
-// Source is a writable Reactive — adds Set (replace) and Merge (fold under the
-// source's policy). Cell/MergeCell are Source; a derived Slot is not.
-type Source[T any] interface {
-	Reactive[T]
-	Set(value T)
-	Merge(op T)
 }

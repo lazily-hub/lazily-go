@@ -98,14 +98,14 @@ func (c *LeaseCore[P]) Tick(now uint64) bool {
 // on holder change).
 type LeaseCell[P comparable] struct {
 	core   *LeaseCore[P]
-	holder *Cell[Opt[P]]
+	holder *SourceCell[Opt[P]]
 }
 
 // NewLeaseCell constructs a reactive lease.
 func NewLeaseCell[P comparable](ctx *Context) *LeaseCell[P] {
 	return &LeaseCell[P]{
 		core:   NewLeaseCore[P](),
-		holder: NewCell[Opt[P]](ctx, Opt[P]{}),
+		holder: NewSourceCell[Opt[P]](ctx, Opt[P]{}),
 	}
 }
 
@@ -151,7 +151,7 @@ func (c *LeaseCell[P]) IsHeld(now uint64) bool { return c.core.IsHeld(now) }
 func (c *LeaseCell[P]) Fence() uint64 { return c.core.Fence() }
 
 // HolderCell exposes the reactive holder projection.
-func (c *LeaseCell[P]) HolderCell() *Cell[Opt[P]] { return c.holder }
+func (c *LeaseCell[P]) HolderCell() *SourceCell[Opt[P]] { return c.holder }
 
 // ===========================================================================
 // Leader / follower / candidate
@@ -185,7 +185,7 @@ func (r LeaderRole) String() string {
 type LeaderCell[P comparable] struct {
 	core          *LeaseCore[P]
 	me            P
-	currentLeader *Cell[Opt[P]]
+	currentLeader *SourceCell[Opt[P]]
 }
 
 // NewLeaderCell constructs reactive leadership for node me.
@@ -193,7 +193,7 @@ func NewLeaderCell[P comparable](ctx *Context, me P) *LeaderCell[P] {
 	return &LeaderCell[P]{
 		core:          NewLeaseCore[P](),
 		me:            me,
-		currentLeader: NewCell[Opt[P]](ctx, Opt[P]{}),
+		currentLeader: NewSourceCell[Opt[P]](ctx, Opt[P]{}),
 	}
 }
 
@@ -239,7 +239,7 @@ func (c *LeaderCell[P]) Role(now uint64) LeaderRole {
 }
 
 // CurrentLeaderCell exposes the reactive current-leader projection.
-func (c *LeaderCell[P]) CurrentLeaderCell() *Cell[Opt[P]] { return c.currentLeader }
+func (c *LeaderCell[P]) CurrentLeaderCell() *SourceCell[Opt[P]] { return c.currentLeader }
 
 // ===========================================================================
 // Distributed lock + fencing
@@ -248,14 +248,14 @@ func (c *LeaderCell[P]) CurrentLeaderCell() *Cell[Opt[P]] { return c.currentLead
 // LockCell is a reactive distributed mutex over a lease + fencing token.
 type LockCell[P comparable] struct {
 	core     *LeaseCore[P]
-	isLocked *Cell[bool]
+	isLocked *SourceCell[bool]
 }
 
 // NewLockCell constructs a reactive distributed lock.
 func NewLockCell[P comparable](ctx *Context) *LockCell[P] {
 	return &LockCell[P]{
 		core:     NewLeaseCore[P](),
-		isLocked: NewCell[bool](ctx, false),
+		isLocked: NewSourceCell[bool](ctx, false),
 	}
 }
 
@@ -295,7 +295,7 @@ func (c *LockCell[P]) IsLocked(now uint64) bool { return c.core.IsHeld(now) }
 func (c *LockCell[P]) Fence() uint64 { return c.core.Fence() }
 
 // IsLockedCell exposes the reactive is_locked projection.
-func (c *LockCell[P]) IsLockedCell() *Cell[bool] { return c.isLocked }
+func (c *LockCell[P]) IsLockedCell() *SourceCell[bool] { return c.isLocked }
 
 // ===========================================================================
 // Semaphore
@@ -334,14 +334,14 @@ func (c *SemaphoreCore) Release() {
 // SemaphoreCell is a reactive semaphore: projects permits_available onto a Cell.
 type SemaphoreCell struct {
 	core      *SemaphoreCore
-	available *Cell[uint64]
+	available *SourceCell[uint64]
 }
 
 // NewSemaphoreCell constructs a reactive semaphore of the given capacity.
 func NewSemaphoreCell(ctx *Context, capacity uint64) *SemaphoreCell {
 	return &SemaphoreCell{
 		core:      NewSemaphoreCore(capacity),
-		available: NewCell[uint64](ctx, capacity),
+		available: NewSourceCell[uint64](ctx, capacity),
 	}
 }
 
@@ -366,7 +366,7 @@ func (c *SemaphoreCell) Release() {
 func (c *SemaphoreCell) PermitsAvailable() uint64 { return c.core.Available() }
 
 // PermitsAvailableCell exposes the reactive permits_available projection.
-func (c *SemaphoreCell) PermitsAvailableCell() *Cell[uint64] { return c.available }
+func (c *SemaphoreCell) PermitsAvailableCell() *SourceCell[uint64] { return c.available }
 
 // ===========================================================================
 // Barrier / quorum
@@ -400,7 +400,7 @@ func (c *BarrierCore[P]) IsOpen() bool { return c.Count() >= c.required }
 // required = total/2 + 1.
 type BarrierCell[P comparable] struct {
 	core   *BarrierCore[P]
-	isOpen *Cell[bool]
+	isOpen *SourceCell[bool]
 }
 
 // NewBarrierCell constructs a reactive wait-for-N gate.
@@ -408,7 +408,7 @@ func NewBarrierCell[P comparable](ctx *Context, required uint64) *BarrierCell[P]
 	core := NewBarrierCore[P](required)
 	return &BarrierCell[P]{
 		core:   core,
-		isOpen: NewCell[bool](ctx, core.IsOpen()),
+		isOpen: NewSourceCell[bool](ctx, core.IsOpen()),
 	}
 }
 
@@ -435,4 +435,4 @@ func (c *BarrierCell[P]) Count() uint64 { return c.core.Count() }
 func (c *BarrierCell[P]) IsOpen() bool { return c.core.IsOpen() }
 
 // IsOpenCell exposes the reactive is_open projection.
-func (c *BarrierCell[P]) IsOpenCell() *Cell[bool] { return c.isOpen }
+func (c *BarrierCell[P]) IsOpenCell() *SourceCell[bool] { return c.isOpen }

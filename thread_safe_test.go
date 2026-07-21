@@ -15,8 +15,8 @@ import (
 // total, independent of goroutine interleaving.
 func TestThreadSafeConcurrentIncrementsConverge(t *testing.T) {
 	tsc := NewThreadSafeContext()
-	var counter *Cell[int]
-	tsc.WithLock(func(ctx *Context) { counter = NewCell(ctx, 0) })
+	var counter *SourceCell[int]
+	tsc.WithLock(func(ctx *Context) { counter = NewSourceCell(ctx, 0) })
 
 	const goroutines, perGoroutine = 8, 500
 	var wg sync.WaitGroup
@@ -44,13 +44,13 @@ func TestThreadSafeConcurrentIncrementsConverge(t *testing.T) {
 func TestThreadSafeConcurrentSetCellsConverge(t *testing.T) {
 	tsc := NewThreadSafeContext()
 	const n = 16
-	var cells [n]*Cell[int]
-	var sum *Slot[int]
+	var cells [n]*SourceCell[int]
+	var sum *FormulaCell[int]
 	tsc.WithLock(func(ctx *Context) {
 		for i := range cells {
-			cells[i] = NewCell(ctx, 0)
+			cells[i] = NewSourceCell(ctx, 0)
 		}
-		sum = NewSlot(ctx, func(*Context) int {
+		sum = NewFormulaCell(ctx, func(*Context) int {
 			total := 0
 			for _, c := range cells {
 				total += c.Get()
@@ -82,11 +82,11 @@ func TestThreadSafeConcurrentSetCellsConverge(t *testing.T) {
 // A Batch under the lock coalesces its cell writes into a single effect rerun.
 func TestThreadSafeBatchCoalesces(t *testing.T) {
 	tsc := NewThreadSafeContext()
-	var a, b *Cell[int]
+	var a, b *SourceCell[int]
 	runs := 0
 	tsc.WithLock(func(ctx *Context) {
-		a = NewCell(ctx, 1)
-		b = NewCell(ctx, 2)
+		a = NewSourceCell(ctx, 1)
+		b = NewSourceCell(ctx, 2)
 		NewEffect(ctx, func(*Context) func() {
 			_ = a.Get()
 			_ = b.Get()
@@ -110,10 +110,10 @@ func TestThreadSafeBatchCoalesces(t *testing.T) {
 // it fires the effect exactly once.
 func TestThreadSafeSingleWriteEqualsCellSet(t *testing.T) {
 	tsc := NewThreadSafeContext()
-	var a *Cell[int]
+	var a *SourceCell[int]
 	runs := 0
 	tsc.WithLock(func(ctx *Context) {
-		a = NewCell(ctx, 1)
+		a = NewSourceCell(ctx, 1)
 		NewEffect(ctx, func(*Context) func() {
 			_ = a.Get()
 			runs++

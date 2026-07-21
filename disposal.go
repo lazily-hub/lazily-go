@@ -125,34 +125,27 @@ func (c *Context) IsDisposed(n GraphNode) bool { return n.node().disposed }
 // Callers must ensure nothing still reads the slot in a live compute. A reader
 // that still names it errors on its next recompute — the same contract as
 // Effect.Dispose and lazily-rs's dispose_slot.
-func (s *Slot[T]) Dispose() { s.ctx.disposeNode(s.self) }
+func (s *FormulaCell[T]) Dispose() { s.ctx.disposeNode(s.self) }
 
 // Dispose tears down this source cell: detaches its dependents and dirties the
 // surviving cone. Cells have no dependencies, so only downstream edges need
 // detaching. Same contract as Slot.Dispose. Idempotent.
-func (c *Cell[T]) Dispose() { c.ctx.disposeNode(c.self) }
+func (c *SourceCell[T]) Dispose() { c.ctx.disposeNode(c.self) }
 
-// DisposeNode tears down this memoized slot. Same contract as Slot.Dispose.
+// DisposeNode tears down this memoized slot. Same contract as FormulaCell.Dispose.
 func (m *Memo[T]) DisposeNode() { m.ctx.disposeNode(m.self) }
-
-// DisposeNode tears down this signal's graph node: it detaches both edge
-// directions and dirties the surviving cone.
-//
-// This is distinct from Signal.Dispose, which predates the teardown plane and
-// means something narrower — "remove the eager puller, stay readable as a lazy
-// value". Renaming that would be a breaking change to an already-shipped
-// method, so the graph-teardown operation takes the new name and Signal.Dispose
-// keeps its meaning.
-func (s *Signal[T]) DisposeNode() {
-	s.Dispose()
-	s.ctx.disposeNode(s.self)
-	s.ctx.disposeNode(s.backing.self)
-}
 
 // disposeNode is the single teardown path for every node kind.
 func (c *Context) disposeNode(n reactiveNode) {
 	if n == nil || n.node().disposed {
 		return // idempotent: disposing twice is a no-op, not an error
+	}
+	// A driven FormulaCell owns a puller Effect; tear it down first (design
+	// §9.3.4) so disposing the formula never strands a live puller that re-pulls
+	// a disposed node. Clearing the side-table entry keeps it from aliasing.
+	if p, ok := c.drivenBy[n]; ok {
+		delete(c.drivenBy, n)
+		p.Dispose()
 	}
 	if e, ok := n.(*Effect); ok {
 		// Effects own a cleanup callback and a pending-queue entry, so their
@@ -211,7 +204,7 @@ func (c *Context) teardown(n reactiveNode) {
 // recovers the panic and restores the context's tracking stack to the depth it
 // had on entry, so a read that unwinds out of a half-finished compute cannot
 // strand a frame and corrupt every later read.
-func (s *Slot[T]) TryGet() (v T, err error) {
+func (s *FormulaCell[T]) TryGet() (v T, err error) {
 	depth := len(s.ctx.stack)
 	defer func() {
 		if r := recover(); r != nil {
@@ -228,30 +221,12 @@ func (s *Slot[T]) TryGet() (v T, err error) {
 }
 
 // TryGet reads the cell, returning a *DisposedError if it has been disposed.
-func (c *Cell[T]) TryGet() (T, error) {
+func (c *SourceCell[T]) TryGet() (T, error) {
 	if c.disposed {
 		var zero T
 		return zero, &DisposedError{Kind: "cell"}
 	}
 	return c.Get(), nil
-}
-
-// TryGet reads the signal, returning a *DisposedError if it — or a node it
-// re-pulls through — has been disposed.
-func (s *Signal[T]) TryGet() (v T, err error) {
-	depth := len(s.ctx.stack)
-	defer func() {
-		if r := recover(); r != nil {
-			de, ok := r.(*DisposedError)
-			if !ok {
-				panic(r)
-			}
-			s.ctx.stack = s.ctx.stack[:depth]
-			var zero T
-			v, err = zero, de
-		}
-	}()
-	return s.Get(), nil
 }
 
 // ---------------------------------------------------------------------------

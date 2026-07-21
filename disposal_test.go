@@ -12,9 +12,9 @@ import (
 
 func TestDisposeDirtiesSurvivingCone(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
-	mid := NewSlot(ctx, func(*Context) int { return src.Get() + 1 })
-	sink := NewSlot(ctx, func(*Context) int { return mid.Get() * 10 })
+	src := NewSourceCell(ctx, 1)
+	mid := NewFormulaCell(ctx, func(*Context) int { return src.Get() + 1 })
+	sink := NewFormulaCell(ctx, func(*Context) int { return mid.Get() * 10 })
 
 	if got := sink.Get(); got != 20 {
 		t.Fatalf("sink = %d, want 20", got)
@@ -30,8 +30,8 @@ func TestDisposeDirtiesSurvivingCone(t *testing.T) {
 
 func TestDisposeDoesNotRunEffectsReachedByTeardown(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
-	derived := NewSlot(ctx, func(*Context) int { return src.Get() + 1 })
+	src := NewSourceCell(ctx, 1)
+	derived := NewFormulaCell(ctx, func(*Context) int { return src.Get() + 1 })
 
 	runs := 0
 	NewEffect(ctx, func(*Context) func() {
@@ -56,8 +56,8 @@ func TestDisposeDoesNotRunEffectsReachedByTeardown(t *testing.T) {
 
 func TestDisposeIsIdempotentAndDetachesBothDirections(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 2)
-	derived := NewSlot(ctx, func(*Context) int { return src.Get() })
+	src := NewSourceCell(ctx, 2)
+	derived := NewFormulaCell(ctx, func(*Context) int { return src.Get() })
 	_ = derived.Get()
 
 	if got := ctx.DependentCount(src); got != 1 {
@@ -86,7 +86,7 @@ func TestDisposeIsIdempotentAndDetachesBothDirections(t *testing.T) {
 
 func TestDisposedCellReadsAsAnError(t *testing.T) {
 	ctx := NewContext()
-	c := NewCell(ctx, 7)
+	c := NewSourceCell(ctx, 7)
 	c.Dispose()
 
 	if _, err := c.TryGet(); !errors.Is(err, ErrDisposed) {
@@ -104,8 +104,8 @@ func TestDisposedCellReadsAsAnError(t *testing.T) {
 
 func TestMemoDisposalDefersItsEqualityRecompute(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
-	upstream := NewSlot(ctx, func(*Context) int { return src.Get() })
+	src := NewSourceCell(ctx, 1)
+	upstream := NewFormulaCell(ctx, func(*Context) int { return src.Get() })
 
 	computes := 0
 	m := NewMemo(ctx, func(*Context) int {
@@ -138,9 +138,9 @@ func TestMemoDisposalDefersItsEqualityRecompute(t *testing.T) {
 
 func TestSignalDisposalDefersItsEagerPull(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
-	upstream := NewSlot(ctx, func(*Context) int { return src.Get() })
-	sig := NewSignal(ctx, func(*Context) int { return upstream.Get() + 100 })
+	src := NewSourceCell(ctx, 1)
+	upstream := NewFormulaCell(ctx, func(*Context) int { return src.Get() })
+	sig := Formula(ctx, func(*Context) int { return upstream.Get() + 100 }).Drive()
 
 	if got := sig.Get(); got != 101 {
 		t.Fatalf("signal = %d, want 101", got)
@@ -153,30 +153,30 @@ func TestSignalDisposalDefersItsEagerPull(t *testing.T) {
 		t.Fatalf("signal.TryGet err = %v, want ErrDisposed", err)
 	}
 
-	// Signal.Dispose keeps its older, narrower meaning; DisposeNode is the
-	// graph teardown.
-	other := NewSignal(ctx, func(*Context) int { return 5 })
-	other.Dispose()
-	if other.IsActive() {
-		t.Fatal("Signal.Dispose should deactivate the eager puller")
+	// Undrive removes the eager puller but leaves the node in the graph (the
+	// former dispose_signal); Dispose is the full graph teardown.
+	other := Formula(ctx, func(*Context) int { return 5 }).Drive()
+	other.Undrive()
+	if other.IsDriven() {
+		t.Fatal("Undrive should deactivate the eager puller")
 	}
 	if ctx.IsDisposed(other) {
-		t.Fatal("Signal.Dispose must not tear the node out of the graph")
+		t.Fatal("Undrive must not tear the node out of the graph")
 	}
-	other.DisposeNode()
+	other.Dispose()
 	if !ctx.IsDisposed(other) {
-		t.Fatal("Signal.DisposeNode did not dispose the node")
+		t.Fatal("Dispose did not dispose the node")
 	}
 }
 
 func TestScopeClosesInReverseCreationOrder(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
+	src := NewSourceCell(ctx, 1)
 
 	var cleanups []string
 	scope := ctx.Scope()
-	a := Own(scope, NewSlot(ctx, func(*Context) int { return src.Get() + 1 }))
-	b := Own(scope, NewSlot(ctx, func(*Context) int { return a.Get() + 2 }))
+	a := Own(scope, NewFormulaCell(ctx, func(*Context) int { return src.Get() + 1 }))
+	b := Own(scope, NewFormulaCell(ctx, func(*Context) int { return a.Get() + 2 }))
 	Own(scope, NewEffect(ctx, func(*Context) func() {
 		b.Get()
 		return func() { cleanups = append(cleanups, "watch_b") }
@@ -202,9 +202,9 @@ func TestScopeClosesInReverseCreationOrder(t *testing.T) {
 
 func TestDisarmedScopeDisposesNothing(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
+	src := NewSourceCell(ctx, 1)
 	scope := ctx.Scope()
-	escaped := Own(scope, NewSlot(ctx, func(*Context) int { return src.Get() + 5 }))
+	escaped := Own(scope, NewFormulaCell(ctx, func(*Context) int { return src.Get() + 5 }))
 	_ = escaped.Get()
 
 	scope.Disarm()
@@ -233,11 +233,11 @@ func TestDisarmedScopeDisposesNothing(t *testing.T) {
 
 func TestWithScopeClosesOnPanic(t *testing.T) {
 	ctx := NewContext()
-	var s *Slot[int]
+	var s *FormulaCell[int]
 	func() {
 		defer func() { _ = recover() }()
 		ctx.WithScope(func(sc *TeardownScope) {
-			s = Own(sc, NewSlot(ctx, func(*Context) int { return 1 }))
+			s = Own(sc, NewFormulaCell(ctx, func(*Context) int { return 1 }))
 			panic("boom")
 		})
 	}()
@@ -253,11 +253,11 @@ func TestWithScopeClosesOnPanic(t *testing.T) {
 // grow without bound.
 func TestChurnReturnsToRegistryBaseline(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 0)
+	src := NewSourceCell(ctx, 0)
 
 	baseline := len(ctx.slots)
 	for i := 0; i < 500; i++ {
-		s := NewSlot(ctx, func(*Context) int { return src.Get() })
+		s := NewFormulaCell(ctx, func(*Context) int { return src.Get() })
 		_ = s.Get()
 		s.Dispose()
 	}

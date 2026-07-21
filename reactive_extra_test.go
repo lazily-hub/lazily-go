@@ -12,7 +12,7 @@ import "testing"
 
 func TestReactiveEffectRerunsOnDependencyChange(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 1)
+	a := NewSourceCell(ctx, 1)
 	var log []int
 	NewEffect(ctx, func(*Context) func() {
 		log = append(log, a.Get())
@@ -30,7 +30,7 @@ func TestReactiveEffectRerunsOnDependencyChange(t *testing.T) {
 
 func TestReactiveEffectCleanupBeforeRerunAndOnDispose(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 0)
+	a := NewSourceCell(ctx, 0)
 	var cleanups []int
 	effect := NewEffect(ctx, func(*Context) func() {
 		seen := a.Get()
@@ -54,8 +54,8 @@ func TestReactiveEffectCleanupBeforeRerunAndOnDispose(t *testing.T) {
 
 func TestReactiveEffectIgnoresUnrelatedCell(t *testing.T) {
 	ctx := NewContext()
-	tracked := NewCell(ctx, 10)
-	untracked := NewCell(ctx, 100)
+	tracked := NewSourceCell(ctx, 10)
+	untracked := NewSourceCell(ctx, 100)
 	runs := 0
 	NewEffect(ctx, func(*Context) func() {
 		_ = tracked.Get()
@@ -77,7 +77,7 @@ func TestReactiveEffectIgnoresUnrelatedCell(t *testing.T) {
 
 func TestReactiveEffectIsActiveAfterDispose(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 0)
+	a := NewSourceCell(ctx, 0)
 	effect := NewEffect(ctx, func(*Context) func() {
 		_ = a.Get()
 		return nil
@@ -97,8 +97,8 @@ func TestReactiveEffectIsActiveAfterDispose(t *testing.T) {
 
 func TestReactiveMemoReturnsCachedValue(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 2)
-	b := NewCell(ctx, 3)
+	a := NewSourceCell(ctx, 2)
+	b := NewSourceCell(ctx, 3)
 	sum := NewMemo(ctx, func(*Context) int { return a.Get() + b.Get() })
 	if got := sum.Get(); got != 5 {
 		t.Fatalf("sum = %d, want 5", got)
@@ -111,7 +111,7 @@ func TestReactiveMemoReturnsCachedValue(t *testing.T) {
 
 func TestReactiveMemoChainCascades(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
+	src := NewSourceCell(ctx, 1)
 	doubled := NewMemo(ctx, func(*Context) int { return src.Get() * 2 })
 	quadrupled := NewMemo(ctx, func(*Context) int { return doubled.Get() * 2 })
 	if got := quadrupled.Get(); got != 4 {
@@ -127,7 +127,7 @@ func TestReactiveMemoChainCascades(t *testing.T) {
 
 func TestReactiveNestedBatchDefersToOutermost(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 0)
+	a := NewSourceCell(ctx, 0)
 	runs := 0
 	NewEffect(ctx, func(*Context) func() {
 		_ = a.Get()
@@ -154,7 +154,7 @@ func TestReactiveNestedBatchDefersToOutermost(t *testing.T) {
 
 func TestReactiveBatchWritesVisibleImmediately(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 0)
+	a := NewSourceCell(ctx, 0)
 	ctx.Batch(func() {
 		a.Set(42)
 		if got := a.Peek(); got != 42 {
@@ -165,7 +165,7 @@ func TestReactiveBatchWritesVisibleImmediately(t *testing.T) {
 
 func TestReactiveNoOpBatchNoSpuriousEffect(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 1)
+	a := NewSourceCell(ctx, 1)
 	runs := 0
 	NewEffect(ctx, func(*Context) func() {
 		_ = a.Get()
@@ -183,7 +183,7 @@ func TestReactiveNoOpBatchNoSpuriousEffect(t *testing.T) {
 
 func TestReactiveEqualWriteInsideBatchAbsorbed(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 5)
+	a := NewSourceCell(ctx, 5)
 	runs := 0
 	NewEffect(ctx, func(*Context) func() {
 		_ = a.Get()
@@ -209,9 +209,9 @@ func TestReactiveEqualWriteInsideBatchAbsorbed(t *testing.T) {
 // observe a Cell.
 func TestReactiveEqualSetPreservesGraph(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 2)
+	a := NewSourceCell(ctx, 2)
 	slotFires := 0
-	dependent := NewSlot(ctx, func(*Context) int {
+	dependent := NewFormulaCell(ctx, func(*Context) int {
 		slotFires++
 		return a.Get()
 	})
@@ -244,9 +244,9 @@ func TestReactiveEqualSetPreservesGraph(t *testing.T) {
 // marks every direct dependent (lazy slot + eager signal) dirty.
 func TestReactiveDifferentSetInvalidatesDependents(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 1)
-	lazy := NewSlot(ctx, func(*Context) int { return a.Get() + 1 })
-	eager := NewSignal(ctx, func(*Context) int { return a.Get() * 10 })
+	a := NewSourceCell(ctx, 1)
+	lazy := NewFormulaCell(ctx, func(*Context) int { return a.Get() + 1 })
+	eager := Formula(ctx, func(*Context) int { return a.Get() * 10 }).Drive()
 	if got := lazy.Get(); got != 2 {
 		t.Fatalf("lazy = %d, want 2", got)
 	}
@@ -272,13 +272,13 @@ func TestReactiveDifferentSetInvalidatesDependents(t *testing.T) {
 // is actually stale.
 func TestReactiveSignalEqualRecomputePreservesDependents(t *testing.T) {
 	ctx := NewContext()
-	toggle := NewCell(ctx, "x")
-	stable := NewSignal(ctx, func(*Context) int {
+	toggle := NewSourceCell(ctx, "x")
+	stable := Formula(ctx, func(*Context) int {
 		_ = toggle.Get() // register the edge; output is constant
 		return 42
-	})
+	}).Drive()
 	downstreamFires := 0
-	downstream := NewSlot(ctx, func(*Context) int {
+	downstream := NewFormulaCell(ctx, func(*Context) int {
 		downstreamFires++
 		return stable.Get()
 	})
@@ -304,9 +304,9 @@ func TestReactiveSignalEqualRecomputePreservesDependents(t *testing.T) {
 // signal recompute invalidates every direct dependent.
 func TestReactiveSignalDifferentRecomputeInvalidatesDependents(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
-	sig := NewSignal(ctx, func(*Context) int { return src.Get() * 2 })
-	lazyChild := NewSlot(ctx, func(*Context) int { return sig.Get() + 1 })
+	src := NewSourceCell(ctx, 1)
+	sig := Formula(ctx, func(*Context) int { return src.Get() * 2 }).Drive()
+	lazyChild := NewFormulaCell(ctx, func(*Context) int { return sig.Get() + 1 })
 	if got := lazyChild.Get(); got != 3 {
 		t.Fatalf("lazyChild = %d, want 3", got)
 	}
@@ -324,8 +324,8 @@ func TestReactiveSignalDifferentRecomputeInvalidatesDependents(t *testing.T) {
 // changes.
 func TestReactiveSignalMaterializedAfterRecompute(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 1)
-	sig := NewSignal(ctx, func(*Context) int { return a.Get() + 100 })
+	a := NewSourceCell(ctx, 1)
+	sig := Formula(ctx, func(*Context) int { return a.Get() + 100 }).Drive()
 	if got := sig.Get(); got != 101 {
 		t.Fatalf("sig = %d, want 101", got)
 	}
@@ -346,7 +346,7 @@ func TestReactiveSignalMaterializedAfterRecompute(t *testing.T) {
 // cascade coalesces at the shared sink).
 func TestReactiveDiamondDependencySingleRerun(t *testing.T) {
 	ctx := NewContext()
-	src := NewCell(ctx, 1)
+	src := NewSourceCell(ctx, 1)
 	left := NewMemo(ctx, func(*Context) int { return src.Get() + 1 })
 	right := NewMemo(ctx, func(*Context) int { return src.Get() * 2 })
 	runs := 0
@@ -368,21 +368,21 @@ func TestReactiveDiamondDependencySingleRerun(t *testing.T) {
 	}
 }
 
-// Signal.Dispose reverts the signal to lazy behavior but keeps the last value
-// readable.
+// Undrive reverts a driven FormulaCell to lazy behavior but keeps the last value
+// readable — the former Signal.Dispose (dispose_signal) semantics.
 func TestReactiveSignalDisposeRevertsToLazy(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 2)
-	sig := NewSignal(ctx, func(*Context) int { return a.Get() * 5 })
+	a := NewSourceCell(ctx, 2)
+	sig := Formula(ctx, func(*Context) int { return a.Get() * 5 }).Drive()
 	if got := sig.Get(); got != 10 {
 		t.Fatalf("sig = %d, want 10", got)
 	}
-	if !sig.IsActive() {
-		t.Fatal("signal should be active before dispose")
+	if !sig.IsDriven() {
+		t.Fatal("formula should be driven before undrive")
 	}
-	sig.Dispose()
-	if sig.IsActive() {
-		t.Fatal("signal should be inactive after dispose")
+	sig.Undrive()
+	if sig.IsDriven() {
+		t.Fatal("formula should be lazy after undrive")
 	}
 	// Still readable; lazy backing recomputes on read after a source change.
 	a.Set(4)

@@ -122,7 +122,7 @@ func replayTimer(t *testing.T, fx temporalFixture) {
 	ctx := NewContext()
 	timer := NewTimerCell(ctx, initial.FireAt)
 	fired := timer.FiredCell()
-	observed := NewSlot(ctx, func(_ *Context) bool { return fired.Get() })
+	observed := NewFormulaCell(ctx, func(_ *Context) bool { return fired.Get() })
 	observed.Get() // prime
 
 	for i, step := range fx.Steps {
@@ -161,7 +161,7 @@ func replayInterval(t *testing.T, fx temporalFixture) {
 	ctx := NewContext()
 	iv := NewIntervalCell(ctx, initial.Period)
 	count := iv.CountCell()
-	observed := NewSlot(ctx, func(_ *Context) uint64 { return count.Get() })
+	observed := NewFormulaCell(ctx, func(_ *Context) uint64 { return count.Get() })
 	observed.Get()
 
 	for i, step := range fx.Steps {
@@ -194,7 +194,7 @@ func replayCron(t *testing.T, fx temporalFixture) {
 	ctx := NewContext()
 	cron := NewCronCell(ctx, initial.Cycle, initial.Offsets)
 	count := cron.CountCell()
-	observed := NewSlot(ctx, func(_ *Context) uint64 { return count.Get() })
+	observed := NewFormulaCell(ctx, func(_ *Context) uint64 { return count.Get() })
 	observed.Get()
 
 	for i, step := range fx.Steps {
@@ -227,7 +227,7 @@ func replayDeadline(t *testing.T, fx temporalFixture) {
 	ctx := NewContext()
 	d := NewDeadlineCell(ctx, initial.Value, initial.Deadline)
 	expired := d.ExpiredCell()
-	observed := NewSlot(ctx, func(_ *Context) bool { return expired.Get() })
+	observed := NewFormulaCell(ctx, func(_ *Context) bool { return expired.Get() })
 	observed.Get()
 
 	for i, step := range fx.Steps {

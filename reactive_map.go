@@ -84,9 +84,9 @@ type ReactiveMap[K comparable, V comparable, H any] struct {
 	order []K
 
 	// membership is bumped only when the set of keys changes (add/remove).
-	membership *Cell[int]
+	membership *SourceCell[int]
 	// orderSignal is bumped on add/remove and on move/reorder.
-	orderSignal *Cell[int]
+	orderSignal *SourceCell[int]
 
 	membershipVersion int
 	orderVersion      int
@@ -109,8 +109,8 @@ func newReactiveMap[K comparable, V comparable, H any](
 		clear:       clear,
 		entries:     map[K]H{},
 		order:       nil,
-		membership:  NewCell[int](ctx, 0),
-		orderSignal: NewCell[int](ctx, 0),
+		membership:  NewSourceCell[int](ctx, 0),
+		orderSignal: NewSourceCell[int](ctx, 0),
 	}
 }
 
@@ -341,26 +341,26 @@ func (m *ReactiveMap[K, V, H]) EntryKind() EntryKind { return m.kind }
 // materialization); MaterializeAll pre-mints the keyset (eager). A slot's value
 // is derived, so SlotMap has no Set.
 type SlotMap[K comparable, V comparable] struct {
-	*ReactiveMap[K, V, *Slot[V]]
+	*ReactiveMap[K, V, *FormulaCell[V]]
 }
 
 // NewSlotMap creates an empty derived-slot map bound to ctx.
 func NewSlotMap[K comparable, V comparable](ctx *Context) *SlotMap[K, V] {
-	rm := newReactiveMap[K, V, *Slot[V]](
+	rm := newReactiveMap[K, V, *FormulaCell[V]](
 		ctx,
 		EntryKindSlot,
-		func(ctx *Context, compute func() V) *Slot[V] {
-			return NewSlot(ctx, func(*Context) V { return compute() })
+		func(ctx *Context, compute func() V) *FormulaCell[V] {
+			return NewFormulaCell(ctx, func(*Context) V { return compute() })
 		},
-		func(h *Slot[V]) V { return h.Get() },
-		func(h *Slot[V]) { h.invalidate() },
+		func(h *FormulaCell[V]) V { return h.Get() },
+		func(h *FormulaCell[V]) { h.invalidate() },
 	)
 	return &SlotMap[K, V]{ReactiveMap: rm}
 }
 
 // Slot returns the derived slot handle for key (nil if not materialized).
 // Non-reactive.
-func (m *SlotMap[K, V]) Slot(key K) *Slot[V] {
+func (m *SlotMap[K, V]) Slot(key K) *FormulaCell[V] {
 	h, _ := m.Handle(key)
 	return h
 }

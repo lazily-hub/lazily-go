@@ -11,15 +11,15 @@ import (
 // so reactive members are wired as Slot/Cell/Memo/Signal fields in the
 // constructor and exposed via thin accessor methods.
 type Greeter struct {
-	Name     *lazily.Cell[string]
-	greeting *lazily.Slot[string] // the "decorated" lazy member
+	Name     *lazily.SourceCell[string]
+	greeting *lazily.FormulaCell[string] // the "decorated" lazy member
 }
 
 // NewGreeter wires the reactive members. greeting tracks Name automatically and
 // recomputes only after Name changes.
 func NewGreeter(ctx *lazily.Context) *Greeter {
-	g := &Greeter{Name: lazily.NewCell(ctx, "")}
-	g.greeting = lazily.NewSlot(ctx, func(*lazily.Context) string {
+	g := &Greeter{Name: lazily.NewSourceCell(ctx, "")}
+	g.greeting = lazily.NewFormulaCell(ctx, func(*lazily.Context) string {
 		return "Hello, " + g.Name.Get() + "!"
 	})
 	return g

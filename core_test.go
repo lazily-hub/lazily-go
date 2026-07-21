@@ -4,10 +4,10 @@ import "testing"
 
 func TestSlotLazyRecompute(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 2)
-	b := NewCell(ctx, 3)
+	a := NewSourceCell(ctx, 2)
+	b := NewSourceCell(ctx, 3)
 	calls := 0
-	sum := NewSlot(ctx, func(*Context) int {
+	sum := NewFormulaCell(ctx, func(*Context) int {
 		calls++
 		return a.Get() + b.Get()
 	})
@@ -31,7 +31,7 @@ func TestSlotLazyRecompute(t *testing.T) {
 
 func TestCellPartialEqGuard(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 1)
+	a := NewSourceCell(ctx, 1)
 	calls := 0
 	NewEffect(ctx, func(*Context) func() {
 		_ = a.Get()
@@ -53,13 +53,13 @@ func TestCellPartialEqGuard(t *testing.T) {
 
 func TestSignalEager(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 2)
-	parity := NewSignal(ctx, func(*Context) string {
+	a := NewSourceCell(ctx, 2)
+	parity := Formula(ctx, func(*Context) string {
 		if a.Get()%2 == 0 {
 			return "even"
 		}
 		return "odd"
-	})
+	}).Drive()
 	if got := parity.Get(); got != "even" {
 		t.Fatalf("parity = %q, want even", got)
 	}
@@ -71,7 +71,7 @@ func TestSignalEager(t *testing.T) {
 
 func TestMemoEqualitySuppression(t *testing.T) {
 	ctx := NewContext()
-	width := NewCell(ctx, 10)
+	width := NewSourceCell(ctx, 10)
 	parity := NewMemo(ctx, func(*Context) string {
 		if width.Get()%2 == 0 {
 			return "even"
@@ -99,8 +99,8 @@ func TestMemoEqualitySuppression(t *testing.T) {
 
 func TestBatchCoalesces(t *testing.T) {
 	ctx := NewContext()
-	a := NewCell(ctx, 1)
-	b := NewCell(ctx, 1)
+	a := NewSourceCell(ctx, 1)
+	b := NewSourceCell(ctx, 1)
 	runs := 0
 	NewEffect(ctx, func(*Context) func() {
 		_ = a.Get()

@@ -11,7 +11,7 @@ import (
 
 func BenchmarkCellReadWrite(b *testing.B) {
 	ctx := NewContext()
-	c := NewCell(ctx, 0)
+	c := NewSourceCell(ctx, 0)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -22,8 +22,8 @@ func BenchmarkCellReadWrite(b *testing.B) {
 
 func BenchmarkSlotRecompute(b *testing.B) {
 	ctx := NewContext()
-	a := NewCell(ctx, 0)
-	sum := NewSlot(ctx, func(*Context) int { return a.Get() * 2 })
+	a := NewSourceCell(ctx, 0)
+	sum := NewFormulaCell(ctx, func(*Context) int { return a.Get() * 2 })
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -34,7 +34,7 @@ func BenchmarkSlotRecompute(b *testing.B) {
 
 func BenchmarkMemoEqualityGuard(b *testing.B) {
 	ctx := NewContext()
-	width := NewCell(ctx, 0)
+	width := NewSourceCell(ctx, 0)
 	parity := NewMemo(ctx, func(*Context) bool { return width.Get()%2 == 0 })
 	downstream := 0
 	NewEffect(ctx, func(*Context) func() {
@@ -53,11 +53,11 @@ func BenchmarkMemoEqualityGuard(b *testing.B) {
 func BenchmarkBatchCoalesce(b *testing.B) {
 	ctx := NewContext()
 	const n = 10
-	cells := make([]*Cell[int], n)
+	cells := make([]*SourceCell[int], n)
 	for i := range cells {
-		cells[i] = NewCell(ctx, 0)
+		cells[i] = NewSourceCell(ctx, 0)
 	}
-	sum := NewSlot(ctx, func(*Context) int {
+	sum := NewFormulaCell(ctx, func(*Context) int {
 		total := 0
 		for _, c := range cells {
 			total += c.Get()
@@ -217,13 +217,13 @@ const slotmapChaseSize = 100_000
 // buildSlotmapChase constructs a fan-in-2 spreadsheet-shaped graph with n
 // rows: input[i] + formula[i] = input[i] + input[i-1]. Returns the cells,
 // formulas, and the editable "middle" input index used by the viewport edit.
-func buildSlotmapChase(n int) (cells []*Cell[int64], formulas []*Slot[int64], mid int) {
+func buildSlotmapChase(n int) (cells []*SourceCell[int64], formulas []*FormulaCell[int64], mid int) {
 	ctx := NewContext()
-	cells = make([]*Cell[int64], n)
+	cells = make([]*SourceCell[int64], n)
 	for i := 0; i < n; i++ {
-		cells[i] = NewCell(ctx, int64(i))
+		cells[i] = NewSourceCell(ctx, int64(i))
 	}
-	formulas = make([]*Slot[int64], n)
+	formulas = make([]*FormulaCell[int64], n)
 	for i := 0; i < n; i++ {
 		a := cells[i]
 		prev := i - 1
@@ -231,7 +231,7 @@ func buildSlotmapChase(n int) (cells []*Cell[int64], formulas []*Slot[int64], mi
 			prev = 0
 		}
 		b := cells[prev]
-		formulas[i] = NewSlot(ctx, func(*Context) int64 { return a.Get() + b.Get() })
+		formulas[i] = NewFormulaCell(ctx, func(*Context) int64 { return a.Get() + b.Get() })
 	}
 	for _, f := range formulas {
 		_ = f.Get() // warm: establish edges and cache

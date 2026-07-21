@@ -51,19 +51,19 @@ func scaleViewport(n int) int {
 
 type scaleGraph struct {
 	ctx      *Context
-	inputs   []*Cell[int64]
-	formulas []*Slot[int64]
+	inputs   []*SourceCell[int64]
+	formulas []*FormulaCell[int64]
 }
 
 // buildScaleGraph constructs the spreadsheet-shaped graph (formulas not yet
 // computed — lazy until first read).
 func buildScaleGraph(n int) scaleGraph {
 	ctx := NewContext()
-	inputs := make([]*Cell[int64], n)
+	inputs := make([]*SourceCell[int64], n)
 	for i := 0; i < n; i++ {
-		inputs[i] = NewCell(ctx, int64(i))
+		inputs[i] = NewSourceCell(ctx, int64(i))
 	}
-	formulas := make([]*Slot[int64], n)
+	formulas := make([]*FormulaCell[int64], n)
 	for i := 0; i < n; i++ {
 		a := inputs[i]
 		prev := i - 1
@@ -71,7 +71,7 @@ func buildScaleGraph(n int) scaleGraph {
 			prev = 0
 		}
 		b := inputs[prev]
-		formulas[i] = NewSlot(ctx, func(*Context) int64 { return a.Get() + b.Get() })
+		formulas[i] = NewFormulaCell(ctx, func(*Context) int64 { return a.Get() + b.Get() })
 	}
 	return scaleGraph{ctx: ctx, inputs: inputs, formulas: formulas}
 }

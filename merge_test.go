@@ -87,7 +87,7 @@ func TestSetUnionAndRawFifoFlags(t *testing.T) {
 
 func TestCellIsMergeCellKeepLatest(t *testing.T) {
 	ctx := NewContext()
-	cell := NewCell(ctx, 0)
+	cell := NewSourceCell(ctx, 0)
 	mc := NewMergeCell(ctx, 0, KeepLatest[int]())
 	for _, v := range []int{3, 3, 7, 7, 1} {
 		cell.Set(v)

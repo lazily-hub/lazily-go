@@ -291,11 +291,11 @@ type QueueCell[T comparable, S QueueStorage[T]] struct {
 	// eagerly-Set Cells). Each re-derives on first Get after invalidation; the
 	// shell invalidates only the ones that provably changed on an op. closed
 	// stays a Cell (a direct input, set by Close).
-	head     *Slot[queueHead[T]]
-	lenCell  *Slot[int]
-	empty    *Slot[bool]
-	full     *Slot[bool]
-	closed   *Cell[bool]
+	head     *FormulaCell[queueHead[T]]
+	lenCell  *FormulaCell[int]
+	empty    *FormulaCell[bool]
+	full     *FormulaCell[bool]
+	closed   *SourceCell[bool]
 	bounded  bool             // mirrored from BoundedStorage.Capacity() at construction
 	capacity int              // mirrored from BoundedStorage.Capacity() at construction
 	peek     func() (T, bool) // the backend's Peek, or nil when it has no peek capability
@@ -337,19 +337,19 @@ func NewQueueCellWithStorage[T comparable, S QueueStorage[T]](ctx *Context, stor
 	}
 	// Reader-kinds derive lazily from storage; nothing is materialized until a
 	// reader is observed. Head is trivially empty when the backend has no peek.
-	q.head = NewSlot[queueHead[T]](ctx, func(*Context) queueHead[T] {
+	q.head = NewFormulaCell[queueHead[T]](ctx, func(*Context) queueHead[T] {
 		if q.peek == nil {
 			return queueHead[T]{}
 		}
 		v, ok := q.peek()
 		return queueHead[T]{value: v, ok: ok}
 	})
-	q.lenCell = NewSlot[int](ctx, func(*Context) int { return q.storage.Len() })
-	q.empty = NewSlot[bool](ctx, func(*Context) bool { return q.storage.Len() == 0 })
-	q.full = NewSlot[bool](ctx, func(*Context) bool {
+	q.lenCell = NewFormulaCell[int](ctx, func(*Context) int { return q.storage.Len() })
+	q.empty = NewFormulaCell[bool](ctx, func(*Context) bool { return q.storage.Len() == 0 })
+	q.full = NewFormulaCell[bool](ctx, func(*Context) bool {
 		return q.bounded && q.storage.Len() >= q.capacity
 	})
-	q.closed = NewCell[bool](ctx, storage.IsClosed())
+	q.closed = NewSourceCell[bool](ctx, storage.IsClosed())
 	return q
 }
 
@@ -476,11 +476,11 @@ func (q *QueueCell[T, S]) Storage() S { return q.storage }
 // derived reader-kinds are demand-driven Slots; IsClosed is the Cell backing the
 // closed flag (a direct input).
 type QueueReaderHandles[T comparable] struct {
-	Head     *Slot[queueHead[T]]
-	Len      *Slot[int]
-	IsEmpty  *Slot[bool]
-	IsFull   *Slot[bool]
-	IsClosed *Cell[bool]
+	Head     *FormulaCell[queueHead[T]]
+	Len      *FormulaCell[int]
+	IsEmpty  *FormulaCell[bool]
+	IsFull   *FormulaCell[bool]
+	IsClosed *SourceCell[bool]
 }
 
 // ReaderHandles returns the five reader-kinds backing the reactive reads.
@@ -547,7 +547,7 @@ type TopicCell[T any] struct {
 	baseOffset    int
 	elements      []T
 	subscriptions map[string]*topicSubscription
-	readers       map[string]*Slot[TopicRead[T]]
+	readers       map[string]*FormulaCell[TopicRead[T]]
 }
 
 // NewTopicCell creates an empty broadcast topic.
@@ -555,7 +555,7 @@ func NewTopicCell[T any](ctx *Context) *TopicCell[T] {
 	return &TopicCell[T]{
 		ctx:           ctx,
 		subscriptions: make(map[string]*topicSubscription),
-		readers:       make(map[string]*Slot[TopicRead[T]]),
+		readers:       make(map[string]*FormulaCell[TopicRead[T]]),
 	}
 }
 
@@ -586,11 +586,11 @@ func NewTopicCellFromSnapshot[T any](ctx *Context, snapshot TopicSnapshot[T]) *T
 	return t
 }
 
-func (t *TopicCell[T]) ensureReader(id string) *Slot[TopicRead[T]] {
+func (t *TopicCell[T]) ensureReader(id string) *FormulaCell[TopicRead[T]] {
 	if reader, ok := t.readers[id]; ok {
 		return reader
 	}
-	reader := NewSlot[TopicRead[T]](t.ctx, func(*Context) TopicRead[T] {
+	reader := NewFormulaCell[TopicRead[T]](t.ctx, func(*Context) TopicRead[T] {
 		return t.readUntracked(id)
 	})
 	t.readers[id] = reader
@@ -742,7 +742,7 @@ func (t *TopicCell[T]) Subscription(id string) (TopicSubscriptionSnapshot, bool)
 	return TopicSubscriptionSnapshot{id, sub.cursor, sub.durability, sub.connected}, true
 }
 
-func (t *TopicCell[T]) ReaderHandle(id string) *Slot[TopicRead[T]] { return t.ensureReader(id) }
+func (t *TopicCell[T]) ReaderHandle(id string) *FormulaCell[TopicRead[T]] { return t.ensureReader(id) }
 
 // Snapshot copies the retained log and stable subscription table.
 func (t *TopicCell[T]) Snapshot() TopicSnapshot[T] {

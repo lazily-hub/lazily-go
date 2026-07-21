@@ -45,8 +45,8 @@ type semChildKeys struct {
 // handles of its children, and its own folded memo slot.
 type semNode[V comparable, D comparable] struct {
 	id            string
-	valueCell     *Cell[V]
-	childKeysCell *Cell[*semChildKeys]
+	valueCell     *SourceCell[V]
+	childKeysCell *SourceCell[*semChildKeys]
 	childSlots    map[string]*Memo[D]
 	slot          *Memo[D]
 }
@@ -82,7 +82,7 @@ func BuildSemTree[V comparable, D comparable](
 func (t *SemTree[V, D]) build(spec TreeNodeSpec[V]) *semNode[V, D] {
 	node := &semNode[V, D]{
 		id:         spec.ID,
-		valueCell:  NewCell[V](t.ctx, spec.Value),
+		valueCell:  NewSourceCell[V](t.ctx, spec.Value),
 		childSlots: map[string]*Memo[D]{},
 	}
 	t.nodes[spec.ID] = node
@@ -107,7 +107,7 @@ func (t *SemTree[V, D]) build(spec TreeNodeSpec[V]) *semNode[V, D] {
 		}
 	}
 
-	node.childKeysCell = NewCell[*semChildKeys](t.ctx, &semChildKeys{order: childOrder})
+	node.childKeysCell = NewSourceCell[*semChildKeys](t.ctx, &semChildKeys{order: childOrder})
 
 	// Register the memo AFTER childKeysCell is set, so the memo observes it.
 	node.slot = NewMemo[D](t.ctx, func(_ *Context) D {

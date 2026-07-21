@@ -145,7 +145,7 @@ func TestCoordinationConformance(t *testing.T) {
 		ctx := NewContext()
 		lease := NewLeaseCell[uint64](ctx)
 		hc := lease.HolderCell()
-		obs := NewSlot(ctx, func(_ *Context) Opt[uint64] { return hc.Get() })
+		obs := NewFormulaCell(ctx, func(_ *Context) Opt[uint64] { return hc.Get() })
 		obs.Get()
 
 		for i, step := range fx.Steps {
@@ -194,7 +194,7 @@ func TestCoordinationConformance(t *testing.T) {
 		ctx := NewContext()
 		leader := NewLeaderCell[uint64](ctx, *fx.Config.Me)
 		lc := leader.CurrentLeaderCell()
-		obs := NewSlot(ctx, func(_ *Context) Opt[uint64] { return lc.Get() })
+		obs := NewFormulaCell(ctx, func(_ *Context) Opt[uint64] { return lc.Get() })
 		obs.Get()
 
 		for i, step := range fx.Steps {
@@ -234,7 +234,7 @@ func TestCoordinationConformance(t *testing.T) {
 		ctx := NewContext()
 		lock := NewLockCell[uint64](ctx)
 		ic := lock.IsLockedCell()
-		obs := NewSlot(ctx, func(_ *Context) bool { return ic.Get() })
+		obs := NewFormulaCell(ctx, func(_ *Context) bool { return ic.Get() })
 		obs.Get()
 
 		for i, step := range fx.Steps {
@@ -281,7 +281,7 @@ func TestCoordinationConformance(t *testing.T) {
 		ctx := NewContext()
 		sem := NewSemaphoreCell(ctx, *fx.Config.Capacity)
 		pc := sem.PermitsAvailableCell()
-		obs := NewSlot(ctx, func(_ *Context) uint64 { return pc.Get() })
+		obs := NewFormulaCell(ctx, func(_ *Context) uint64 { return pc.Get() })
 		obs.Get()
 
 		for i, step := range fx.Steps {
@@ -318,7 +318,7 @@ func TestCoordinationConformance(t *testing.T) {
 		ctx := NewContext()
 		q := Quorum[uint64](ctx, *fx.Config.Total)
 		oc := q.IsOpenCell()
-		obs := NewSlot(ctx, func(_ *Context) bool { return oc.Get() })
+		obs := NewFormulaCell(ctx, func(_ *Context) bool { return oc.Get() })
 		obs.Get()
 
 		for i, step := range fx.Steps {

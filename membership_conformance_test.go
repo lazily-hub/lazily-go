@@ -80,7 +80,7 @@ func TestMembershipConformance(t *testing.T) {
 		m := NewMembershipCell[uint64](ctx, config)
 
 		// Observe the PeerSet reader (reads the version cell inside PeerSet).
-		observed := NewSlot(ctx, func(_ *Context) int {
+		observed := NewFormulaCell(ctx, func(_ *Context) int {
 			return len(m.PeerSet())
 		})
 		observed.Get() // prime

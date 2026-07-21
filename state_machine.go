@@ -29,7 +29,7 @@ type Transition[S comparable, E comparable] func(state S, event E) (next S, ok b
 // state.
 type StateMachine[S comparable, E comparable] struct {
 	ctx        *Context
-	cell       *Cell[S]
+	cell       *SourceCell[S]
 	transition Transition[S, E]
 }
 
@@ -38,7 +38,7 @@ type StateMachine[S comparable, E comparable] struct {
 func NewStateMachine[S comparable, E comparable](ctx *Context, initial S, transition Transition[S, E]) *StateMachine[S, E] {
 	return &StateMachine[S, E]{
 		ctx:        ctx,
-		cell:       NewCell[S](ctx, initial),
+		cell:       NewSourceCell[S](ctx, initial),
 		transition: transition,
 	}
 }
@@ -48,7 +48,7 @@ func NewStateMachine[S comparable, E comparable](ctx *Context, initial S, transi
 func (m *StateMachine[S, E]) State() S { return m.cell.Get() }
 
 // Cell returns the underlying Cell holding the state value.
-func (m *StateMachine[S, E]) Cell() *Cell[S] { return m.cell }
+func (m *StateMachine[S, E]) Cell() *SourceCell[S] { return m.cell }
 
 // Send delivers an event to the machine. It returns true if the transition
 // function accepted the event (ok == true), false if it was rejected. A

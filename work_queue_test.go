@@ -3,10 +3,10 @@ package lazily
 import "testing"
 
 type workQueueReaders struct {
-	pending *Slot[int]
-	empty   *Slot[bool]
-	flight  *Slot[int]
-	dead    *Slot[int]
+	pending *FormulaCell[int]
+	empty   *FormulaCell[bool]
+	flight  *FormulaCell[int]
+	dead    *FormulaCell[int]
 }
 
 func newWorkQueueReaders(q *WorkQueueCell[string]) workQueueReaders {
@@ -43,7 +43,7 @@ func assertWorkQueueInvalidation(t *testing.T, q *WorkQueueCell[string], r workQ
 	q.DeadLetterLen()
 }
 
-func cached[T any](slot *Slot[T]) bool {
+func cached[T any](slot *FormulaCell[T]) bool {
 	_, ok := slot.Peek()
 	return ok
 }

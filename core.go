@@ -8,17 +8,19 @@
 //
 // The reactive family:
 //
-//   - Slot[T]   — a lazily-computed cached value that automatically tracks its
-//     dependencies and recomputes only when read after an upstream change.
-//   - Cell[T]   — a mutable source value that invalidates dependent Slots/Signals
-//     when it changes.
-//   - Signal[T] — an eager derived value, materialized by the time the
-//     invalidating write returns, with no intermediate unset value. Not a
-//     primitive: it is a Slot plus a puller Effect (Signal ≡ Slot.eager).
+//   - Cell[T]        — the read genus (an interface): every value-bearing node
+//     satisfies it. Go cannot restrict methods by type parameter, so the genus is
+//     an interface and the two kinds below are structs (design §4).
+//   - SourceCell[T]  — a value written from outside; the only kind with Set/Merge.
+//     Folds writes under a MergePolicy (KeepLatest by default = a plain cell;
+//     Sum/Max = the former MergeCell). Constructors: NewSourceCell / source(v).
+//   - FormulaCell[T] — a value computed from upstream; lazily cached and
+//     dependency-tracking, with neither Set nor Merge. Formula(f) is guarded by
+//     default. formula.Drive() makes it eager (the former Signal), returning the
+//     same handle.
 //
 // Values are lazy by default: dependents are marked dirty on invalidation but
-// only recompute when accessed. When you need eager push-style semantics, reach
-// for Signal.
+// only recompute when read. For eager push-style semantics, Drive a FormulaCell.
 //
 // A Context is the shared scope: the computation stack used for automatic
 // dependency tracking (cached slot values live on the nodes themselves, not in
@@ -258,11 +260,19 @@ type Context struct {
 
 	// disposing is the teardown depth. While it is non-zero the invalidation
 	// cascade marks nodes dirty but must not *run* anything: an effect rerun or
-	// an eager (Signal/Memo) recompute during teardown re-enters a compute that
-	// reads the node being disposed, which breaks teardown idempotence. The
+	// an eager (driven FormulaCell) recompute during teardown re-enters a compute
+	// that reads the node being disposed, which breaks teardown idempotence. The
 	// contract is "errors on next recompute", not "errors during the dispose
 	// call". See disposal.go.
 	disposing int
+
+	// drivenBy is the eager side table (design §9.3.3): it maps a driven
+	// FormulaCell's node to the puller Effect that keeps it materialized. Off the
+	// node so a lazy formula costs nothing; one entry per driven formula. Keyed by
+	// node identity (a pointer), and cleared on undrive/dispose so it never
+	// aliases a stale node — Go's pointer identity means there is no recycled-id
+	// hazard here (cf. the generation-tagged SlotId the arena bindings need).
+	drivenBy map[reactiveNode]*Effect
 }
 
 // NewContext creates an empty reactive scope.
@@ -270,6 +280,7 @@ func NewContext() *Context {
 	return &Context{
 		batchedCells:     map[reactiveNode]struct{}{},
 		scheduledEffects: map[*Effect]struct{}{},
+		drivenBy:         map[reactiveNode]*Effect{},
 	}
 }
 
@@ -404,14 +415,14 @@ func (c *Context) flushEffects() {
 	c.effectsHead = 0
 }
 
-// Slot is a lazy, cached, dependency-tracking computation.
+// FormulaCell is a lazy, cached, dependency-tracking computation.
 //
 // Get returns the cached value if present; otherwise it computes the value
-// (tracking every Cell, Signal, or Slot read during computation as a
+// (tracking every Cell, Signal, or FormulaCell read during computation as a
 // dependency), caches it, and returns it. When any dependency changes, the
 // cached value is invalidated and the next Get recomputes.
 //
-// The cached value lives on the Slot itself (value/cached fields), not in a
+// The cached value lives on the FormulaCell itself (value/cached fields), not in a
 // shared Context map — so a Get is a direct field read on the node you already
 // hold, and read latency does not grow with the total number of nodes.
 // The cache is three-state, which pull-time checking requires and a lone
@@ -428,7 +439,7 @@ func (c *Context) flushEffects() {
 // `cached` keeps its original meaning — "this value is current" — so Peek,
 // cachedNow, Context.Size, and every collection layer built on them are
 // unchanged. `hasValue` is the added state.
-type Slot[T any] struct {
+type FormulaCell[T any] struct {
 	reactiveBase
 	ctx     *Context
 	compute func(ctx *Context) T
@@ -445,20 +456,26 @@ type Slot[T any] struct {
 	// refreshing guards the pull-time dependency walk against a cyclic graph
 	// re-entering the same node.
 	refreshing bool
-	Name       string
+	// driven is the eager bit (design §9.3.3): a driven FormulaCell has a puller
+	// Effect keeping it materialized. The bit alone makes Drive idempotent with
+	// no lookup; the puller itself lives in Context.drivenBy, off the node, so an
+	// undriven formula costs nothing. This replaces the old Signal type — eager
+	// is a state a formula is in, not a separate kind.
+	driven bool
+	Name   string
 }
 
-// NewSlot creates a lazy slot bound to ctx.
-func NewSlot[T any](ctx *Context, compute func(ctx *Context) T) *Slot[T] {
-	s := &Slot[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}
+// NewFormulaCell creates a lazy slot bound to ctx.
+func NewFormulaCell[T any](ctx *Context, compute func(ctx *Context) T) *FormulaCell[T] {
+	s := &FormulaCell[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}
 	s.self = s
 	ctx.registerSlot(s)
 	return s
 }
 
-// NewNamedSlot creates a lazy slot with a debug name.
-func NewNamedSlot[T any](ctx *Context, name string, compute func(ctx *Context) T) *Slot[T] {
-	s := NewSlot(ctx, compute)
+// NewNamedFormulaCell creates a lazy slot with a debug name.
+func NewNamedFormulaCell[T any](ctx *Context, name string, compute func(ctx *Context) T) *FormulaCell[T] {
+	s := NewFormulaCell(ctx, compute)
 	s.Name = name
 	return s
 }
@@ -468,7 +485,7 @@ func NewNamedSlot[T any](ctx *Context, name string, compute func(ctx *Context) T
 // Panics with a *DisposedError if this slot has been disposed. Use TryGet for
 // the checked form; see disposal.go for why a read of a torn-down node is a
 // panic rather than a returned error.
-func (s *Slot[T]) Get() T {
+func (s *FormulaCell[T]) Get() T {
 	if s.disposed {
 		panic(&DisposedError{Name: s.Name, Kind: "slot"})
 	}
@@ -492,7 +509,7 @@ func (s *Slot[T]) Get() T {
 // Only a forced slot (one that directly read the written node) skips the
 // dependency check, because for it "something upstream changed" is already
 // known.
-func (s *Slot[T]) refresh() bool {
+func (s *FormulaCell[T]) refresh() bool {
 	if s.disposed || s.cached {
 		return false
 	}
@@ -523,7 +540,7 @@ func (s *Slot[T]) refresh() bool {
 
 // markClean records that this slot's existing value is current again, without
 // running its compute.
-func (s *Slot[T]) markClean() {
+func (s *FormulaCell[T]) markClean() {
 	s.dirty = false
 	s.forceRecompute = false
 	if !s.cached {
@@ -535,7 +552,7 @@ func (s *Slot[T]) markClean() {
 // recomputeNow runs the compute, refreshes the dependency edges, and reports
 // whether the value changed. A first-ever computation reports false: nothing
 // downstream can be holding a stale value of a slot that never had one.
-func (s *Slot[T]) recomputeNow() bool {
+func (s *FormulaCell[T]) recomputeNow() bool {
 	s.detachUpstream()
 	s.ctx.push(s.self)
 	v := s.compute(s.ctx)
@@ -565,7 +582,7 @@ func (s *Slot[T]) recomputeNow() bool {
 }
 
 // Peek returns the cached value without recomputing, and whether it was cached.
-func (s *Slot[T]) Peek() (T, bool) {
+func (s *FormulaCell[T]) Peek() (T, bool) {
 	if s.cached {
 		return s.value, true
 	}
@@ -576,7 +593,7 @@ func (s *Slot[T]) Peek() (T, bool) {
 // onInvalidate marks this slot stale. The previous value is deliberately KEPT
 // (hasValue stays true) so a later recompute can compare against it; only its
 // currency is dropped.
-func (s *Slot[T]) onInvalidate() {
+func (s *FormulaCell[T]) onInvalidate() {
 	s.dirty = true
 	if s.cached {
 		s.cached = false
@@ -588,7 +605,7 @@ func (s *Slot[T]) onInvalidate() {
 // teardown); does not touch cachedCount, which Clear resets wholesale. Unlike
 // invalidation this discards the value itself, so the next read must recompute
 // rather than compare.
-func (s *Slot[T]) clearCache() {
+func (s *FormulaCell[T]) clearCache() {
 	s.cached = false
 	s.hasValue = false
 	s.dirty = true
@@ -598,22 +615,40 @@ func (s *Slot[T]) clearCache() {
 }
 
 // cachedNow reports whether this slot currently holds a cached value.
-func (s *Slot[T]) cachedNow() bool { return s.cached }
+func (s *FormulaCell[T]) cachedNow() bool { return s.cached }
 
-// Cell is a mutable source value that invalidates dependents when it changes.
+// SourceCell is a value written from outside the graph; it invalidates its
+// dependents when it changes. It is the source kind of the Cell genus (Cell[T]):
+// the only kind that carries Set/Merge. A FormulaCell computes from upstream and
+// has neither, so `formulaCell.Set(…)` does not compile — the write protection
+// the Cell kernel design (§3/§4) puts in the type rather than a runtime gate.
 //
-// Reading Get inside a Slot/Signal computation registers a dependency. Set
-// triggers a cascade only when the new value is not equal to the old one — the
-// PartialEq guard. Cell uses Go == for equality, so T must be comparable.
-type Cell[T comparable] struct {
+// A SourceCell folds writes under a MergePolicy M. The default policy is
+// KeepLatest, so a plain SourceCell is exactly the old plain Cell; a SourceCell
+// with M ≠ KeepLatest is the old MergeCell. One kind, the policy in a field —
+// the Go analogue of the design's SourceCell<T, M>.
+//
+// Reading Get inside a FormulaCell/Effect computation registers a dependency.
+// Set triggers a cascade only when the new value is not equal to the old one —
+// the ==-guard. SourceCell uses Go == for equality, so T must be comparable.
+type SourceCell[T comparable] struct {
 	reactiveBase
-	ctx   *Context
-	value T
+	ctx    *Context
+	value  T
+	policy MergePolicy[T]
 }
 
-// NewCell creates a mutable source value bound to ctx.
-func NewCell[T comparable](ctx *Context, initial T) *Cell[T] {
-	c := &Cell[T]{reactiveBase: newReactiveBase(), ctx: ctx, value: initial}
+// NewSourceCell creates a mutable source cell bound to ctx under the default
+// KeepLatest policy (the plain cell). This is the design's source(v).
+func NewSourceCell[T comparable](ctx *Context, initial T) *SourceCell[T] {
+	return NewSourceCellWithPolicy(ctx, initial, KeepLatest[T]())
+}
+
+// NewSourceCellWithPolicy creates a source cell whose Merge folds under policy —
+// the design's source::<M>(v). With KeepLatest it is a plain cell; with Sum/Max
+// it is the former MergeCell.
+func NewSourceCellWithPolicy[T comparable](ctx *Context, initial T, policy MergePolicy[T]) *SourceCell[T] {
+	c := &SourceCell[T]{reactiveBase: newReactiveBase(), ctx: ctx, value: initial, policy: policy}
 	c.self = c
 	return c
 }
@@ -622,7 +657,7 @@ func NewCell[T comparable](ctx *Context, initial T) *Cell[T] {
 //
 // Panics with a *DisposedError if this cell has been disposed; use TryGet for
 // the checked form.
-func (c *Cell[T]) Get() T {
+func (c *SourceCell[T]) Get() T {
 	if c.disposed {
 		panic(&DisposedError{Kind: "cell"})
 	}
@@ -631,11 +666,11 @@ func (c *Cell[T]) Get() T {
 }
 
 // Peek returns the current value without registering a dependency.
-func (c *Cell[T]) Peek() T { return c.value }
+func (c *SourceCell[T]) Peek() T { return c.value }
 
 // Set assigns a new value. If newValue != old, dependents are invalidated.
 // Writing a disposed cell is a no-op: it has no dependents left to notify.
-func (c *Cell[T]) Set(newValue T) {
+func (c *SourceCell[T]) Set(newValue T) {
 	if c.disposed {
 		return
 	}
@@ -645,75 +680,82 @@ func (c *Cell[T]) Set(newValue T) {
 	}
 }
 
+// Merge folds op into the current value under this cell's policy and writes the
+// result through the ==-guarded Set, so an idempotent policy's no-op merge fires
+// no cascade (free dedup). Reads the current value untracked (Peek). Merge, like
+// Set, exists only on SourceCell — the write half of the Cell genus.
+func (c *SourceCell[T]) Merge(op T) { c.Set(c.policy.Merge(c.Peek(), op)) }
+
+// Policy returns this cell's merge policy.
+func (c *SourceCell[T]) Policy() MergePolicy[T] { return c.policy }
+
 // Invalidate force-invalidates this cell's dependents without changing the
 // value. Used by collection layers when an entry is removed.
-func (c *Cell[T]) Invalidate() {
+func (c *SourceCell[T]) Invalidate() {
 	c.invalidate()
 	c.ctx.flushEffects()
 }
 
-func (c *Cell[T]) onInvalidate() {} // cells hold their value directly
+func (c *SourceCell[T]) onInvalidate() {} // cells hold their value directly
 
-// Signal is an eager derived value: its value is materialized by the time the
-// invalidating write returns, with no intermediate unset state.
-//
-// Signal is NOT a core primitive and holds no value state of its own. It is
-// `Signal ≡ Slot.eager` (lazily-spec reactive-graph.md, #lzsignaleager): a
-// backing Slot plus a puller Effect that reads the slot on creation and after
-// every invalidation. Because the puller is an ordinary Effect, and effects are
-// scheduled rather than inline, N invalidations inside a Batch coalesce into a
-// single scheduled pull at the flush — the signal re-materializes once at batch
-// exit, not once per write (clause 3).
-//
-// Reads go straight to the backing memo, so a reader's dependency edge is on
-// the memo; the Signal wrapper carries no edges of its own.
-//
-// The backing is the `memo` the spec names, so a recompute yielding an equal
-// value suppresses the downstream cascade. That is only possible now that the
-// memo's `==` guard is a pull-time check: the guard no longer recomputes
-// during invalidation, so it cannot re-materialize the signal once per
-// invalidating source inside a batch (clause 3) nor keep re-materializing
-// after the puller Effect is disposed (clause 4). Eagerness comes entirely
-// from the puller, and the guard from the memo.
-type Signal[T comparable] struct {
-	reactiveBase
-	ctx     *Context
-	backing *Memo[T]
-	puller  *Effect
-}
-
-// NewSignal creates an eager signal bound to ctx. The value is computed now.
-func NewSignal[T comparable](ctx *Context, compute func(ctx *Context) T) *Signal[T] {
-	s := &Signal[T]{reactiveBase: newReactiveBase(), ctx: ctx}
-	s.self = s
-	s.backing = NewMemo(ctx, compute)
-	// The puller reads the memo now — so there is no intermediate unset value
-	// and the dependency edges exist immediately — and again on every
-	// invalidation, from inside the invalidating write's effect flush.
-	s.puller = NewEffect(ctx, func(*Context) func() {
-		s.backing.Get()
-		return nil
-	})
+// Formula creates a guarded FormulaCell bound to ctx — the design's formula(f),
+// guarded by default (§9.3). "Guarded" means a recompute yielding a value equal
+// (==) to the previous one suppresses the downstream cascade; it is exactly the
+// former Memo, which is now what a formula is unless you opt out with
+// NewFormulaCell. The guard is a pull-time check (see FormulaCell.refresh), so it
+// recomputes nothing during invalidation.
+func Formula[T comparable](ctx *Context, compute func(ctx *Context) T) *FormulaCell[T] {
+	s := NewFormulaCell(ctx, compute)
+	s.equals = func(prev, next T) bool { return prev == next }
 	return s
 }
 
-// Get reads the current materialized value. Reading inside a computation
-// subscribes the reader.
-func (s *Signal[T]) Get() T {
-	if s.disposed {
-		panic(&DisposedError{Kind: "signal"})
+// Drive makes this FormulaCell eager and returns the same handle (design §9.3.1).
+//
+// Eager is a driven FormulaCell, not a separate kind: Drive attaches a puller
+// Effect that reads the formula now — materializing its value and its dependency
+// edges immediately — and again after every invalidation, from inside the
+// invalidating write's effect flush. Because the puller is an ordinary Effect and
+// effects are scheduled rather than inline, N invalidations inside a Batch
+// coalesce into a single scheduled pull at the flush: the value re-materializes
+// once at batch exit, not once per write (#lzsignaleager clause 3). The former
+// Signal built the same slot+puller pair as a bespoke type that could, and in
+// lazily-go once did, weld a per-write puller into invalidation. Composing it out
+// of formula().Drive() makes that bug structurally unwritable.
+//
+// Drive is idempotent — the driven bit short-circuits a second call, so
+// f.Drive().Drive() attaches exactly one puller. It returns f itself (mutated),
+// not a driver handle, so the caller holds the thing it reads via ordinary Get.
+func (s *FormulaCell[T]) Drive() *FormulaCell[T] {
+	if s.disposed || s.driven {
+		return s
 	}
-	return s.backing.Get()
+	s.driven = true
+	puller := NewEffect(s.ctx, func(*Context) func() {
+		s.Get()
+		return nil
+	})
+	s.ctx.drivenBy[s.self] = puller
+	return s
 }
 
-// Dispose removes the eager puller. The value remains readable but reverts to
-// lazy behavior.
-func (s *Signal[T]) Dispose() { s.puller.Dispose() }
+// Undrive reverts an eager FormulaCell to lazy: it disposes the puller Effect and
+// clears the driven bit and side-table entry. The value remains readable and
+// recomputes on demand. Idempotent; a no-op on a lazy formula. This is the
+// reverse transition that replaces the old dispose_signal.
+func (s *FormulaCell[T]) Undrive() {
+	if !s.driven {
+		return
+	}
+	if p, ok := s.ctx.drivenBy[s.self]; ok {
+		delete(s.ctx.drivenBy, s.self)
+		p.Dispose()
+	}
+	s.driven = false
+}
 
-// IsActive reports whether the eager puller is still installed.
-func (s *Signal[T]) IsActive() bool { return s.puller.IsActive() }
-
-func (s *Signal[T]) onInvalidate() {} // the backing slot owns the value
+// IsDriven reports whether this FormulaCell is eager (has a live puller).
+func (s *FormulaCell[T]) IsDriven() bool { return s.driven }
 
 // EffectRun is a side-effect function that may return a cleanup callback. The
 // cleanup (if non-nil) is invoked before the next rerun and on Dispose.
@@ -840,12 +882,12 @@ func (e *Effect) dependenciesChanged() bool {
 // Structurally a Memo is exactly "a Slot whose equals is set", which is how
 // lazily-rs models it too; it overrides no behavior of its own.
 type Memo[T comparable] struct {
-	Slot[T]
+	FormulaCell[T]
 }
 
 // NewMemo creates a memoized slot with an equality guard bound to ctx.
 func NewMemo[T comparable](ctx *Context, compute func(ctx *Context) T) *Memo[T] {
-	m := &Memo[T]{Slot: Slot[T]{
+	m := &Memo[T]{FormulaCell: FormulaCell[T]{
 		reactiveBase: newReactiveBase(),
 		ctx:          ctx,
 		compute:      compute,

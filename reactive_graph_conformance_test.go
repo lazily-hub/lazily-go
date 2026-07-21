@@ -244,7 +244,7 @@ func (m *syncModel) cleanupLog() []string { return m.log.snapshotCleanups() }
 func (m *syncModel) scope() scopeModel    { return &syncScope{m: m, s: m.ctx.Scope()} }
 
 func (m *syncModel) cell(id string, value int) nodeRef {
-	return nodeRef{kind: kindCell, id: id, h: NewCell(m.ctx, value)}
+	return nodeRef{kind: kindCell, id: id, h: NewSourceCell(m.ctx, value)}
 }
 
 // trackRead is the read used *inside* a compute: it panics on a disposed node,
@@ -252,18 +252,18 @@ func (m *syncModel) cell(id string, value int) nodeRef {
 func (m *syncModel) trackRead(r nodeRef) int {
 	switch r.kind {
 	case kindCell:
-		return r.h.(*Cell[int]).Get()
+		return r.h.(*SourceCell[int]).Get()
 	case kindSlot:
-		return r.h.(*Slot[int]).Get()
+		return r.h.(*FormulaCell[int]).Get()
 	case kindSignal:
-		return r.h.(*Signal[int]).Get()
+		return r.h.(*FormulaCell[int]).Get()
 	}
 	panic(fmt.Sprintf("reactive-graph: cannot read effect %q", r.id))
 }
 
 func (m *syncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
-	s := NewNamedSlot(m.ctx, id, func(*Context) int {
+	s := NewNamedFormulaCell(m.ctx, id, func(*Context) int {
 		m.computes.tick(id)
 		sum := offset
 		for _, d := range deps {
@@ -276,18 +276,23 @@ func (m *syncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 
 func (m *syncModel) signal(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
-	s := NewSignal(m.ctx, func(*Context) int {
+	// The eager construction is a driven FormulaCell — Formula(f).Drive() — not a
+	// bespoke Signal. Drive attaches a puller Effect that materializes the value
+	// now and re-pulls after every invalidation, coalescing per batch flush.
+	s := Formula(m.ctx, func(*Context) int {
 		m.computes.tick(id)
 		sum := offset
 		for _, d := range deps {
 			sum += m.trackRead(d)
 		}
 		return sum
-	})
+	}).Drive()
 	return nodeRef{kind: kindSignal, id: id, h: s}
 }
 
-func (m *syncModel) disposeSignal(r nodeRef) { r.h.(*Signal[int]).Dispose() }
+// disposeSignal is the former dispose_signal op: undrive the formula (remove the
+// puller) while leaving the node in the graph, readable as a lazy value.
+func (m *syncModel) disposeSignal(r nodeRef) { r.h.(*FormulaCell[int]).Undrive() }
 
 func (m *syncModel) batch(run func()) { m.ctx.Batch(run) }
 
@@ -323,27 +328,27 @@ func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
 func (m *syncModel) read(r nodeRef) (int, error) {
 	switch r.kind {
 	case kindCell:
-		return r.h.(*Cell[int]).TryGet()
+		return r.h.(*SourceCell[int]).TryGet()
 	case kindSlot:
-		return r.h.(*Slot[int]).TryGet()
+		return r.h.(*FormulaCell[int]).TryGet()
 	case kindSignal:
-		return r.h.(*Signal[int]).TryGet()
+		return r.h.(*FormulaCell[int]).TryGet()
 	}
 	return 0, fmt.Errorf("reactive-graph: cannot read effect %q", r.id)
 }
 
-func (m *syncModel) setCell(r nodeRef, value int) { r.h.(*Cell[int]).Set(value) }
+func (m *syncModel) setCell(r nodeRef, value int) { r.h.(*SourceCell[int]).Set(value) }
 
 func (m *syncModel) dispose(r nodeRef) {
 	switch r.kind {
 	case kindCell:
-		r.h.(*Cell[int]).Dispose()
+		r.h.(*SourceCell[int]).Dispose()
 	case kindSlot:
-		r.h.(*Slot[int]).Dispose()
+		r.h.(*FormulaCell[int]).Dispose()
 	case kindSignal:
-		// `dispose` is the graph teardown; `dispose_signal` is the narrower
-		// puller removal.
-		r.h.(*Signal[int]).DisposeNode()
+		// `dispose` is the graph teardown (tears down the puller too);
+		// `dispose_signal` is the narrower puller removal (Undrive).
+		r.h.(*FormulaCell[int]).Dispose()
 	case kindEffect:
 		r.h.(*Effect).Dispose()
 	}
@@ -352,11 +357,11 @@ func (m *syncModel) dispose(r nodeRef) {
 func (m *syncModel) graphNode(r nodeRef) GraphNode {
 	switch r.kind {
 	case kindCell:
-		return r.h.(*Cell[int])
+		return r.h.(*SourceCell[int])
 	case kindSlot:
-		return r.h.(*Slot[int])
+		return r.h.(*FormulaCell[int])
 	case kindSignal:
-		return r.h.(*Signal[int])
+		return r.h.(*FormulaCell[int])
 	}
 	return r.h.(*Effect)
 }
@@ -373,13 +378,13 @@ type syncScope struct {
 
 func (sc *syncScope) cell(id string, value int) nodeRef {
 	r := sc.m.cell(id, value)
-	Own(sc.s, r.h.(*Cell[int]))
+	Own(sc.s, r.h.(*SourceCell[int]))
 	return r
 }
 
 func (sc *syncScope) computed(id string, reads []nodeRef, offset int) nodeRef {
 	r := sc.m.computed(id, reads, offset)
-	Own(sc.s, r.h.(*Slot[int]))
+	Own(sc.s, r.h.(*FormulaCell[int]))
 	return r
 }
 
@@ -792,7 +797,11 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 			e.t.Fatalf("%s#%d: set_cell on non-cell %q", e.fixture, e.step, op.ID)
 		}
 		e.m.setCell(n, *op.Value)
-	case "signal":
+	case "signal", "drive":
+		// `drive` is the Cell-kernel spelling of `signal`: the eager construction
+		// is formula().drive(). Dual-accepted so a corpus emitting either op — the
+		// old `signal`/`dispose_signal` or the new `drive`/`undrive` — replays the
+		// same driven FormulaCell (design §9.3, spec step 3).
 		r := e.m.signal(op.ID, e.refs(op.Reads), op.Offset)
 		e.put(op.ID, r)
 		// Creation materializes the value (clause 1), so the op has a value to
@@ -803,7 +812,7 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 			return nil, true
 		}
 		return &v, false
-	case "dispose_signal":
+	case "dispose_signal", "undrive":
 		e.m.disposeSignal(e.node(op.ID))
 	case "batch":
 		e.m.batch(func() {

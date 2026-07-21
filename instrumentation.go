@@ -63,21 +63,21 @@ func RunBenchmarkSuite(iterations int) []BenchmarkResult {
 	return []BenchmarkResult{
 		Benchmark("Cell read/write", func() {
 			ctx := NewContext()
-			c := NewCell[int](ctx, 0)
+			c := NewSourceCell[int](ctx, 0)
 			c.Set(42)
 			c.Get()
 		}, iterations),
 		Benchmark("Slot recompute", func() {
 			ctx := NewContext()
-			a := NewCell[int](ctx, 1)
-			b := NewCell[int](ctx, 2)
-			sum := NewSlot[int](ctx, func(_ *Context) int { return a.Get() + b.Get() })
+			a := NewSourceCell[int](ctx, 1)
+			b := NewSourceCell[int](ctx, 2)
+			sum := NewFormulaCell[int](ctx, func(_ *Context) int { return a.Get() + b.Get() })
 			a.Set(10)
 			sum.Get()
 		}, iterations),
 		Benchmark("Memo equality guard (cache hit)", func() {
 			ctx := NewContext()
-			src := NewCell[int](ctx, 4)
+			src := NewSourceCell[int](ctx, 4)
 			parity := NewMemo[string](ctx, func(_ *Context) string {
 				if src.Get()%2 == 0 {
 					return "even"
@@ -89,9 +89,9 @@ func RunBenchmarkSuite(iterations int) []BenchmarkResult {
 		}, iterations),
 		Benchmark("batch coalesce (10 cells)", func() {
 			ctx := NewContext()
-			cells := make([]*Cell[int], 10)
+			cells := make([]*SourceCell[int], 10)
 			for i := 0; i < 10; i++ {
-				cells[i] = NewCell[int](ctx, i)
+				cells[i] = NewSourceCell[int](ctx, i)
 			}
 			NewEffect(ctx, func(_ *Context) func() {
 				for _, c := range cells {

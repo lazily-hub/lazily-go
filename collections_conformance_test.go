@@ -151,21 +151,21 @@ func runCellMapStepsFixture(t *testing.T, name string) {
 
 		// Prime readers against the CURRENT key set so each step's invalidation
 		// is measured in isolation (matches lazily-rs / lazily-dart).
-		valueReaders := map[string]*Slot[int]{}
+		valueReaders := map[string]*FormulaCell[int]{}
 		for _, k := range m.Keys() {
 			key := k
-			slot := NewSlot(ctx, func(*Context) int { v, _ := m.Read(key); return v })
+			slot := NewFormulaCell(ctx, func(*Context) int { v, _ := m.Read(key); return v })
 			slot.Get() // prime
 			valueReaders[key] = slot
 		}
-		membershipReader := NewSlot(ctx, func(*Context) int { return m.Len() })
+		membershipReader := NewFormulaCell(ctx, func(*Context) int { return m.Len() })
 		membershipReader.Get()
-		orderReader := NewSlot(ctx, func(*Context) []string { return m.Keys() })
+		orderReader := NewFormulaCell(ctx, func(*Context) []string { return m.Keys() })
 		orderReader.Get()
 
 		// Snapshot handles for stability assertions.
 		handleStable := jsMap(expected["handle_stable"])
-		handlesBefore := map[string]*Cell[int]{}
+		handlesBefore := map[string]*SourceCell[int]{}
 		for k, v := range handleStable {
 			if v == true {
 				handlesBefore[k] = m.Cell(k)
@@ -346,10 +346,10 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 
 	// stable_keys_not_invalidated: prime readers, run a no-op reconcile, assert warm.
 	stableKeys := jsStrList(expected["stable_keys_not_invalidated"])
-	readers := map[string]*Slot[int]{}
+	readers := map[string]*FormulaCell[int]{}
 	for _, k := range stableKeys {
 		key := k
-		slot := NewSlot(ctx, func(*Context) int { v, _ := m.Read(key); return v })
+		slot := NewFormulaCell(ctx, func(*Context) int { v, _ := m.Read(key); return v })
 		slot.Get()
 		readers[key] = slot
 	}
@@ -444,10 +444,10 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 			// since the root's value is read from the same loop.
 			after := jsMap(scenario["expect_after"])
 			downstreamRuns := 0
-			var downstream *Slot[int]
+			var downstream *FormulaCell[int]
 			if _, checked := after["downstream_consumer_reran"]; checked {
 				root := tree.RootHandle()
-				downstream = NewSlot(ctx, func(*Context) int {
+				downstream = NewFormulaCell(ctx, func(*Context) int {
 					downstreamRuns++
 					return root.Get()
 				})
