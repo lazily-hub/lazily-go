@@ -87,7 +87,7 @@ func wantStr(p *uint64) string {
 // windowingCheck asserts the emit edge, the projected output, and reader
 // invalidation for one step. `observed` wraps the window's output cell; its
 // warmth after the op tells us whether the op invalidated the reader.
-func windowingCheck(t *testing.T, i int, observed *FormulaCell[Opt[uint64]], step windowingStep, emitted, output Opt[uint64]) {
+func windowingCheck(t *testing.T, i int, observed *Computed[Opt[uint64]], step windowingStep, emitted, output Opt[uint64]) {
 	t.Helper()
 	if !optEq(emitted, step.Returns) {
 		t.Fatalf("step %d: emit got %s, want %s", i, optStr(emitted), wantStr(step.Returns))
@@ -111,7 +111,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := TumblingCount(ctx, *fx.Config.N, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewFormulaCell(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
 		observed.Get() // prime
 		for i, step := range fx.Steps {
 			emitted := w.Push(*step.Op.Value)
@@ -127,7 +127,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := TumblingTime(ctx, *fx.Config.Period, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewFormulaCell(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
 		observed.Get()
 		for i, step := range fx.Steps {
 			var emitted Opt[uint64]
@@ -148,7 +148,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := Sliding(ctx, int(*fx.Config.Size), *fx.Config.Slide, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewFormulaCell(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
 		observed.Get()
 		for i, step := range fx.Steps {
 			emitted := w.Push(*step.Op.Value)
@@ -164,7 +164,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := Session(ctx, *fx.Config.Gap, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewFormulaCell(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
 		observed.Get()
 		for i, step := range fx.Steps {
 			var emitted Opt[uint64]

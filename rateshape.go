@@ -29,7 +29,7 @@ func rsClamp01(v float64) float64 {
 
 // setOutput mirrors rs `set_output`: only an actual emit projects onto the
 // reader cell. A dropped/held input leaves the last emitted value in place.
-func setOutput[T comparable](cell *SourceCell[Opt[T]], emitted Opt[T]) {
+func setOutput[T comparable](cell *Source[Opt[T]], emitted Opt[T]) {
 	if emitted.Present {
 		cell.Set(emitted)
 	}
@@ -72,12 +72,12 @@ func (d *DebounceCore[T]) Tick(now uint64) Opt[T] {
 // DebounceCell is the reactive debounce over any comparable-valued source.
 type DebounceCell[T comparable] struct {
 	core   *DebounceCore[T]
-	output *SourceCell[Opt[T]]
+	output *Source[Opt[T]]
 }
 
 // NewDebounceCell builds a reactive debounce bound to ctx.
 func NewDebounceCell[T comparable](ctx *Context, quiet uint64) *DebounceCell[T] {
-	return &DebounceCell[T]{core: NewDebounceCore[T](quiet), output: NewSourceCell(ctx, None[T]())}
+	return &DebounceCell[T]{core: NewDebounceCore[T](quiet), output: NewSource(ctx, None[T]())}
 }
 
 // Input buffers an input; does not emit.
@@ -95,7 +95,7 @@ func (c *DebounceCell[T]) Tick(now uint64) Opt[T] {
 func (c *DebounceCell[T]) Output() Opt[T] { return c.output.Get() }
 
 // OutputCell exposes the reader cell for invalidation observation.
-func (c *DebounceCell[T]) OutputCell() *SourceCell[Opt[T]] { return c.output }
+func (c *DebounceCell[T]) OutputCell() *Source[Opt[T]] { return c.output }
 
 // -- Throttle ---------------------------------------------------------------
 
@@ -163,12 +163,12 @@ func (c *ThrottleCore[T]) Tick(now uint64) Opt[T] {
 // ThrottleCell is the reactive throttle over any comparable-valued source.
 type ThrottleCell[T comparable] struct {
 	core   *ThrottleCore[T]
-	output *SourceCell[Opt[T]]
+	output *Source[Opt[T]]
 }
 
 // NewThrottleCell builds a reactive throttle bound to ctx.
 func NewThrottleCell[T comparable](ctx *Context, edge ThrottleEdge, window uint64) *ThrottleCell[T] {
-	return &ThrottleCell[T]{core: NewThrottleCore[T](edge, window), output: NewSourceCell(ctx, None[T]())}
+	return &ThrottleCell[T]{core: NewThrottleCore[T](edge, window), output: NewSource(ctx, None[T]())}
 }
 
 // Input records an input, returning the emitted value (if any).
@@ -189,7 +189,7 @@ func (c *ThrottleCell[T]) Tick(now uint64) Opt[T] {
 func (c *ThrottleCell[T]) Output() Opt[T] { return c.output.Get() }
 
 // OutputCell exposes the reader cell for invalidation observation.
-func (c *ThrottleCell[T]) OutputCell() *SourceCell[Opt[T]] { return c.output }
+func (c *ThrottleCell[T]) OutputCell() *Source[Opt[T]] { return c.output }
 
 // -- Sample -----------------------------------------------------------------
 
@@ -269,12 +269,12 @@ func (c *SampleCore[T]) Tick(now uint64) Opt[T] {
 // SampleCell is the reactive sampler over any comparable-valued source.
 type SampleCell[T comparable] struct {
 	core   *SampleCore[T]
-	output *SourceCell[Opt[T]]
+	output *Source[Opt[T]]
 }
 
 // NewSampleCell builds a reactive sampler bound to ctx.
 func NewSampleCell[T comparable](ctx *Context, mode SampleMode) *SampleCell[T] {
-	return &SampleCell[T]{core: NewSampleCore[T](mode), output: NewSourceCell(ctx, None[T]())}
+	return &SampleCell[T]{core: NewSampleCore[T](mode), output: NewSource(ctx, None[T]())}
 }
 
 // Input records an input, returning the emitted value (if any).
@@ -295,7 +295,7 @@ func (c *SampleCell[T]) Tick(now uint64) Opt[T] {
 func (c *SampleCell[T]) Output() Opt[T] { return c.output.Get() }
 
 // OutputCell exposes the reader cell for invalidation observation.
-func (c *SampleCell[T]) OutputCell() *SourceCell[Opt[T]] { return c.output }
+func (c *SampleCell[T]) OutputCell() *Source[Opt[T]] { return c.output }
 
 // -- Probabilistic sample ----------------------------------------------------
 
@@ -348,7 +348,7 @@ func (c ProbabilisticSampleCore) Decide(draw float64) bool { return draw < c.rat
 type ProbabilisticSampleCell[T comparable] struct {
 	core   ProbabilisticSampleCore
 	rng    SampleRng
-	output *SourceCell[Opt[T]]
+	output *Source[Opt[T]]
 }
 
 // NewProbabilisticSampleCell builds a reactive probabilistic sampler bound to
@@ -357,7 +357,7 @@ func NewProbabilisticSampleCell[T comparable](ctx *Context, rate float64, rng Sa
 	return &ProbabilisticSampleCell[T]{
 		core:   NewProbabilisticSampleCore(rate),
 		rng:    rng,
-		output: NewSourceCell(ctx, None[T]()),
+		output: NewSource(ctx, None[T]()),
 	}
 }
 
@@ -380,4 +380,4 @@ func (c *ProbabilisticSampleCell[T]) InputWithDraw(v T, draw float64) Opt[T] {
 func (c *ProbabilisticSampleCell[T]) Output() Opt[T] { return c.output.Get() }
 
 // OutputCell exposes the reader cell for invalidation observation.
-func (c *ProbabilisticSampleCell[T]) OutputCell() *SourceCell[Opt[T]] { return c.output }
+func (c *ProbabilisticSampleCell[T]) OutputCell() *Source[Opt[T]] { return c.output }

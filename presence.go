@@ -66,14 +66,14 @@ func (c *EphemeralCore[V]) Value() (V, bool) {
 // only when the live value changes (the Cell == guard).
 type EphemeralCell[V comparable] struct {
 	core  *EphemeralCore[V]
-	value *SourceCell[Opt[V]]
+	value *Source[Opt[V]]
 }
 
 // NewEphemeralCell builds an empty ephemeral cell in ctx.
 func NewEphemeralCell[V comparable](ctx *Context) *EphemeralCell[V] {
 	return &EphemeralCell[V]{
 		core:  NewEphemeralCore[V](),
-		value: NewSourceCell(ctx, Opt[V]{}),
+		value: NewSource(ctx, Opt[V]{}),
 	}
 }
 
@@ -101,7 +101,7 @@ func (c *EphemeralCell[V]) Value() (V, bool) {
 }
 
 // ValueCell exposes the underlying reactive reader (Option scalar).
-func (c *EphemeralCell[V]) ValueCell() *SourceCell[Opt[V]] {
+func (c *EphemeralCell[V]) ValueCell() *Source[Opt[V]] {
 	return c.value
 }
 
@@ -171,14 +171,14 @@ func (c *EphemeralMapCore[K, V]) Present(now uint64) map[K]V {
 // an internal version cell bumped only when the live map structurally changes.
 type presentReader[K comparable, V comparable] struct {
 	core    *EphemeralMapCore[K, V]
-	version *SourceCell[uint64]
+	version *Source[uint64]
 	last    map[K]V
 }
 
 func newPresentReader[K comparable, V comparable](ctx *Context, core *EphemeralMapCore[K, V]) *presentReader[K, V] {
 	return &presentReader[K, V]{
 		core:    core,
-		version: NewSourceCell[uint64](ctx, 0),
+		version: NewSource[uint64](ctx, 0),
 		last:    map[K]V{},
 	}
 }
@@ -263,7 +263,7 @@ func (c *PresenceCell[K, V]) Present() map[K]V {
 }
 
 // PresentCell exposes the internal version cell backing the present projection.
-func (c *PresenceCell[K, V]) PresentCell() *SourceCell[uint64] {
+func (c *PresenceCell[K, V]) PresentCell() *Source[uint64] {
 	return c.reader.version
 }
 
@@ -308,6 +308,6 @@ func (c *AwarenessCell[K, V]) Present() map[K]V {
 }
 
 // PresentCell exposes the internal version cell backing the present projection.
-func (c *AwarenessCell[K, V]) PresentCell() *SourceCell[uint64] {
+func (c *AwarenessCell[K, V]) PresentCell() *Source[uint64] {
 	return c.reader.version
 }

@@ -1,6 +1,7 @@
 # lazily (Go)
 
-Lazy reactive primitives for Go — **Slots, Cells, and Signals** with automatic
+Lazy reactive primitives for Go — the **Cell kernel** (`Source` / `Computed` /
+`Effect`, all cells guarded; eager via `Computed.Eager()`) with automatic
 dependency tracking and cache invalidation, plus the full [`lazily-spec`][spec]
 wire protocol, CRDT collection types, keyed cell collections, Harel state
 charts, and the distributed CRDT plane.
@@ -18,24 +19,33 @@ go get github.com/lazily-hub/lazily-go
 
 ## The reactive family — the Cell kernel
 
-One genus over two value kinds (design `#lzcellkernel`):
+Two value kinds, named without collision (design `#lzcellkernel`). **`Cell` is a
+conceptual word for a value-bearing reactive node, not a Go type** — the two kinds
+are two concrete handle structs, and write protection lives in the type:
 
-- **`Cell[T]`** — the read *genus*: an interface every value-bearing node
-  satisfies. Go cannot restrict a method to a type parameter, so unlike the other
-  bindings the genus is an interface, not the concrete type; that is a mechanism
-  difference, not a vocabulary fork.
-- **`SourceCell[T]`** — a value written from outside the graph; the only kind
-  with `Set`/`Merge`. It folds writes under a `MergePolicy` (KeepLatest by default
-  = a plain cell; Sum/Max = the former `MergeCell`). `Cell ≡ SourceCell<KeepLatest>`.
-- **`FormulaCell[T]`** — a value computed from upstream; lazily cached and
-  dependency-tracking, with **neither `Set` nor `Merge`**. `Formula(f)` is guarded
-  by default (an `==`-guard suppresses equal recomputes). `formula.Drive()` makes
-  it *eager* — a driven FormulaCell, which replaces the former `Signal`.
+- **`Source[T]`** — a value written from outside the graph; the only kind with
+  `Set`/`Merge`. It folds writes under a `MergePolicy` (KeepLatest by default = a
+  plain cell; Sum/Max = the former `MergeCell`). `Cell ≡ Source<KeepLatest>`.
+  Constructors: `NewSource` / `NewSourceWithPolicy`.
+- **`Computed[T]`** — a value computed from upstream; lazily cached and
+  dependency-tracking, with **neither `Set` nor `Merge`**. `NewComputed(f)` is
+  **guarded** (an `==`-guard suppresses equal recomputes) — the sole derived
+  constructor now that the former `Memo` is removed: a `Computed` *is* the guarded
+  form. `computed.Eager()` makes it *eager* (which replaces the former `Signal`),
+  returning the same handle; `computed.Lazy()` reverses it.
+- **`Effect`** — a side-effect sink (`ctx.effect`), outside the Cell hierarchy.
 
-Write protection lives in the types: because `FormulaCell` has no `Set`,
-`formulaCell.Set(…)` does not compile. Values are **lazy by default**; `Drive` a
-`FormulaCell` for eager push-style semantics. Use `Effect` for side effects (a
-sink, outside the genus).
+The `T comparable` bound is what the guard needs. For a value type that is **not
+comparable**, drop to **`NewSlot(f)`** — the bound-free storage-sense primitive
+(`T any`, no guard), the escape hatch mirroring `lazily-rs`'s `slot()`.
+
+The v1 `Cell[T]` read-genus interface is **dropped**: no Go generic code used it
+as a bound, and v2 no longer needs a genus for write protection.
+
+Write protection lives in the types: because `Computed` has no `Set`,
+`computed.Set(…)` does not compile. Values are **lazy by default**; call `Eager`
+on a `Computed` for eager push-style semantics. Use `Effect` for side effects (a
+sink, outside the Cell hierarchy).
 
 ## Usage
 
@@ -43,23 +53,23 @@ sink, outside the genus).
 import lazily "github.com/lazily-hub/lazily-go"
 
 ctx := lazily.NewContext()
-a := lazily.NewSourceCell(ctx, 2)
-b := lazily.NewSourceCell(ctx, 3)
+a := lazily.NewSource(ctx, 2)
+b := lazily.NewSource(ctx, 3)
 
 // Lazy: computes on first read, caches, recomputes only when a or b changes.
-sum := lazily.Formula(ctx, func(c *lazily.Context) int { return a.Get() + b.Get() })
+sum := lazily.NewComputed(ctx, func(c *lazily.Context) int { return a.Get() + b.Get() })
 sum.Get() // 5
 
 a.Set(10)
 sum.Get() // 13
 
-// Eager: Drive attaches a puller so the formula re-materializes on every change.
-parity := lazily.Formula(ctx, func(c *lazily.Context) string {
+// Eager: Eager() attaches a puller so the computed re-materializes on every change.
+parity := lazily.NewComputed(ctx, func(c *lazily.Context) string {
 	if a.Get()%2 == 0 {
 		return "even"
 	}
 	return "odd"
-}).Drive()
+}).Eager()
 parity.Get() // "even"
 a.Set(11)
 parity.Get() // "odd" (already updated before the read)
@@ -118,20 +128,20 @@ the channel-serialized `AsyncContext`.
 
 Go has no decorators, so there is no direct analog of lazily-py's `@slot` /
 `@cell` on a method. The idiomatic Go equivalent of a lazily-*decorated method*
-is to wire the reactive members as `SourceCell` / `FormulaCell` fields in the
+is to wire the reactive members as `Source` / `Computed` fields in the
 constructor and expose thin accessor methods. The accessor reads like a plain
 method but is lazy, cached, and dependency-tracked:
 
 ```go
 type Greeter struct {
-	Name     *lazily.SourceCell[string]
-	greeting *lazily.FormulaCell[string] // the "decorated" lazy member
+	Name     *lazily.Source[string]
+	greeting *lazily.Computed[string] // the "decorated" lazy member
 }
 
 func NewGreeter(ctx *lazily.Context) *Greeter {
-	g := &Greeter{Name: lazily.NewSourceCell(ctx, "")}
+	g := &Greeter{Name: lazily.NewSource(ctx, "")}
 	// greeting tracks Name automatically; it recomputes only after Name changes.
-	g.greeting = lazily.Formula(ctx, func(*lazily.Context) string {
+	g.greeting = lazily.NewComputed(ctx, func(*lazily.Context) string {
 		return "Hello, " + g.Name.Get() + "!"
 	})
 	return g
@@ -150,15 +160,15 @@ g.Name.Set("Go")
 g.Greeting() // "Hello, Go!"  (recomputed once, because Name changed)
 ```
 
-`Formula` is guarded by default (it suppresses the downstream cascade when the
-recomputed value is unchanged); chain `.Drive()` for eager recomputation. A
+`NewComputed` is guarded by default (it suppresses the downstream cascade when the
+recomputed value is unchanged); chain `.Eager()` for eager recomputation. A
 runnable version of this pattern lives in
 [`example_test.go`](example_test.go).
 
 ## State machine
 
-`StateMachine` is a finite state machine backed by a `SourceCell`, so any
-FormulaCell reading its state is invalidated on transition.
+`StateMachine` is a finite state machine backed by a `Source`, so any
+`Computed` reading its state is invalidated on transition.
 
 ## State chart
 
@@ -190,7 +200,7 @@ WebRTC transport + signaling.
 
 `ReactiveMap[K, V, H]` is the unified keyed reactive collection (`#reactivemap`):
 keys map to independently-tracked per-entry reactive nodes over a handle kind `H`
-(`*SourceCell[V]` input cells or `*FormulaCell[V]` derived formulas), with **reactive membership
+(`*Source[V]` input cells or `*Computed[V]` derived computeds), with **reactive membership
 and order**. Go generics can't add methods to a type alias, so its two
 specializations are thin distinct structs embedding `*ReactiveMap` with the
 handle kind fixed:
@@ -301,7 +311,7 @@ notes and platform carve-outs lives in
 <!-- coverage-table:start -->
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig | Go | C++ |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: | :--: | :---: |
-| Reactive graph — kernel `Cell<T, K>` (`SourceCell` / `FormulaCell` / `Effect`) + driven `FormulaCell` (`formula().drive()`) / guarded formulas / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Reactive graph — two cell kinds (nodes `SourceCell` / `ComputedCell`; handles `Source<T, M>` / `Computed<T>`) + `Effect` sink + eager `Computed` (`computed().eager()`) / all cells guarded / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Keyed-map materialization (`SlotMap`) — mint-on-access derived slots: transparency + deferral (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thread-safe keyed map (`ThreadSafeSlotMap`) — `Send + Sync` + materialization confluence (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Async keyed map (`AsyncSlotMap`) — eventual transparency (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -316,7 +326,7 @@ notes and platform carve-outs lives in
 | Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Broadcast topic (`TopicCell`) — independent cursors + durable replay + safe GC (`#lztopiccell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Competing-consumer work queue (`WorkQueueCell`) — exclusive leases + ack/nack + redelivery + DLQ (`#lzworkqueue`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Merge algebra + `SourceCell<T, M>` — associative `MergePolicy` (`KeepLatest`/`Sum`/`Max`/`SetUnion`/`RawFifo`), `Cell ≡ SourceCell<KeepLatest>`, read-genus/write-`Source<M>` split (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Merge algebra + `Source<T, M>` — associative `MergePolicy` (`KeepLatest`/`Sum`/`Max`/`SetUnion`/`RawFifo`), `Cell ≡ Source<KeepLatest>`, read-any-cell/write-`Source` split (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | RelayCell — conflating relay + `BackpressurePolicy` + `SpillStore` + `Transport` + Inbox/Outbox + Rate/Window/Expiry/Priority/keyed policies (`#relaycell`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Free-text character CRDT (`TextCrdt`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `TextCrdt` delta sync (`version_vector` / `delta_since` / `apply_delta`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |

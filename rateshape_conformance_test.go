@@ -90,9 +90,9 @@ type driveFn func(step rateshapeStep) (OptStr, OptStr)
 
 // runRateshape replays a fixture: it drives each op, asserts emit + output, and
 // asserts reader invalidation via a wrapping Slot's cache warmth.
-func runRateshape(t *testing.T, ctx *Context, name string, fx rateshapeFixture, outCell *SourceCell[OptStr], drive driveFn) {
+func runRateshape(t *testing.T, ctx *Context, name string, fx rateshapeFixture, outCell *Source[OptStr], drive driveFn) {
 	t.Helper()
-	observed := NewFormulaCell(ctx, func(_ *Context) OptStr { return outCell.Get() })
+	observed := NewSlot(ctx, func(_ *Context) OptStr { return outCell.Get() })
 	observed.Get() // prime
 
 	for i, step := range fx.Steps {

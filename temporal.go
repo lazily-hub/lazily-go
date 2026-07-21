@@ -86,12 +86,12 @@ func (t *TimerCore) NextFire() (uint64, bool) {
 // (idempotent).
 type TimerCell struct {
 	core  *TimerCore
-	fired *SourceCell[bool]
+	fired *Source[bool]
 }
 
 // NewTimerCell creates a reactive single-shot timer firing at fireAt.
 func NewTimerCell(ctx *Context, fireAt uint64) *TimerCell {
-	return &TimerCell{core: NewTimerCore(fireAt), fired: NewSourceCell(ctx, false)}
+	return &TimerCell{core: NewTimerCore(fireAt), fired: NewSource(ctx, false)}
 }
 
 // Tick advances to logical time now; returns the fire edge. The backing cell is
@@ -116,7 +116,7 @@ func (t *TimerCell) Value() (struct{}, bool) {
 }
 
 // FiredCell returns the backing cell for dependents that subscribe directly.
-func (t *TimerCell) FiredCell() *SourceCell[bool] { return t.fired }
+func (t *TimerCell) FiredCell() *Source[bool] { return t.fired }
 
 // NextFire reports the next fire time, or ok=false once fired.
 func (t *TimerCell) NextFire() (uint64, bool) { return t.core.NextFire() }
@@ -172,12 +172,12 @@ func (iv *IntervalCore) NextFire() (uint64, bool) { return iv.next, true }
 // count onto a cell (invalidates only when count changes).
 type IntervalCell struct {
 	core  *IntervalCore
-	count *SourceCell[uint64]
+	count *Source[uint64]
 }
 
 // NewIntervalCell creates a reactive periodic interval with the given period.
 func NewIntervalCell(ctx *Context, period uint64) *IntervalCell {
-	return &IntervalCell{core: NewIntervalCore(period), count: NewSourceCell[uint64](ctx, 0)}
+	return &IntervalCell{core: NewIntervalCore(period), count: NewSource[uint64](ctx, 0)}
 }
 
 // Tick advances to logical time now; returns whether a boundary fired. The count
@@ -192,7 +192,7 @@ func (iv *IntervalCell) Tick(now uint64) bool {
 func (iv *IntervalCell) Count() uint64 { return iv.count.Get() }
 
 // CountCell returns the backing count cell.
-func (iv *IntervalCell) CountCell() *SourceCell[uint64] { return iv.count }
+func (iv *IntervalCell) CountCell() *Source[uint64] { return iv.count }
 
 // NextFire reports the next boundary.
 func (iv *IntervalCell) NextFire() (uint64, bool) { return iv.core.NextFire() }
@@ -301,12 +301,12 @@ func (c *CronCore) NextFire() (uint64, bool) {
 // CronCell is a reactive cron source: same reactive contract as IntervalCell.
 type CronCell struct {
 	core  *CronCore
-	count *SourceCell[uint64]
+	count *Source[uint64]
 }
 
 // NewCronCell creates a reactive cron source.
 func NewCronCell(ctx *Context, cycle uint64, offsets []uint64) *CronCell {
-	return &CronCell{core: NewCronCore(cycle, offsets), count: NewSourceCell[uint64](ctx, 0)}
+	return &CronCell{core: NewCronCore(cycle, offsets), count: NewSource[uint64](ctx, 0)}
 }
 
 // Tick advances to logical time now; returns whether a match fired.
@@ -320,7 +320,7 @@ func (c *CronCell) Tick(now uint64) bool {
 func (c *CronCell) Count() uint64 { return c.count.Get() }
 
 // CountCell returns the backing count cell.
-func (c *CronCell) CountCell() *SourceCell[uint64] { return c.count }
+func (c *CronCell) CountCell() *Source[uint64] { return c.count }
 
 // NextFire reports the next matching time.
 func (c *CronCell) NextFire() (uint64, bool) { return c.core.NextFire() }
@@ -374,7 +374,7 @@ func (d *DeadlineCore) NextFire() (uint64, bool) { return d.timer.NextFire() }
 type DeadlineCell[T any] struct {
 	core    *DeadlineCore
 	value   T
-	expired *SourceCell[bool]
+	expired *Source[bool]
 }
 
 // NewDeadlineCell creates a reactive value + deadline pair.
@@ -382,7 +382,7 @@ func NewDeadlineCell[T any](ctx *Context, value T, deadline uint64) *DeadlineCel
 	return &DeadlineCell[T]{
 		core:    NewDeadlineCore(deadline),
 		value:   value,
-		expired: NewSourceCell(ctx, false),
+		expired: NewSource(ctx, false),
 	}
 }
 
@@ -405,7 +405,7 @@ func (d *DeadlineCell[T]) State() Deadlined[T] {
 func (d *DeadlineCell[T]) IsExpired() bool { return d.expired.Get() }
 
 // ExpiredCell returns the backing expiry cell.
-func (d *DeadlineCell[T]) ExpiredCell() *SourceCell[bool] { return d.expired }
+func (d *DeadlineCell[T]) ExpiredCell() *Source[bool] { return d.expired }
 
 // NextFire reports the deadline, or ok=false once expired.
 func (d *DeadlineCell[T]) NextFire() (uint64, bool) { return d.core.NextFire() }

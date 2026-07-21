@@ -320,7 +320,7 @@ func (m *MembershipCore[P]) Tick(now uint64) []PeerChangeEvent[P] {
 type MembershipCell[P cmp.Ordered] struct {
 	ctx     *Context
 	core    *MembershipCore[P]
-	version *SourceCell[uint64]
+	version *Source[uint64]
 	alive   []P // last projected alive set (sorted)
 }
 
@@ -329,7 +329,7 @@ func NewMembershipCell[P cmp.Ordered](ctx *Context, config MembershipConfig) *Me
 	c := &MembershipCell[P]{
 		ctx:     ctx,
 		core:    NewMembershipCore[P](config),
-		version: NewSourceCell(ctx, uint64(0)),
+		version: NewSource(ctx, uint64(0)),
 		alive:   nil,
 	}
 	return c
@@ -384,7 +384,7 @@ func (c *MembershipCell[P]) PeerSet() []P {
 }
 
 // VersionCell exposes the backing version Cell for direct subscription.
-func (c *MembershipCell[P]) VersionCell() *SourceCell[uint64] { return c.version }
+func (c *MembershipCell[P]) VersionCell() *Source[uint64] { return c.version }
 
 // State returns the state of a known peer.
 func (c *MembershipCell[P]) State(peer P) (PeerState, bool) {

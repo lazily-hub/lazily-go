@@ -28,21 +28,21 @@ import (
 // one reader-kind cell so its cached/uncached state reports that kind's
 // invalidation in isolation.
 type queueReaders struct {
-	head     *FormulaCell[struct{}]
-	length   *FormulaCell[int]
-	isEmpty  *FormulaCell[bool]
-	isFull   *FormulaCell[bool]
-	isClosed *FormulaCell[bool]
+	head     *Computed[struct{}]
+	length   *Computed[int]
+	isEmpty  *Computed[bool]
+	isFull   *Computed[bool]
+	isClosed *Computed[bool]
 }
 
 // makeQueueReaders primes one observer slot per reader kind against q.
 func makeQueueReaders[T comparable, S QueueStorage[T]](ctx *Context, q *QueueCell[T, S]) queueReaders {
 	r := queueReaders{
-		head:     NewFormulaCell(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} }),
-		length:   NewFormulaCell(ctx, func(*Context) int { return q.Len() }),
-		isEmpty:  NewFormulaCell(ctx, func(*Context) bool { return q.IsEmpty() }),
-		isFull:   NewFormulaCell(ctx, func(*Context) bool { return q.IsFull() }),
-		isClosed: NewFormulaCell(ctx, func(*Context) bool { return q.IsClosed() }),
+		head:     NewSlot(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} }),
+		length:   NewSlot(ctx, func(*Context) int { return q.Len() }),
+		isEmpty:  NewSlot(ctx, func(*Context) bool { return q.IsEmpty() }),
+		isFull:   NewSlot(ctx, func(*Context) bool { return q.IsFull() }),
+		isClosed: NewSlot(ctx, func(*Context) bool { return q.IsClosed() }),
 	}
 	r.head.Get()
 	r.length.Get()
@@ -315,9 +315,9 @@ func TestQueueClosureLifecycle(t *testing.T) {
 		t.Fatalf("push on closed = %v, want %v", err, QueuePushClosed)
 	}
 	// Close is idempotent and invalidates nothing.
-	headReader := NewFormulaCell(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} })
+	headReader := NewSlot(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} })
 	headReader.Get()
-	closedReader := NewFormulaCell(ctx, func(*Context) bool { return q.IsClosed() })
+	closedReader := NewSlot(ctx, func(*Context) bool { return q.IsClosed() })
 	closedReader.Get()
 	q.Close()
 	if _, warm := closedReader.Peek(); !warm {
@@ -344,9 +344,9 @@ func TestQueueReaderKindIndependence(t *testing.T) {
 	q := NewQueueCell[string](ctx)
 	q.TryPush("a")
 
-	head := NewFormulaCell(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} })
-	length := NewFormulaCell(ctx, func(*Context) int { return q.Len() })
-	empty := NewFormulaCell(ctx, func(*Context) bool { return q.IsEmpty() })
+	head := NewSlot(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} })
+	length := NewSlot(ctx, func(*Context) int { return q.Len() })
+	empty := NewSlot(ctx, func(*Context) bool { return q.IsEmpty() })
 	head.Get()
 	length.Get()
 	empty.Get()
@@ -414,7 +414,7 @@ func TestQueueMPSCViaBatchIsOneInvalidationPass(t *testing.T) {
 	ctx := NewContext()
 	q := NewQueueCell[int](ctx)
 
-	length := NewFormulaCell(ctx, func(*Context) int { return q.Len() })
+	length := NewSlot(ctx, func(*Context) int { return q.Len() })
 	length.Get()
 
 	// Three pushes from "different producers" in one batch.

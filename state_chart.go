@@ -480,7 +480,7 @@ type StateChart struct {
 	def          *ChartDef
 	history      map[string]recording
 	lastActions  []string
-	config       *SourceCell[string]
+	config       *Source[string]
 	configStates map[string]struct{}
 }
 
@@ -496,7 +496,7 @@ func NewStateChart(ctx *Context, def *ChartDef) *StateChart {
 	var actions []string
 	sc.enterSubtree(def.root, enter, &actions)
 	sc.configStates = enter
-	sc.config = NewSourceCell[string](ctx, configKey(enter))
+	sc.config = NewSource[string](ctx, configKey(enter))
 	sc.lastActions = actions
 	return sc
 }

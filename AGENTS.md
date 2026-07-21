@@ -1,6 +1,7 @@
 # lazily-go
 
-Go port of the lazily reactive-signals family — Slots, Cells, and Signals with
+Go port of the lazily reactive-signals family — the Cell kernel (`Source` /
+`Computed` / `Effect`, all cells guarded; eager via `Computed.Eager()`) with
 automatic dependency tracking, plus the full lazily-spec wire protocol, CRDT
 collection types, the lossless tree CRDT, and the command/RPC message plane.
 

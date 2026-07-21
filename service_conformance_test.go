@@ -74,7 +74,7 @@ func TestServiceConformance(t *testing.T) {
 		ctx := NewContext()
 		h := NewHealthCell(ctx)
 		rc := h.HealthCell()
-		observed := NewFormulaCell(ctx, func(_ *Context) Health { return rc.Get() })
+		observed := NewSlot(ctx, func(_ *Context) Health { return rc.Get() })
 		observed.Get()
 
 		for i, step := range fx.Steps {
@@ -101,7 +101,7 @@ func TestServiceConformance(t *testing.T) {
 		ctx := NewContext()
 		r := NewReadinessCell(ctx)
 		rc := r.ReadyCell()
-		observed := NewFormulaCell(ctx, func(_ *Context) bool { return rc.Get() })
+		observed := NewSlot(ctx, func(_ *Context) bool { return rc.Get() })
 		observed.Get()
 
 		for i, step := range fx.Steps {
@@ -127,7 +127,7 @@ func TestServiceConformance(t *testing.T) {
 		}
 		ctx := NewContext()
 		d := NewDiscoveryCell[uint64](ctx)
-		observed := NewFormulaCell(ctx, func(_ *Context) int { _ = d.Discovery(); return 0 })
+		observed := NewSlot(ctx, func(_ *Context) int { _ = d.Discovery(); return 0 })
 		observed.Get()
 
 		for i, step := range fx.Steps {
@@ -172,7 +172,7 @@ func TestServiceConformance(t *testing.T) {
 		}
 		ctx := NewContext()
 		reg := NewServiceRegistry(ctx)
-		observed := NewFormulaCell(ctx, func(_ *Context) int { _ = reg.Projection(); return 0 })
+		observed := NewSlot(ctx, func(_ *Context) int { _ = reg.Projection(); return 0 })
 		observed.Get()
 
 		for i, step := range fx.Steps {

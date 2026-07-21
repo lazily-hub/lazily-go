@@ -42,20 +42,20 @@ package lazily
 // order signal once and keeps the moved entry's same Cell handle, dependents,
 // and lineage — it is not a remove + re-mint.
 type CellMap[K comparable, V comparable] struct {
-	*ReactiveMap[K, V, *SourceCell[V]]
+	*ReactiveMap[K, V, *Source[V]]
 }
 
 // NewCellMap creates an empty keyed cell collection bound to ctx.
 func NewCellMap[K comparable, V comparable](ctx *Context) *CellMap[K, V] {
-	rm := newReactiveMap[K, V, *SourceCell[V]](
+	rm := newReactiveMap[K, V, *Source[V]](
 		ctx,
 		EntryKindCell,
-		func(ctx *Context, compute func() V) *SourceCell[V] { return NewSourceCell(ctx, compute()) },
-		func(h *SourceCell[V]) V { return h.Get() },
+		func(ctx *Context, compute func() V) *Source[V] { return NewSource(ctx, compute()) },
+		func(h *Source[V]) V { return h.Get() },
 		// Invalidate the orphaned cell's dependents on remove (mirrors lazily-rs
 		// CellHandle::clear_dependents): any reader that read this entry is
 		// notified that its source is gone.
-		func(h *SourceCell[V]) { h.Invalidate() },
+		func(h *Source[V]) { h.Invalidate() },
 	)
 	return &CellMap[K, V]{ReactiveMap: rm}
 }
@@ -63,7 +63,7 @@ func NewCellMap[K comparable, V comparable](ctx *Context) *CellMap[K, V] {
 // EntryWith returns the value cell for key, minting it with defaultValue() on
 // first access. Adding a new key bumps reactive membership; re-fetching an
 // existing key does not.
-func (m *CellMap[K, V]) EntryWith(key K, defaultValue func() V) *SourceCell[V] {
+func (m *CellMap[K, V]) EntryWith(key K, defaultValue func() V) *Source[V] {
 	if existing, ok := m.entries[key]; ok {
 		return existing
 	}
@@ -72,13 +72,13 @@ func (m *CellMap[K, V]) EntryWith(key K, defaultValue func() V) *SourceCell[V] {
 
 // Entry returns the value cell for key, minting it with defaultValue on first
 // access. Convenience wrapper over EntryWith.
-func (m *CellMap[K, V]) Entry(key K, defaultValue V) *SourceCell[V] {
+func (m *CellMap[K, V]) Entry(key K, defaultValue V) *Source[V] {
 	return m.EntryWith(key, func() V { return defaultValue })
 }
 
 // Cell returns the existing value cell for key, or nil. Non-reactive: does not
 // subscribe the caller to membership.
-func (m *CellMap[K, V]) Cell(key K) *SourceCell[V] {
+func (m *CellMap[K, V]) Cell(key K) *Source[V] {
 	return m.entries[key]
 }
 
@@ -363,7 +363,7 @@ func longestIncreasingSubsequence(seq []int) []int {
 type CellTree[K comparable, V comparable] struct {
 	ctx      *Context
 	ID       K
-	Value    *SourceCell[V]
+	Value    *Source[V]
 	Children *CellMap[K, *CellTree[K, V]]
 }
 
@@ -373,7 +373,7 @@ func NewCellTree[K comparable, V comparable](ctx *Context, id K, initialValue V)
 	return &CellTree[K, V]{
 		ctx:      ctx,
 		ID:       id,
-		Value:    NewSourceCell[V](ctx, initialValue),
+		Value:    NewSource[V](ctx, initialValue),
 		Children: NewCellMap[K, *CellTree[K, V]](ctx),
 	}
 }

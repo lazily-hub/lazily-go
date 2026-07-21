@@ -8,10 +8,11 @@
 // a source whose write is a merge. Backed by an ordinary cell, so it inherits the
 // Phase-0 ==-guard + store-without-cascade.
 //
-// Go note: Cell[T] requires `comparable`, so a MergeCell can wrap the
-// comparable-valued policies (KeepLatest / Sum / Max). The SetUnion / RawFifo
-// policies (map / slice valued) are defined for the algebra + law-tests but
-// cannot back a Cell; they compose at the RelayCell layer over their own storage.
+// Go note: Source[T] requires `comparable` (the ==-guard), so a merge-policy
+// Source can wrap the comparable-valued policies (KeepLatest / Sum / Max). The
+// SetUnion / RawFifo policies (map / slice valued) are defined for the algebra +
+// law-tests but cannot back a Source; they compose at the RelayCell layer over
+// their own storage.
 
 package lazily
 
@@ -111,33 +112,24 @@ func RawFifo[E any]() MergePolicy[[]E] {
 	}
 }
 
-// MergeCell is retained as a compatibility alias for a SourceCell. Under the
-// Cell kernel a MergeCell is just a SourceCell whose policy is not KeepLatest —
-// "one kind, the policy in a field" — so the two collapse into SourceCell and
-// this alias keeps existing call sites compiling. Prefer SourceCell.
+// MergeCell is retained as a compatibility alias for a Source. Under the
+// Cell kernel a MergeCell is just a Source whose policy is not KeepLatest —
+// "one kind, the policy in a field" — so the two collapse into Source and
+// this alias keeps existing call sites compiling. Prefer Source.
 //
-// Deprecated: use SourceCell (NewSourceCellWithPolicy) directly.
-type MergeCell[T comparable] = SourceCell[T]
+// Deprecated: use Source (NewSourceWithPolicy) directly.
+type MergeCell[T comparable] = Source[T]
 
-// NewMergeCell creates a SourceCell folding writes under policy. This is the
-// design's source::<M>(v); equivalent to NewSourceCellWithPolicy.
+// NewMergeCell creates a Source folding writes under policy. This is the
+// design's source::<M>(v); equivalent to NewSourceWithPolicy.
 //
-// Deprecated: use NewSourceCellWithPolicy.
-func NewMergeCell[T comparable](ctx *Context, initial T, policy MergePolicy[T]) *SourceCell[T] {
-	return NewSourceCellWithPolicy(ctx, initial, policy)
+// Deprecated: use NewSourceWithPolicy.
+func NewMergeCell[T comparable](ctx *Context, initial T, policy MergePolicy[T]) *Source[T] {
+	return NewSourceWithPolicy(ctx, initial, policy)
 }
 
-// Cell is the read genus of the reactive graph: every value-bearing node — a
-// SourceCell or a FormulaCell (including a driven one) — satisfies it. Effects
-// are sinks with no value and stay outside the genus, so nothing can depend on
-// one.
-//
-// Go cannot restrict a method to a type parameter, so unlike the other bindings
-// the genus is an interface rather than the concrete type; the two kinds are the
-// SourceCell and FormulaCell structs. That reintroduces the read abstraction the
-// trait-capable bindings delete, but under the genus name Cell[T], so it is a
-// mechanism difference, not a vocabulary fork (design §4). The former Reactive[T]
-// read trait is gone; this is its replacement.
-type Cell[T any] interface {
-	Get() T
-}
+// v2 (#lzcellkernel): the `Cell[T]` read-genus interface is dropped. `Cell` is a
+// conceptual word for a value-bearing reactive node (Source / Computed), not a
+// type. v2 no longer needs a genus for write-protection — the two concrete
+// handle structs Source (Set/Merge) and Computed (no Set/Merge) carry it in the
+// type. No Go generic code used the interface as a bound, so nothing kept it.

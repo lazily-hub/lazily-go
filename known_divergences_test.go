@@ -135,9 +135,9 @@ func TestKnownDivergenceAsyncMemoGuardSuppressesValueNotDownstream(t *testing.T)
 func TestTargetPullTimeMemoGuard(t *testing.T) {
 	t.Run("invalidation computes nothing", func(t *testing.T) {
 		ctx := NewContext()
-		src := NewSourceCell(ctx, 1)
+		src := NewSource(ctx, 1)
 		n := 0
-		m := NewMemo(ctx, func(*Context) int { n++; return src.Get() % 2 })
+		m := NewComputed(ctx, func(*Context) int { n++; return src.Get() % 2 })
 		_ = m.Get()
 		if n != 1 {
 			t.Fatalf("setup: computes = %d, want 1", n)
@@ -159,10 +159,10 @@ func TestTargetPullTimeMemoGuard(t *testing.T) {
 
 	t.Run("suppression survives and no write is lost at depth two", func(t *testing.T) {
 		ctx := NewContext()
-		src := NewSourceCell(ctx, 2)
-		m := NewMemo(ctx, func(*Context) int { return src.Get() % 2 }) // 0 for evens
+		src := NewSource(ctx, 2)
+		m := NewComputed(ctx, func(*Context) int { return src.Get() % 2 }) // 0 for evens
 		downstreamFires := 0
-		d := NewFormulaCell(ctx, func(*Context) int { downstreamFires++; return m.Get() + 10 })
+		d := NewSlot(ctx, func(*Context) int { downstreamFires++; return m.Get() + 10 })
 		if got := d.Get(); got != 10 {
 			t.Fatalf("setup: d = %d, want 10", got)
 		}

@@ -122,14 +122,14 @@ func (c *CircuitBreakerCore) Record(success bool, now uint64) {
 // CircuitBreakerCell is a reactive circuit breaker: projects the state onto a Cell.
 type CircuitBreakerCell struct {
 	core  *CircuitBreakerCore
-	state *SourceCell[BreakerState]
+	state *Source[BreakerState]
 }
 
 // NewCircuitBreakerCell builds a reactive circuit breaker.
 func NewCircuitBreakerCell(ctx *Context, window, failureThreshold int, resetTimeout uint64) *CircuitBreakerCell {
 	return &CircuitBreakerCell{
 		core:  NewCircuitBreakerCore(window, failureThreshold, resetTimeout),
-		state: NewSourceCell[BreakerState](ctx, BreakerClosed),
+		state: NewSource[BreakerState](ctx, BreakerClosed),
 	}
 }
 
@@ -152,7 +152,7 @@ func (c *CircuitBreakerCell) Record(success bool, now uint64) {
 func (c *CircuitBreakerCell) State() BreakerState { return c.core.State() }
 
 // StateCell returns the reactive state reader.
-func (c *CircuitBreakerCell) StateCell() *SourceCell[BreakerState] { return c.state }
+func (c *CircuitBreakerCell) StateCell() *Source[BreakerState] { return c.state }
 
 // ===========================================================================
 // Retry backoff
@@ -204,14 +204,14 @@ func (r *RetryPolicyCore) Reset() { r.attempt = 0 }
 // RetryPolicyCell is a reactive retry policy: projects the current delay onto a Cell.
 type RetryPolicyCell struct {
 	core  *RetryPolicyCore
-	delay *SourceCell[uint64]
+	delay *Source[uint64]
 }
 
 // NewRetryPolicyCell builds a reactive retry policy.
 func NewRetryPolicyCell(ctx *Context, base, capacity uint64) *RetryPolicyCell {
 	return &RetryPolicyCell{
 		core:  NewRetryPolicyCore(base, capacity),
-		delay: NewSourceCell[uint64](ctx, 0),
+		delay: NewSource[uint64](ctx, 0),
 	}
 }
 
@@ -232,7 +232,7 @@ func (r *RetryPolicyCell) Reset() {
 func (r *RetryPolicyCell) Delay() uint64 { return r.delay.Get() }
 
 // DelayCell returns the reactive delay reader.
-func (r *RetryPolicyCell) DelayCell() *SourceCell[uint64] { return r.delay }
+func (r *RetryPolicyCell) DelayCell() *Source[uint64] { return r.delay }
 
 // ===========================================================================
 // Bulkhead
@@ -271,14 +271,14 @@ func (b *BulkheadCore) Release() {
 // BulkheadCell is a reactive bulkhead: projects permitsInUse onto a Cell.
 type BulkheadCell struct {
 	core  *BulkheadCore
-	inUse *SourceCell[uint64]
+	inUse *Source[uint64]
 }
 
 // NewBulkheadCell builds a reactive bulkhead.
 func NewBulkheadCell(ctx *Context, capacity uint64) *BulkheadCell {
 	return &BulkheadCell{
 		core:  NewBulkheadCore(capacity),
-		inUse: NewSourceCell[uint64](ctx, 0),
+		inUse: NewSource[uint64](ctx, 0),
 	}
 }
 
@@ -301,7 +301,7 @@ func (b *BulkheadCell) Release() {
 func (b *BulkheadCell) PermitsInUse() uint64 { return b.inUse.Get() }
 
 // PermitsInUseCell returns the reactive permits-in-use reader.
-func (b *BulkheadCell) PermitsInUseCell() *SourceCell[uint64] { return b.inUse }
+func (b *BulkheadCell) PermitsInUseCell() *Source[uint64] { return b.inUse }
 
 // ===========================================================================
 // Timeout
@@ -339,14 +339,14 @@ func (t *TimeoutCore) IsTimedOut() bool { return t.timedOut }
 // TimeoutCell is a reactive timeout: projects isTimedOut onto a Cell.
 type TimeoutCell struct {
 	core     *TimeoutCore
-	timedOut *SourceCell[bool]
+	timedOut *Source[bool]
 }
 
 // NewTimeoutCell builds a reactive timeout.
 func NewTimeoutCell(ctx *Context) *TimeoutCell {
 	return &TimeoutCell{
 		core:     NewTimeoutCore(),
-		timedOut: NewSourceCell[bool](ctx, false),
+		timedOut: NewSource[bool](ctx, false),
 	}
 }
 
@@ -369,4 +369,4 @@ func (t *TimeoutCell) Tick(now uint64) bool {
 func (t *TimeoutCell) IsTimedOut() bool { return t.timedOut.Get() }
 
 // IsTimedOutCell returns the reactive is-timed-out reader.
-func (t *TimeoutCell) IsTimedOutCell() *SourceCell[bool] { return t.timedOut }
+func (t *TimeoutCell) IsTimedOutCell() *Source[bool] { return t.timedOut }

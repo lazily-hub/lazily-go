@@ -45,10 +45,10 @@ type semChildKeys struct {
 // handles of its children, and its own folded memo slot.
 type semNode[V comparable, D comparable] struct {
 	id            string
-	valueCell     *SourceCell[V]
-	childKeysCell *SourceCell[*semChildKeys]
-	childSlots    map[string]*Memo[D]
-	slot          *Memo[D]
+	valueCell     *Source[V]
+	childKeysCell *Source[*semChildKeys]
+	childSlots    map[string]*Computed[D]
+	slot          *Computed[D]
 }
 
 // SemTree is a memoized semantic tree.
@@ -82,8 +82,8 @@ func BuildSemTree[V comparable, D comparable](
 func (t *SemTree[V, D]) build(spec TreeNodeSpec[V]) *semNode[V, D] {
 	node := &semNode[V, D]{
 		id:         spec.ID,
-		valueCell:  NewSourceCell[V](t.ctx, spec.Value),
-		childSlots: map[string]*Memo[D]{},
+		valueCell:  NewSource[V](t.ctx, spec.Value),
+		childSlots: map[string]*Computed[D]{},
 	}
 	t.nodes[spec.ID] = node
 
@@ -107,10 +107,10 @@ func (t *SemTree[V, D]) build(spec TreeNodeSpec[V]) *semNode[V, D] {
 		}
 	}
 
-	node.childKeysCell = NewSourceCell[*semChildKeys](t.ctx, &semChildKeys{order: childOrder})
+	node.childKeysCell = NewSource[*semChildKeys](t.ctx, &semChildKeys{order: childOrder})
 
 	// Register the memo AFTER childKeysCell is set, so the memo observes it.
-	node.slot = NewMemo[D](t.ctx, func(_ *Context) D {
+	node.slot = NewComputed[D](t.ctx, func(_ *Context) D {
 		v := node.valueCell.Get()
 		keys := node.childKeysCell.Get()
 		ds := make([]D, 0, len(keys.order))
@@ -179,13 +179,13 @@ func (t *SemTree[V, D]) IsCached(id string) bool {
 }
 
 // RootHandle returns the root slot handle.
-func (t *SemTree[V, D]) RootHandle() *Memo[D] {
+func (t *SemTree[V, D]) RootHandle() *Computed[D] {
 	return t.nodes[t.rootID].slot
 }
 
 // NodeHandle returns the slot handle for node id and true, or nil and false if the
 // node is absent.
-func (t *SemTree[V, D]) NodeHandle(id string) (*Memo[D], bool) {
+func (t *SemTree[V, D]) NodeHandle(id string) (*Computed[D], bool) {
 	node, ok := t.nodes[id]
 	if !ok {
 		return nil, false

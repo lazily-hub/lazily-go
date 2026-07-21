@@ -215,7 +215,7 @@ func (c *PnCounter) Copy() *PnCounter {
 // T must be comparable because the backing Cell uses the == PartialEq guard.
 type CellCrdt[T comparable] struct {
 	ctx   *Context
-	cell  *SourceCell[T]
+	cell  *Source[T]
 	merge func(current, incoming T) T
 }
 
@@ -223,7 +223,7 @@ type CellCrdt[T comparable] struct {
 func NewCellCrdt[T comparable](ctx *Context, initial T, merge func(current, incoming T) T) *CellCrdt[T] {
 	return &CellCrdt[T]{
 		ctx:   ctx,
-		cell:  NewSourceCell(ctx, initial),
+		cell:  NewSource(ctx, initial),
 		merge: merge,
 	}
 }
@@ -237,4 +237,4 @@ func (c *CellCrdt[T]) Write(incoming T) {
 }
 
 // Cell returns the underlying reactive cell.
-func (c *CellCrdt[T]) Cell() *SourceCell[T] { return c.cell }
+func (c *CellCrdt[T]) Cell() *Source[T] { return c.cell }
