@@ -80,8 +80,8 @@ func (m *StateMachine[S, E]) Send(event E) bool {
 func (m *StateMachine[S, E]) OnTransition(handler func(oldState, newState S)) func() {
 	var prev S
 	primed := false
-	effect := NewEffect(m.ctx, func(ctx *Context) func() {
-		current := m.cell.Get()
+	effect := NewEffect(m.ctx, func(ctx *Compute) func() {
+		current := Get(ctx, m.cell)
 		// The first run only establishes the baseline — OnTransition is not
 		// called on registration.
 		if primed && current != prev {

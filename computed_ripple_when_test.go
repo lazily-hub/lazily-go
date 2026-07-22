@@ -22,15 +22,15 @@ func TestComputedRippleWhenCustomSignificancePropagatesOnProxyChange(t *testing.
 		value  uint64
 		bucket uint64
 	}
-	derived := NewComputedRippleWhen(ctx, func(*Context) payload {
-		v := input.Get()
+	derived := NewComputedRippleWhen(ctx, func(c *Compute) payload {
+		v := Get(c, input)
 		return payload{value: v, bucket: v / 10}
 	}, func(old, next payload) bool { return old.bucket != next.bucket })
 
 	recomputes := 0
-	observer := NewComputed(ctx, func(*Context) uint64 {
+	observer := NewComputed(ctx, func(c *Compute) uint64 {
 		recomputes++
-		return derived.Get().value
+		return Get(c, derived).value
 	})
 
 	if got := observer.Get(); got != 0 {
@@ -64,14 +64,14 @@ func TestComputedRippleWhenPropagateEveryNViaValueCarriedCounter(t *testing.T) {
 	// "Propagate every 3rd increment" — evidence (the counter) is IN the value,
 	// so the predicate is a pure function of (old, new): propagate only when the
 	// count crosses a size-3 window boundary.
-	sampled := NewComputedRippleWhen(ctx, func(*Context) uint64 {
-		return input.Get()
+	sampled := NewComputedRippleWhen(ctx, func(c *Compute) uint64 {
+		return Get(c, input)
 	}, func(old, next uint64) bool { return next/3 != old/3 })
 
 	seen := 0
-	observer := NewComputed(ctx, func(*Context) uint64 {
+	observer := NewComputed(ctx, func(c *Compute) uint64 {
 		seen++
-		return sampled.Get()
+		return Get(c, sampled)
 	})
 
 	if got := observer.Get(); got != 0 {
@@ -104,19 +104,19 @@ func TestComputedIsComputedRippleWhenNotEqual(t *testing.T) {
 	ctx := NewContext()
 	input := NewSource(ctx, int64(0))
 
-	viaComputed := NewComputed(ctx, func(*Context) int64 { return min64(input.Get(), 1) })
-	viaWhen := NewComputedRippleWhen(ctx, func(*Context) int64 {
-		return min64(input.Get(), 1)
+	viaComputed := NewComputed(ctx, func(c *Compute) int64 { return min64(Get(c, input), 1) })
+	viaWhen := NewComputedRippleWhen(ctx, func(c *Compute) int64 {
+		return min64(Get(c, input), 1)
 	}, func(o, n int64) bool { return o != n })
 
 	ca, cb := 0, 0
-	obsA := NewComputed(ctx, func(*Context) int64 {
+	obsA := NewComputed(ctx, func(c *Compute) int64 {
 		ca++
-		return viaComputed.Get()
+		return Get(c, viaComputed)
 	})
-	obsB := NewComputed(ctx, func(*Context) int64 {
+	obsB := NewComputed(ctx, func(c *Compute) int64 {
 		cb++
-		return viaWhen.Get()
+		return Get(c, viaWhen)
 	})
 	if obsA.Get() != 0 || obsB.Get() != 0 {
 		t.Fatalf("initial reads: got (%d, %d), want (0, 0)", obsA.Get(), obsB.Get())
@@ -150,15 +150,15 @@ func TestSlotIsPassThroughAlwaysPropagates(t *testing.T) {
 	input := NewSource(ctx, uint64(0))
 	// NewSlot installs no guard: even an equal recompute propagates. This is
 	// exactly NewComputedRippleWhen(f, func(_, _) bool { return true }).
-	passthrough := NewSlot(ctx, func(*Context) uint64 {
-		_ = input.Get() // depend on input, but always yield the same value
+	passthrough := NewSlot(ctx, func(c *Compute) uint64 {
+		_ = Get(c, input) // depend on input, but always yield the same value
 		return 0
 	})
 
 	recomputes := 0
-	observer := NewComputed(ctx, func(*Context) uint64 {
+	observer := NewComputed(ctx, func(c *Compute) uint64 {
 		recomputes++
-		return passthrough.Get()
+		return Get(c, passthrough)
 	})
 
 	if got := observer.Get(); got != 0 {
@@ -182,15 +182,15 @@ func TestSlotEqualsAlwaysPropagateRippleWhen(t *testing.T) {
 	// equal recompute.
 	ctx := NewContext()
 	input := NewSource(ctx, uint64(0))
-	always := NewComputedRippleWhen(ctx, func(*Context) uint64 {
-		_ = input.Get()
+	always := NewComputedRippleWhen(ctx, func(c *Compute) uint64 {
+		_ = Get(c, input)
 		return 0
 	}, func(_, _ uint64) bool { return true })
 
 	recomputes := 0
-	observer := NewComputed(ctx, func(*Context) uint64 {
+	observer := NewComputed(ctx, func(c *Compute) uint64 {
 		recomputes++
-		return always.Get()
+		return Get(c, always)
 	})
 	if got := observer.Get(); got != 0 {
 		t.Fatalf("initial: got %d, want 0", got)
@@ -212,19 +212,19 @@ func TestComputedRippleWhenNonComparableSliceGuardedBySlicesEqual(t *testing.T) 
 	ctx := NewContext()
 	n := NewSource(ctx, 0)
 
-	tags := NewComputedRippleWhen(ctx, func(*Context) []string {
+	tags := NewComputedRippleWhen(ctx, func(c *Compute) []string {
 		// Value depends on n but only its parity determines the slice, so two
 		// consecutive even (or odd) n produce an equal slice.
-		if n.Get()%2 == 0 {
+		if Get(c, n)%2 == 0 {
 			return []string{"a", "b"}
 		}
 		return []string{"a", "b", "c"}
 	}, func(old, next []string) bool { return !slices.Equal(old, next) })
 
 	recomputes := 0
-	observer := NewComputed(ctx, func(*Context) int {
+	observer := NewComputed(ctx, func(c *Compute) int {
 		recomputes++
-		return len(tags.Get())
+		return len(Get(c, tags))
 	})
 
 	if got := observer.Get(); got != 2 {

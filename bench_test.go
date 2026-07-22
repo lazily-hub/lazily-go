@@ -23,7 +23,7 @@ func BenchmarkCellReadWrite(b *testing.B) {
 func BenchmarkSlotRecompute(b *testing.B) {
 	ctx := NewContext()
 	a := NewSource(ctx, 0)
-	sum := NewSlot(ctx, func(*Context) int { return a.Get() * 2 })
+	sum := NewSlot(ctx, func(c *Compute) int { return Get(c, a) * 2 })
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -35,10 +35,10 @@ func BenchmarkSlotRecompute(b *testing.B) {
 func BenchmarkMemoEqualityGuard(b *testing.B) {
 	ctx := NewContext()
 	width := NewSource(ctx, 0)
-	parity := NewComputed(ctx, func(*Context) bool { return width.Get()%2 == 0 })
+	parity := NewComputed(ctx, func(c *Compute) bool { return Get(c, width)%2 == 0 })
 	downstream := 0
-	NewEffect(ctx, func(*Context) func() {
-		if parity.Get() {
+	NewEffect(ctx, func(c *Compute) func() {
+		if Get(c, parity) {
 			downstream++
 		}
 		return nil
@@ -57,10 +57,10 @@ func BenchmarkBatchCoalesce(b *testing.B) {
 	for i := range cells {
 		cells[i] = NewSource(ctx, 0)
 	}
-	sum := NewSlot(ctx, func(*Context) int {
+	sum := NewSlot(ctx, func(cv *Compute) int {
 		total := 0
 		for _, c := range cells {
-			total += c.Get()
+			total += Get(cv, c)
 		}
 		return total
 	})
@@ -231,7 +231,7 @@ func buildSlotmapChase(n int) (cells []*Source[int64], formulas []*Computed[int6
 			prev = 0
 		}
 		b := cells[prev]
-		formulas[i] = NewSlot(ctx, func(*Context) int64 { return a.Get() + b.Get() })
+		formulas[i] = NewSlot(ctx, func(c *Compute) int64 { return Get(c, a) + Get(c, b) })
 	}
 	for _, f := range formulas {
 		_ = f.Get() // warm: establish edges and cache

@@ -270,25 +270,25 @@ func (m *syncModel) cell(id string, value int) nodeRef {
 
 // trackRead is the read used *inside* a compute: it panics on a disposed node,
 // which the top-level TryGet turns into `read_after_dispose`.
-func (m *syncModel) trackRead(r nodeRef) int {
+func (m *syncModel) trackRead(c *Compute, r nodeRef) int {
 	switch r.kind {
 	case kindCell:
-		return r.h.(*Source[int]).Get()
+		return Get[int](c, r.h.(*Source[int]))
 	case kindSlot:
-		return r.h.(*Computed[int]).Get()
+		return Get[int](c, r.h.(*Computed[int]))
 	case kindSignal:
-		return r.h.(*Computed[int]).Get()
+		return Get[int](c, r.h.(*Computed[int]))
 	}
 	panic(fmt.Sprintf("reactive-graph: cannot read effect %q", r.id))
 }
 
 func (m *syncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
-	s := NewNamedSlot(m.ctx, id, func(*Context) int {
+	s := NewNamedSlot(m.ctx, id, func(c *Compute) int {
 		m.computes.tick(id)
 		sum := offset
 		for _, d := range deps {
-			sum += m.trackRead(d)
+			sum += m.trackRead(c, d)
 		}
 		return sum
 	})
@@ -300,11 +300,11 @@ func (m *syncModel) signal(id string, reads []nodeRef, offset int) nodeRef {
 	// The eager construction is a driven Computed — NewComputed(f).Eager() — not a
 	// bespoke Signal. Drive attaches a puller Effect that materializes the value
 	// now and re-pulls after every invalidation, coalescing per batch flush.
-	s := NewComputed(m.ctx, func(*Context) int {
+	s := NewComputed(m.ctx, func(c *Compute) int {
 		m.computes.tick(id)
 		sum := offset
 		for _, d := range deps {
-			sum += m.trackRead(d)
+			sum += m.trackRead(c, d)
 		}
 		return sum
 	}).Eager()
@@ -321,24 +321,22 @@ func (m *syncModel) computesOf(id string) int { return m.computes.count(id) }
 
 func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
-	e := NewEffect(m.ctx, func(*Context) func() {
+	e := NewEffect(m.ctx, func(c *Compute) func() {
 		m.log.run(id)
-		// The body must not unwind: Context pushes and pops its tracking frame
-		// around each nested compute, so a panic escaping here would strand
-		// frames on the stack and corrupt every later read. Catch it and repair
-		// the stack depth — the same discipline lazily-rs's model applies.
+		// The body must not unwind on a disposed-node read: catch the
+		// *DisposedError so the effect body returns normally. Dependency tracking
+		// is value-threaded through c (no ambient stack), so a panic strands no
+		// frame — nothing to repair, just swallow the sentinel.
 		func() {
-			depth := len(m.ctx.stack)
 			defer func() {
 				if r := recover(); r != nil {
 					if _, ok := r.(*DisposedError); !ok {
 						panic(r)
 					}
-					m.ctx.stack = m.ctx.stack[:depth]
 				}
 			}()
 			for _, d := range deps {
-				m.trackRead(d)
+				m.trackRead(c, d)
 			}
 		}()
 		return func() { m.log.cleanup(id) }

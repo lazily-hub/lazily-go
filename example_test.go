@@ -19,8 +19,8 @@ type Greeter struct {
 // recomputes only after Name changes.
 func NewGreeter(ctx *lazily.Context) *Greeter {
 	g := &Greeter{Name: lazily.NewSource(ctx, "")}
-	g.greeting = lazily.NewSlot(ctx, func(*lazily.Context) string {
-		return "Hello, " + g.Name.Get() + "!"
+	g.greeting = lazily.NewSlot(ctx, func(c *lazily.Compute) string {
+		return "Hello, " + lazily.Get[string](c, g.Name) + "!"
 	})
 	return g
 }

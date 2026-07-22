@@ -92,7 +92,7 @@ type driveFn func(step rateshapeStep) (OptStr, OptStr)
 // asserts reader invalidation via a wrapping Slot's cache warmth.
 func runRateshape(t *testing.T, ctx *Context, name string, fx rateshapeFixture, outCell *Source[OptStr], drive driveFn) {
 	t.Helper()
-	observed := NewSlot(ctx, func(_ *Context) OptStr { return outCell.Get() })
+	observed := NewSlot(ctx, func(c *Compute) OptStr { return Get(c, outCell) })
 	observed.Get() // prime
 
 	for i, step := range fx.Steps {

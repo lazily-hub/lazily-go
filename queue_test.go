@@ -38,11 +38,11 @@ type queueReaders struct {
 // makeQueueReaders primes one observer slot per reader kind against q.
 func makeQueueReaders[T comparable, S QueueStorage[T]](ctx *Context, q *QueueCell[T, S]) queueReaders {
 	r := queueReaders{
-		head:     NewSlot(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} }),
-		length:   NewSlot(ctx, func(*Context) int { return q.Len() }),
-		isEmpty:  NewSlot(ctx, func(*Context) bool { return q.IsEmpty() }),
-		isFull:   NewSlot(ctx, func(*Context) bool { return q.IsFull() }),
-		isClosed: NewSlot(ctx, func(*Context) bool { return q.IsClosed() }),
+		head:     NewSlot(ctx, func(c *Compute) struct{} { Get(c, q.head); return struct{}{} }),
+		length:   NewSlot(ctx, func(c *Compute) int { return Get(c, q.lenCell) }),
+		isEmpty:  NewSlot(ctx, func(c *Compute) bool { return Get(c, q.empty) }),
+		isFull:   NewSlot(ctx, func(c *Compute) bool { return Get(c, q.full) }),
+		isClosed: NewSlot(ctx, func(c *Compute) bool { return Get(c, q.closed) }),
 	}
 	r.head.Get()
 	r.length.Get()
@@ -315,9 +315,9 @@ func TestQueueClosureLifecycle(t *testing.T) {
 		t.Fatalf("push on closed = %v, want %v", err, QueuePushClosed)
 	}
 	// Close is idempotent and invalidates nothing.
-	headReader := NewSlot(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} })
+	headReader := NewSlot(ctx, func(c *Compute) struct{} { Get(c, q.head); return struct{}{} })
 	headReader.Get()
-	closedReader := NewSlot(ctx, func(*Context) bool { return q.IsClosed() })
+	closedReader := NewSlot(ctx, func(c *Compute) bool { return Get(c, q.closed) })
 	closedReader.Get()
 	q.Close()
 	if _, warm := closedReader.Peek(); !warm {
@@ -344,9 +344,9 @@ func TestQueueReaderKindIndependence(t *testing.T) {
 	q := NewQueueCell[string](ctx)
 	q.TryPush("a")
 
-	head := NewSlot(ctx, func(*Context) struct{} { _, _ = q.Head(); return struct{}{} })
-	length := NewSlot(ctx, func(*Context) int { return q.Len() })
-	empty := NewSlot(ctx, func(*Context) bool { return q.IsEmpty() })
+	head := NewSlot(ctx, func(c *Compute) struct{} { Get(c, q.head); return struct{}{} })
+	length := NewSlot(ctx, func(c *Compute) int { return Get(c, q.lenCell) })
+	empty := NewSlot(ctx, func(c *Compute) bool { return Get(c, q.empty) })
 	head.Get()
 	length.Get()
 	empty.Get()
@@ -372,8 +372,8 @@ func TestQueueBackpressurePopWakesPushEffect(t *testing.T) {
 
 	runs := 0
 	var lastFull *bool
-	NewEffect(ctx, func(*Context) func() {
-		f := q.IsFull()
+	NewEffect(ctx, func(c *Compute) func() {
+		f := Get(c, q.full)
 		lastFull = &f
 		runs++
 		return nil
@@ -414,7 +414,7 @@ func TestQueueMPSCViaBatchIsOneInvalidationPass(t *testing.T) {
 	ctx := NewContext()
 	q := NewQueueCell[int](ctx)
 
-	length := NewSlot(ctx, func(*Context) int { return q.Len() })
+	length := NewSlot(ctx, func(c *Compute) int { return Get(c, q.lenCell) })
 	length.Get()
 
 	// Three pushes from "different producers" in one batch.
@@ -661,8 +661,8 @@ func TestQueueRawChannelReaderKindsStayReactive(t *testing.T) {
 	q := NewQueueCellWithStorage[int](ctx, &minimalFifoStorage[int]{})
 
 	var log []int
-	NewEffect(ctx, func(*Context) func() {
-		log = append(log, q.Len())
+	NewEffect(ctx, func(c *Compute) func() {
+		log = append(log, Get(c, q.lenCell))
 		return nil
 	})
 	if got := []int{0}; !intsEqual(log, got) {

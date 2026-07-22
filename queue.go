@@ -337,16 +337,16 @@ func NewQueueCellWithStorage[T comparable, S QueueStorage[T]](ctx *Context, stor
 	}
 	// Reader-kinds derive lazily from storage; nothing is materialized until a
 	// reader is observed. Head is trivially empty when the backend has no peek.
-	q.head = NewSlot[queueHead[T]](ctx, func(*Context) queueHead[T] {
+	q.head = NewSlot[queueHead[T]](ctx, func(c *Compute) queueHead[T] {
 		if q.peek == nil {
 			return queueHead[T]{}
 		}
 		v, ok := q.peek()
 		return queueHead[T]{value: v, ok: ok}
 	})
-	q.lenCell = NewSlot[int](ctx, func(*Context) int { return q.storage.Len() })
-	q.empty = NewSlot[bool](ctx, func(*Context) bool { return q.storage.Len() == 0 })
-	q.full = NewSlot[bool](ctx, func(*Context) bool {
+	q.lenCell = NewSlot[int](ctx, func(c *Compute) int { return q.storage.Len() })
+	q.empty = NewSlot[bool](ctx, func(c *Compute) bool { return q.storage.Len() == 0 })
+	q.full = NewSlot[bool](ctx, func(c *Compute) bool {
 		return q.bounded && q.storage.Len() >= q.capacity
 	})
 	q.closed = NewSource[bool](ctx, storage.IsClosed())
@@ -590,7 +590,7 @@ func (t *TopicCell[T]) ensureReader(id string) *Computed[TopicRead[T]] {
 	if reader, ok := t.readers[id]; ok {
 		return reader
 	}
-	reader := NewSlot[TopicRead[T]](t.ctx, func(*Context) TopicRead[T] {
+	reader := NewSlot[TopicRead[T]](t.ctx, func(c *Compute) TopicRead[T] {
 		return t.readUntracked(id)
 	})
 	t.readers[id] = reader

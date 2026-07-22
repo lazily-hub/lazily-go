@@ -134,11 +134,11 @@ func NewRelayCell[T comparable](ctx *Context, policy BackpressurePolicy, merge M
 		head:    NewSource(ctx, headOpt[T]{}),
 		pending: NewSource(ctx, uint64(0)),
 	}
-	r.depth = NewSlot(ctx, func(c *Context) uint64 { return r.pending.Get() })
-	r.isFull = NewSlot(ctx, func(c *Context) bool {
-		return r.depth.Get() >= policy.HighWater.Get()
+	r.depth = NewSlot(ctx, func(c *Compute) uint64 { return Get(c, r.pending) })
+	r.isFull = NewSlot(ctx, func(c *Compute) bool {
+		return Get(c, r.depth) >= Get(c, policy.HighWater)
 	})
-	r.isEmpty = NewSlot(ctx, func(c *Context) bool { return !r.head.Get().present })
+	r.isEmpty = NewSlot(ctx, func(c *Compute) bool { return !Get(c, r.head).present })
 	return r, nil
 }
 

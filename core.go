@@ -29,10 +29,10 @@
 // Values are lazy by default: dependents are marked dirty on invalidation but
 // only recompute when read. For eager push-style semantics, call Eager on a Computed.
 //
-// A Context is the shared scope: the computation stack used for automatic
-// dependency tracking (cached slot values live on the nodes themselves, not in
-// a shared Context table, so reads stay O(1) regardless of graph size). All
-// reactives that
+// A Context is the shared scope. Dependency tracking is value-threaded through a
+// per-recompute Compute view — there is no ambient recompute stack — and cached
+// slot values live on the nodes themselves, not in a shared Context table, so
+// reads stay O(1) regardless of graph size. All reactives that
 // react to each other must share a Context. Context is not safe for concurrent
 // use by multiple goroutines; use ThreadSafeContext (see thread_safe.go) or the
 // channel-serialized AsyncContext (see async_context.go) for concurrent access.
@@ -123,18 +123,6 @@ func (b *reactiveBase) trackTo(parent reactiveNode) {
 			parent.node().dependencies[b.self] = struct{}{}
 		}
 	}
-}
-
-// track is the ambient compatibility bridge: it attributes a read to whatever
-// node the owning Context currently has on its recompute stack. It survives only
-// for the legacy func(*Context) compute/effect closure surface, which reads its
-// dependencies through zero-argument Get()/Peek() methods and so has no value to
-// thread. The value-threaded Compute surface (Get(c, handle)) never routes
-// through here. Mirrors lazily-rs keeping a narrow thread-local bridge for its
-// Fn(&Self) capability-trait closures while every primary cell path is
-// value-threaded.
-func (b *reactiveBase) track(ctx *Context) {
-	b.trackTo(ctx.current())
 }
 
 // detachUpstream detaches this node from all of its current upstream
@@ -259,16 +247,17 @@ type cacheable interface {
 	node() *reactiveBase
 }
 
-// Context is a reactive scope: the computation stack for automatic dependency
-// tracking plus batch/effect scheduling. Cached slot values are stored on the
-// nodes themselves, not here. All Slots, Cells, and Signals that should react to
-// each other must be created with (and thus share) the same Context.
+// Context is a reactive scope: batch/effect scheduling plus the node registry.
+// Dependency tracking is value-threaded through the per-recompute Compute view
+// (there is no ambient recompute stack); a read attributes to the recomputing
+// node only when it goes through that view (Get(c, handle)). Cached slot values
+// are stored on the nodes themselves, not here. All Slots, Cells, and Signals
+// that should react to each other must be created with (and thus share) the same
+// Context.
 //
 // Context is not safe for concurrent use. Wrap it with ThreadSafeContext for
 // lock-backed concurrency, or drive it from a single goroutine via AsyncContext.
 type Context struct {
-	stack []reactiveNode
-
 	// computeGen is a monotonic counter stamped onto each Compute view minted by
 	// newCompute. It is the generation half of the compute-view fortification
 	// guard (see Compute): a view is dead the moment its recompute returns, and
@@ -344,16 +333,6 @@ func (c *Context) Clear() {
 	}
 	c.cachedCount = 0
 }
-
-func (c *Context) current() reactiveNode {
-	if len(c.stack) == 0 {
-		return nil
-	}
-	return c.stack[len(c.stack)-1]
-}
-
-func (c *Context) push(n reactiveNode) { c.stack = append(c.stack, n) }
-func (c *Context) pop()                { c.stack = c.stack[:len(c.stack)-1] }
 
 // ComputeOps is the compute-time operations subset shared by the two read
 // surfaces (#lzcellkernel). It is the Go analogue of lazily-rs's `ComputeOps`
@@ -592,11 +571,9 @@ func (c *Context) flushEffects() {
 type Computed[T any] struct {
 	reactiveBase
 	ctx *Context
-	// compute is stored in the value-threaded form: it receives the per-recompute
-	// Compute view carrying this node's id. The legacy func(*Context) constructors
-	// wrap their closure in a bridge that pushes the ambient frame for its
-	// duration (so zero-argument Get()/Peek() reads still track), while the
-	// New*C constructors store the closure directly and push no frame.
+	// compute receives the per-recompute Compute view carrying this node's id.
+	// A tracked read inside it — Get(c, handle) — attributes the dependency edge
+	// to this node by value; there is no ambient frame.
 	compute func(cv *Compute) T
 	value   T    // last computed value (valid iff hasValue)
 	cached  bool // whether value is current
@@ -620,44 +597,19 @@ type Computed[T any] struct {
 	Name  string
 }
 
-// bridgeCompute adapts a legacy func(*Context) closure to the internal
-// value-threaded form. It pushes the recomputing node onto the ambient stack for
-// the closure's duration, so the closure's zero-argument Get()/Peek() reads
-// attribute to it through the compatibility bridge (reactiveBase.track).
-func bridgeCompute[T any](fn func(ctx *Context) T) func(cv *Compute) T {
-	return func(cv *Compute) T {
-		cv.ctx.push(cv.node)
-		defer cv.ctx.pop()
-		return fn(cv.ctx)
-	}
-}
-
-// newSlotCompute is the shared constructor: it binds an already-value-threaded
-// compute to ctx.
-func newSlotCompute[T any](ctx *Context, compute func(cv *Compute) T) *Computed[T] {
+// NewSlot creates a lazy slot bound to ctx. Its closure receives the
+// per-recompute Compute view and reads its dependencies via Get(c, handle) — the
+// value-threaded tracking surface (#lzcellkernel). No ambient frame is pushed, so
+// Compute.Untracked() is genuinely untracked.
+func NewSlot[T any](ctx *Context, compute func(c *Compute) T) *Computed[T] {
 	s := &Computed[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}
 	s.self = s
 	ctx.registerSlot(s)
 	return s
 }
 
-// NewSlot creates a lazy slot bound to ctx. The closure reads its dependencies
-// through the ambient bridge (zero-argument Get()); for the value-threaded
-// surface use NewSlotC.
-func NewSlot[T any](ctx *Context, compute func(ctx *Context) T) *Computed[T] {
-	return newSlotCompute(ctx, bridgeCompute(compute))
-}
-
-// NewSlotC creates a lazy slot whose closure receives the per-recompute Compute
-// view and reads via Get(c, handle) — the fortified, value-threaded surface
-// (#lzcellkernel). No ambient frame is pushed, so Compute.Untracked() is
-// genuinely untracked.
-func NewSlotC[T any](ctx *Context, compute func(c *Compute) T) *Computed[T] {
-	return newSlotCompute(ctx, compute)
-}
-
 // NewNamedSlot creates a lazy slot with a debug name.
-func NewNamedSlot[T any](ctx *Context, name string, compute func(ctx *Context) T) *Computed[T] {
+func NewNamedSlot[T any](ctx *Context, name string, compute func(c *Compute) T) *Computed[T] {
 	s := NewSlot(ctx, compute)
 	s.Name = name
 	return s
@@ -669,12 +621,13 @@ func NewNamedSlot[T any](ctx *Context, name string, compute func(ctx *Context) T
 // the checked form; see disposal.go for why a read of a torn-down node is a
 // panic rather than a returned error.
 func (s *Computed[T]) Get() T {
-	return s.getVia(s.ctx.current())
+	return s.getVia(nil)
 }
 
 // getVia is the value-threaded read core: it attributes the read to parent
-// (nil = untracked) rather than to ambient state. Get() bridges to it with the
-// current ambient frame; Get(c, slot) threads c's recomputing node.
+// (nil = untracked) rather than to any ambient state. The zero-argument Get() is
+// an untracked external read (parent nil); Get(c, slot) threads c's recomputing
+// node.
 func (s *Computed[T]) getVia(parent reactiveNode) T {
 	if s.disposed {
 		panic(&DisposedError{Name: s.Name, Kind: "slot"})
@@ -744,11 +697,10 @@ func (s *Computed[T]) markClean() {
 // downstream can be holding a stale value of a slot that never had one.
 func (s *Computed[T]) recomputeNow() bool {
 	s.detachUpstream()
-	// Value-thread the recomputing node into the compute view. No ambient frame
-	// is pushed here: a value-threaded closure reads via Get(c, handle) and needs
-	// none, and a bridged closure pushes its own frame inside bridgeCompute for
-	// exactly its own duration. The view is killed the instant compute returns so
-	// a stored/escaped view fails the fortification guard.
+	// Value-thread the recomputing node into the compute view: the closure reads
+	// via Get(c, handle) and attributes each edge by value. The view is killed the
+	// instant compute returns so a stored/escaped view fails the fortification
+	// guard.
 	cv := s.ctx.newCompute(s.self)
 	v := s.compute(cv)
 	cv.close()
@@ -853,12 +805,13 @@ func NewSourceWithPolicy[T comparable](ctx *Context, initial T, policy MergePoli
 // Panics with a *DisposedError if this cell has been disposed; use TryGet for
 // the checked form.
 func (c *Source[T]) Get() T {
-	return c.getVia(c.ctx.current())
+	return c.getVia(nil)
 }
 
 // getVia is the value-threaded read core (see Computed.getVia): it attributes
-// the read to parent rather than to ambient state, so Get(compute, cell) tracks
-// against the recomputing node by value.
+// the read to parent rather than to any ambient state, so Get(compute, cell)
+// tracks against the recomputing node by value and the zero-argument Get() is an
+// untracked external read.
 func (c *Source[T]) getVia(parent reactiveNode) T {
 	if c.disposed {
 		panic(&DisposedError{Kind: "cell"})
@@ -911,17 +864,8 @@ func (c *Source[T]) onInvalidate() {} // cells hold their value directly
 // primitive (T any, no guard) — the escape hatch that mirrors lazily-rs's slot().
 // The guard is a pull-time check (see Computed.refresh), so it recomputes
 // nothing during invalidation.
-func NewComputed[T comparable](ctx *Context, compute func(ctx *Context) T) *Computed[T] {
+func NewComputed[T comparable](ctx *Context, compute func(c *Compute) T) *Computed[T] {
 	s := NewSlot(ctx, compute)
-	s.equals = func(prev, next T) bool { return prev == next }
-	return s
-}
-
-// NewComputedC is NewComputed on the fortified value-threaded surface: the
-// closure receives the per-recompute Compute view and reads via Get(c, handle)
-// (#lzcellkernel).
-func NewComputedC[T comparable](ctx *Context, compute func(c *Compute) T) *Computed[T] {
-	s := NewSlotC(ctx, compute)
 	s.equals = func(prev, next T) bool { return prev == next }
 	return s
 }
@@ -950,23 +894,14 @@ func NewComputedC[T comparable](ctx *Context, compute func(c *Compute) T) *Compu
 //
 // The engine guards on equality (equal => suppress), so this installs
 // equals = !changed(old, new).
-func NewComputedRippleWhen[T any](ctx *Context, compute func(ctx *Context) T, changed func(old, next T) bool) *Computed[T] {
+func NewComputedRippleWhen[T any](ctx *Context, compute func(c *Compute) T, changed func(old, next T) bool) *Computed[T] {
 	s := NewSlot(ctx, compute)
 	s.equals = func(prev, next T) bool { return !changed(prev, next) }
 	return s
 }
 
-// NewComputedRippleWhenC is NewComputedRippleWhen on the fortified value-threaded
-// surface: the compute closure receives the per-recompute Compute view and reads
-// via Get(c, handle) (#lzcellkernel).
-func NewComputedRippleWhenC[T any](ctx *Context, compute func(c *Compute) T, changed func(old, next T) bool) *Computed[T] {
-	s := NewSlotC(ctx, compute)
-	s.equals = func(prev, next T) bool { return !changed(prev, next) }
-	return s
-}
-
 // NewNamedComputedRippleWhen is NewComputedRippleWhen with a debug name.
-func NewNamedComputedRippleWhen[T any](ctx *Context, name string, compute func(ctx *Context) T, changed func(old, next T) bool) *Computed[T] {
+func NewNamedComputedRippleWhen[T any](ctx *Context, name string, compute func(c *Compute) T, changed func(old, next T) bool) *Computed[T] {
 	s := NewComputedRippleWhen(ctx, compute, changed)
 	s.Name = name
 	return s
@@ -995,7 +930,7 @@ func (s *Computed[T]) Eager() *Computed[T] {
 	s.eager = true
 	// The puller reads s on the value-threaded surface: Get(c, s) attributes the
 	// puller -> s edge by value, pushing no ambient frame (#lzcellkernel).
-	puller := NewEffectC(s.ctx, func(c *Compute) func() {
+	puller := NewEffect(s.ctx, func(c *Compute) func() {
 		Get[T](c, s)
 		return nil
 	})
@@ -1021,9 +956,11 @@ func (s *Computed[T]) Lazy() {
 // IsEager reports whether this Computed is eager (has a live puller).
 func (s *Computed[T]) IsEager() bool { return s.eager }
 
-// EffectRun is a side-effect function that may return a cleanup callback. The
+// EffectRun is a side-effect function that may return a cleanup callback. It
+// receives the per-recompute Compute view and reads its dependencies via
+// Get(c, handle) — the value-threaded tracking surface (#lzcellkernel). The
 // cleanup (if non-nil) is invoked before the next rerun and on Dispose.
-type EffectRun func(ctx *Context) (cleanup func())
+type EffectRun func(c *Compute) (cleanup func())
 
 // Effect is a side-effect observer that reruns whenever a tracked dependency
 // changes. It is the eager-push primitive for side effects (logging, I/O). Any
@@ -1033,9 +970,8 @@ type EffectRun func(ctx *Context) (cleanup func())
 type Effect struct {
 	reactiveBase
 	ctx *Context
-	// run is stored in the value-threaded form (receives the per-recompute
-	// Compute view). NewEffect wraps a legacy EffectRun in the ambient bridge;
-	// NewEffectC stores a func(*Compute) body directly.
+	// run receives the per-recompute Compute view; a tracked read inside it
+	// (Get(c, handle)) attributes the dependency edge to this effect by value.
 	run     func(cv *Compute) (cleanup func())
 	cleanup func()
 	active  bool
@@ -1049,25 +985,10 @@ type Effect struct {
 	forceRun bool
 }
 
-// NewEffect creates and immediately runs a side-effect observer. Its body reads
-// dependencies through the ambient bridge (zero-argument Get()); for the
-// value-threaded surface use NewEffectC.
-func NewEffect(ctx *Context, run EffectRun) *Effect {
-	return newEffectCompute(ctx, func(cv *Compute) func() {
-		cv.ctx.push(cv.node)
-		defer cv.ctx.pop()
-		return run(cv.ctx)
-	})
-}
-
-// NewEffectC creates and immediately runs a side-effect observer whose body
+// NewEffect creates and immediately runs a side-effect observer whose body
 // receives the per-recompute Compute view and tracks via Get(c, handle) — the
 // fortified, value-threaded surface (#lzcellkernel).
-func NewEffectC(ctx *Context, run func(c *Compute) (cleanup func())) *Effect {
-	return newEffectCompute(ctx, run)
-}
-
-func newEffectCompute(ctx *Context, run func(cv *Compute) (cleanup func())) *Effect {
+func NewEffect(ctx *Context, run EffectRun) *Effect {
 	e := &Effect{reactiveBase: newReactiveBase(), ctx: ctx, run: run, active: true}
 	e.self = e
 	e.rerun()
@@ -1106,9 +1027,9 @@ func (e *Effect) rerun() {
 	if prev != nil {
 		prev()
 	}
-	// Value-thread the effect node into the compute view; the bridge body (from
-	// NewEffect) pushes its own ambient frame, a value-threaded body (NewEffectC)
-	// needs none. Kill the view when the body returns so it cannot escape.
+	// Value-thread the effect node into the compute view; the body reads via
+	// Get(c, handle) and attributes each edge by value. Kill the view when the
+	// body returns so it cannot escape.
 	cv := e.ctx.newCompute(e.self)
 	e.cleanup = e.run(cv)
 	cv.close()

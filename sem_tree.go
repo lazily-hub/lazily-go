@@ -110,13 +110,13 @@ func (t *SemTree[V, D]) build(spec TreeNodeSpec[V]) *semNode[V, D] {
 	node.childKeysCell = NewSource[*semChildKeys](t.ctx, &semChildKeys{order: childOrder})
 
 	// Register the memo AFTER childKeysCell is set, so the memo observes it.
-	node.slot = NewComputed[D](t.ctx, func(_ *Context) D {
-		v := node.valueCell.Get()
-		keys := node.childKeysCell.Get()
+	node.slot = NewComputed[D](t.ctx, func(c *Compute) D {
+		v := Get(c, node.valueCell)
+		keys := Get(c, node.childKeysCell)
 		ds := make([]D, 0, len(keys.order))
 		for _, kid := range keys.order {
 			if childSlot, ok := node.childSlots[kid]; ok {
-				ds = append(ds, childSlot.Get())
+				ds = append(ds, Get(c, childSlot))
 			}
 		}
 		return t.fold(v, ds)

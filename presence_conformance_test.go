@@ -82,7 +82,7 @@ func TestPresenceConformance(t *testing.T) {
 		}
 		ctx := NewContext()
 		cell := NewPresenceCell[uint64, string](ctx, fx.Config.TTL)
-		observed := NewSlot(ctx, func(_ *Context) int { _ = cell.Present(); return 0 })
+		observed := NewSlot(ctx, func(c *Compute) int { Get(c, cell.PresentCell()); return 0 })
 		observed.Get() // prime
 
 		for i, step := range fx.Steps {
@@ -118,7 +118,7 @@ func TestPresenceConformance(t *testing.T) {
 		}
 		ctx := NewContext()
 		cell := NewAwarenessCell[uint64, string](ctx, fx.Config.TTL)
-		observed := NewSlot(ctx, func(_ *Context) int { _ = cell.Present(); return 0 })
+		observed := NewSlot(ctx, func(c *Compute) int { Get(c, cell.PresentCell()); return 0 })
 		observed.Get() // prime
 
 		for i, step := range fx.Steps {
@@ -153,7 +153,7 @@ func TestPresenceConformance(t *testing.T) {
 		ctx := NewContext()
 		cell := NewEphemeralCell[string](ctx)
 		vc := cell.ValueCell()
-		observed := NewSlot(ctx, func(_ *Context) Opt[string] { return vc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) Opt[string] { return Get(c, vc) })
 		observed.Get() // prime
 
 		for i, step := range fx.Steps {

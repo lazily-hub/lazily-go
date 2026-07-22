@@ -111,7 +111,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := TumblingCount(ctx, *fx.Config.N, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get() // prime
 		for i, step := range fx.Steps {
 			emitted := w.Push(*step.Op.Value)
@@ -127,7 +127,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := TumblingTime(ctx, *fx.Config.Period, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get()
 		for i, step := range fx.Steps {
 			var emitted Opt[uint64]
@@ -148,7 +148,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := Sliding(ctx, int(*fx.Config.Size), *fx.Config.Slide, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get()
 		for i, step := range fx.Steps {
 			emitted := w.Push(*step.Op.Value)
@@ -164,7 +164,7 @@ func TestWindowingConformance(t *testing.T) {
 		ctx := NewContext()
 		w := Session(ctx, *fx.Config.Gap, Sum[uint64]())
 		oc := w.OutputCell()
-		observed := NewSlot(ctx, func(_ *Context) Opt[uint64] { return oc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get()
 		for i, step := range fx.Steps {
 			var emitted Opt[uint64]

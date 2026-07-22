@@ -81,10 +81,10 @@ func NewWorkQueueCell[T any](ctx *Context, visibilityTimeout int64, maxDeliverie
 		MaxDeliveries:     maxDeliveries,
 		inFlight:          make(map[uint64]WorkQueueDelivery[T]),
 	}
-	q.pendingLen = NewSlot[int](ctx, func(*Context) int { return len(q.pending) })
-	q.isEmpty = NewSlot[bool](ctx, func(*Context) bool { return len(q.pending) == 0 })
-	q.inFlightLen = NewSlot[int](ctx, func(*Context) int { return len(q.inFlight) })
-	q.deadLetterLen = NewSlot[int](ctx, func(*Context) int { return len(q.deadLetters) })
+	q.pendingLen = NewSlot[int](ctx, func(c *Compute) int { return len(q.pending) })
+	q.isEmpty = NewSlot[bool](ctx, func(c *Compute) bool { return len(q.pending) == 0 })
+	q.inFlightLen = NewSlot[int](ctx, func(c *Compute) int { return len(q.inFlight) })
+	q.deadLetterLen = NewSlot[int](ctx, func(c *Compute) int { return len(q.deadLetters) })
 	return q
 }
 

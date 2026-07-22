@@ -7,9 +7,9 @@ func TestSlotLazyRecompute(t *testing.T) {
 	a := NewSource(ctx, 2)
 	b := NewSource(ctx, 3)
 	calls := 0
-	sum := NewSlot(ctx, func(*Context) int {
+	sum := NewSlot(ctx, func(c *Compute) int {
 		calls++
-		return a.Get() + b.Get()
+		return Get(c, a) + Get(c, b)
 	})
 	if got := sum.Get(); got != 5 {
 		t.Fatalf("sum = %d, want 5", got)
@@ -33,8 +33,8 @@ func TestCellPartialEqGuard(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 1)
 	calls := 0
-	NewEffect(ctx, func(*Context) func() {
-		_ = a.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, a)
 		calls++
 		return nil
 	})
@@ -54,8 +54,8 @@ func TestCellPartialEqGuard(t *testing.T) {
 func TestSignalEager(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 2)
-	parity := NewComputed(ctx, func(*Context) string {
-		if a.Get()%2 == 0 {
+	parity := NewComputed(ctx, func(c *Compute) string {
+		if Get(c, a)%2 == 0 {
 			return "even"
 		}
 		return "odd"
@@ -72,15 +72,15 @@ func TestSignalEager(t *testing.T) {
 func TestMemoEqualitySuppression(t *testing.T) {
 	ctx := NewContext()
 	width := NewSource(ctx, 10)
-	parity := NewComputed(ctx, func(*Context) string {
-		if width.Get()%2 == 0 {
+	parity := NewComputed(ctx, func(c *Compute) string {
+		if Get(c, width)%2 == 0 {
 			return "even"
 		}
 		return "odd"
 	})
 	downstream := 0
-	NewEffect(ctx, func(*Context) func() {
-		_ = parity.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, parity)
 		downstream++
 		return nil
 	})
@@ -102,9 +102,9 @@ func TestBatchCoalesces(t *testing.T) {
 	a := NewSource(ctx, 1)
 	b := NewSource(ctx, 1)
 	runs := 0
-	NewEffect(ctx, func(*Context) func() {
-		_ = a.Get()
-		_ = b.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, a)
+		_ = Get(c, b)
 		runs++
 		return nil
 	})

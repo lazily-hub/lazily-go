@@ -97,8 +97,8 @@ func TestRelayReactiveReadersInvalidateEffect(t *testing.T) {
 	r := relayFor(t, ctx, Sum[int](), 4, OverflowConflate)
 	runs := 0
 	lastDepth := uint64(0)
-	NewEffect(ctx, func(c *Context) func() {
-		lastDepth = r.DepthSlot().Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		lastDepth = Get(c, r.DepthSlot())
 		runs++
 		return nil
 	})

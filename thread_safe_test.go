@@ -50,10 +50,10 @@ func TestThreadSafeConcurrentSetCellsConverge(t *testing.T) {
 		for i := range cells {
 			cells[i] = NewSource(ctx, 0)
 		}
-		sum = NewSlot(ctx, func(*Context) int {
+		sum = NewSlot(ctx, func(cv *Compute) int {
 			total := 0
 			for _, c := range cells {
-				total += c.Get()
+				total += Get(cv, c)
 			}
 			return total
 		})
@@ -87,9 +87,9 @@ func TestThreadSafeBatchCoalesces(t *testing.T) {
 	tsc.WithLock(func(ctx *Context) {
 		a = NewSource(ctx, 1)
 		b = NewSource(ctx, 2)
-		NewEffect(ctx, func(*Context) func() {
-			_ = a.Get()
-			_ = b.Get()
+		NewEffect(ctx, func(c *Compute) func() {
+			_ = Get(c, a)
+			_ = Get(c, b)
 			runs++
 			return nil
 		})
@@ -114,8 +114,8 @@ func TestThreadSafeSingleWriteEqualsCellSet(t *testing.T) {
 	runs := 0
 	tsc.WithLock(func(ctx *Context) {
 		a = NewSource(ctx, 1)
-		NewEffect(ctx, func(*Context) func() {
-			_ = a.Get()
+		NewEffect(ctx, func(c *Compute) func() {
+			_ = Get(c, a)
 			runs++
 			return nil
 		})

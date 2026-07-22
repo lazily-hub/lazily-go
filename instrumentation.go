@@ -71,15 +71,15 @@ func RunBenchmarkSuite(iterations int) []BenchmarkResult {
 			ctx := NewContext()
 			a := NewSource[int](ctx, 1)
 			b := NewSource[int](ctx, 2)
-			sum := NewSlot[int](ctx, func(_ *Context) int { return a.Get() + b.Get() })
+			sum := NewSlot[int](ctx, func(c *Compute) int { return Get(c, a) + Get(c, b) })
 			a.Set(10)
 			sum.Get()
 		}, iterations),
 		Benchmark("Memo equality guard (cache hit)", func() {
 			ctx := NewContext()
 			src := NewSource[int](ctx, 4)
-			parity := NewComputed[string](ctx, func(_ *Context) string {
-				if src.Get()%2 == 0 {
+			parity := NewComputed[string](ctx, func(c *Compute) string {
+				if Get(c, src)%2 == 0 {
 					return "even"
 				}
 				return "odd"
@@ -93,9 +93,9 @@ func RunBenchmarkSuite(iterations int) []BenchmarkResult {
 			for i := 0; i < 10; i++ {
 				cells[i] = NewSource[int](ctx, i)
 			}
-			NewEffect(ctx, func(_ *Context) func() {
+			NewEffect(ctx, func(cv *Compute) func() {
 				for _, c := range cells {
-					c.Get()
+					Get(cv, c)
 				}
 				return nil
 			})

@@ -13,8 +13,8 @@ import (
 func TestDisposeDirtiesSurvivingCone(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
-	mid := NewSlot(ctx, func(*Context) int { return src.Get() + 1 })
-	sink := NewSlot(ctx, func(*Context) int { return mid.Get() * 10 })
+	mid := NewSlot(ctx, func(c *Compute) int { return Get(c, src) + 1 })
+	sink := NewSlot(ctx, func(c *Compute) int { return Get(c, mid) * 10 })
 
 	if got := sink.Get(); got != 20 {
 		t.Fatalf("sink = %d, want 20", got)
@@ -31,15 +31,15 @@ func TestDisposeDirtiesSurvivingCone(t *testing.T) {
 func TestDisposeDoesNotRunEffectsReachedByTeardown(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
-	derived := NewSlot(ctx, func(*Context) int { return src.Get() + 1 })
+	derived := NewSlot(ctx, func(c *Compute) int { return Get(c, src) + 1 })
 
 	runs := 0
-	NewEffect(ctx, func(*Context) func() {
+	NewEffect(ctx, func(c *Compute) func() {
 		runs++
 		// Guarded: after `derived` is disposed this read would panic, which is
 		// exactly why teardown must not schedule the effect at all.
 		if runs == 1 {
-			derived.Get()
+			Get(c, derived)
 		}
 		return nil
 	})
@@ -57,7 +57,7 @@ func TestDisposeDoesNotRunEffectsReachedByTeardown(t *testing.T) {
 func TestDisposeIsIdempotentAndDetachesBothDirections(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 2)
-	derived := NewSlot(ctx, func(*Context) int { return src.Get() })
+	derived := NewSlot(ctx, func(c *Compute) int { return Get(c, src) })
 	_ = derived.Get()
 
 	if got := ctx.DependentCount(src); got != 1 {
@@ -105,12 +105,12 @@ func TestDisposedCellReadsAsAnError(t *testing.T) {
 func TestMemoDisposalDefersItsEqualityRecompute(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
-	upstream := NewSlot(ctx, func(*Context) int { return src.Get() })
+	upstream := NewSlot(ctx, func(c *Compute) int { return Get(c, src) })
 
 	computes := 0
-	m := NewComputed(ctx, func(*Context) int {
+	m := NewComputed(ctx, func(c *Compute) int {
 		computes++
-		return upstream.Get() * 2
+		return Get(c, upstream) * 2
 	})
 	if got := m.Get(); got != 2 {
 		t.Fatalf("memo = %d, want 2", got)
@@ -128,7 +128,7 @@ func TestMemoDisposalDefersItsEqualityRecompute(t *testing.T) {
 		t.Fatalf("memo.TryGet err = %v, want ErrDisposed", err)
 	}
 
-	m2 := NewComputed(ctx, func(*Context) int { return 1 })
+	m2 := NewComputed(ctx, func(c *Compute) int { return 1 })
 	_ = m2.Get()
 	m2.DisposeNode()
 	if !ctx.IsDisposed(m2) {
@@ -139,8 +139,8 @@ func TestMemoDisposalDefersItsEqualityRecompute(t *testing.T) {
 func TestSignalDisposalDefersItsEagerPull(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
-	upstream := NewSlot(ctx, func(*Context) int { return src.Get() })
-	sig := NewComputed(ctx, func(*Context) int { return upstream.Get() + 100 }).Eager()
+	upstream := NewSlot(ctx, func(c *Compute) int { return Get(c, src) })
+	sig := NewComputed(ctx, func(c *Compute) int { return Get(c, upstream) + 100 }).Eager()
 
 	if got := sig.Get(); got != 101 {
 		t.Fatalf("signal = %d, want 101", got)
@@ -155,7 +155,7 @@ func TestSignalDisposalDefersItsEagerPull(t *testing.T) {
 
 	// Undrive removes the eager puller but leaves the node in the graph (the
 	// former dispose_signal); Dispose is the full graph teardown.
-	other := NewComputed(ctx, func(*Context) int { return 5 }).Eager()
+	other := NewComputed(ctx, func(c *Compute) int { return 5 }).Eager()
 	other.Lazy()
 	if other.IsEager() {
 		t.Fatal("Lazy() should deactivate the eager puller")
@@ -175,10 +175,10 @@ func TestScopeClosesInReverseCreationOrder(t *testing.T) {
 
 	var cleanups []string
 	scope := ctx.Scope()
-	a := Own(scope, NewSlot(ctx, func(*Context) int { return src.Get() + 1 }))
-	b := Own(scope, NewSlot(ctx, func(*Context) int { return a.Get() + 2 }))
-	Own(scope, NewEffect(ctx, func(*Context) func() {
-		b.Get()
+	a := Own(scope, NewSlot(ctx, func(c *Compute) int { return Get(c, src) + 1 }))
+	b := Own(scope, NewSlot(ctx, func(c *Compute) int { return Get(c, a) + 2 }))
+	Own(scope, NewEffect(ctx, func(c *Compute) func() {
+		Get(c, b)
 		return func() { cleanups = append(cleanups, "watch_b") }
 	}))
 	if scope.Len() != 3 {
@@ -204,7 +204,7 @@ func TestDisarmedScopeDisposesNothing(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
 	scope := ctx.Scope()
-	escaped := Own(scope, NewSlot(ctx, func(*Context) int { return src.Get() + 5 }))
+	escaped := Own(scope, NewSlot(ctx, func(c *Compute) int { return Get(c, src) + 5 }))
 	_ = escaped.Get()
 
 	scope.Disarm()
@@ -237,7 +237,7 @@ func TestWithScopeClosesOnPanic(t *testing.T) {
 	func() {
 		defer func() { _ = recover() }()
 		ctx.WithScope(func(sc *TeardownScope) {
-			s = Own(sc, NewSlot(ctx, func(*Context) int { return 1 }))
+			s = Own(sc, NewSlot(ctx, func(c *Compute) int { return 1 }))
 			panic("boom")
 		})
 	}()
@@ -257,7 +257,7 @@ func TestChurnReturnsToRegistryBaseline(t *testing.T) {
 
 	baseline := len(ctx.slots)
 	for i := 0; i < 500; i++ {
-		s := NewSlot(ctx, func(*Context) int { return src.Get() })
+		s := NewSlot(ctx, func(c *Compute) int { return Get(c, src) })
 		_ = s.Get()
 		s.Dispose()
 	}

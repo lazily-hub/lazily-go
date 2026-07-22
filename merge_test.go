@@ -121,8 +121,8 @@ func TestIdempotentMergeNoOpsViaGuard(t *testing.T) {
 	ctx := NewContext()
 	mc := NewSourceWithPolicy(ctx, 10, Max[int]())
 	runs := 0
-	NewEffect(ctx, func(ctx *Context) func() {
-		mc.Get()
+	NewEffect(ctx, func(ctx *Compute) func() {
+		Get(ctx, mc)
 		runs++
 		return nil
 	})
@@ -190,8 +190,8 @@ func TestMergeCellAlgebraFixture(t *testing.T) {
 		ctx := NewContext()
 		mc := NewSourceWithPolicy(ctx, sc.Initial, p)
 		runs := 0
-		NewEffect(ctx, func(ctx *Context) func() {
-			mc.Get()
+		NewEffect(ctx, func(ctx *Compute) func() {
+			Get(ctx, mc)
 			runs++
 			return nil
 		})

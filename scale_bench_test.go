@@ -71,7 +71,7 @@ func buildScaleGraph(n int) scaleGraph {
 			prev = 0
 		}
 		b := inputs[prev]
-		formulas[i] = NewSlot(ctx, func(*Context) int64 { return a.Get() + b.Get() })
+		formulas[i] = NewSlot(ctx, func(c *Compute) int64 { return Get(c, a) + Get(c, b) })
 	}
 	return scaleGraph{ctx: ctx, inputs: inputs, formulas: formulas}
 }

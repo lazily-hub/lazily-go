@@ -154,13 +154,13 @@ func runCellMapStepsFixture(t *testing.T, name string) {
 		valueReaders := map[string]*Computed[int]{}
 		for _, k := range m.Keys() {
 			key := k
-			slot := NewSlot(ctx, func(*Context) int { v, _ := m.Read(key); return v })
+			slot := NewSlot(ctx, func(c *Compute) int { return Get(c, m.Cell(key)) })
 			slot.Get() // prime
 			valueReaders[key] = slot
 		}
-		membershipReader := NewSlot(ctx, func(*Context) int { return m.Len() })
+		membershipReader := NewSlot(ctx, func(c *Compute) int { Get(c, m.membership); return 0 })
 		membershipReader.Get()
-		orderReader := NewSlot(ctx, func(*Context) []string { return m.Keys() })
+		orderReader := NewSlot(ctx, func(c *Compute) int { Get(c, m.orderSignal); return 0 })
 		orderReader.Get()
 
 		// Snapshot handles for stability assertions.
@@ -349,7 +349,7 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 	readers := map[string]*Computed[int]{}
 	for _, k := range stableKeys {
 		key := k
-		slot := NewSlot(ctx, func(*Context) int { v, _ := m.Read(key); return v })
+		slot := NewSlot(ctx, func(c *Compute) int { v, _ := m.Read(key); return v })
 		slot.Get()
 		readers[key] = slot
 	}
@@ -447,9 +447,9 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 			var downstream *Computed[int]
 			if _, checked := after["downstream_consumer_reran"]; checked {
 				root := tree.RootHandle()
-				downstream = NewSlot(ctx, func(*Context) int {
+				downstream = NewSlot(ctx, func(c *Compute) int {
 					downstreamRuns++
-					return root.Get()
+					return Get(c, root)
 				})
 				downstream.Get() // prime
 			}

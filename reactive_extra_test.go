@@ -14,8 +14,8 @@ func TestReactiveEffectRerunsOnDependencyChange(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 1)
 	var log []int
-	NewEffect(ctx, func(*Context) func() {
-		log = append(log, a.Get())
+	NewEffect(ctx, func(c *Compute) func() {
+		log = append(log, Get(c, a))
 		return nil
 	})
 	if got := log; len(got) != 1 || got[0] != 1 {
@@ -32,8 +32,8 @@ func TestReactiveEffectCleanupBeforeRerunAndOnDispose(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 0)
 	var cleanups []int
-	effect := NewEffect(ctx, func(*Context) func() {
-		seen := a.Get()
+	effect := NewEffect(ctx, func(c *Compute) func() {
+		seen := Get(c, a)
 		return func() { cleanups = append(cleanups, seen) }
 	})
 	a.Set(1)
@@ -57,8 +57,8 @@ func TestReactiveEffectIgnoresUnrelatedCell(t *testing.T) {
 	tracked := NewSource(ctx, 10)
 	untracked := NewSource(ctx, 100)
 	runs := 0
-	NewEffect(ctx, func(*Context) func() {
-		_ = tracked.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, tracked)
 		runs++
 		return nil
 	})
@@ -78,8 +78,8 @@ func TestReactiveEffectIgnoresUnrelatedCell(t *testing.T) {
 func TestReactiveEffectIsActiveAfterDispose(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 0)
-	effect := NewEffect(ctx, func(*Context) func() {
-		_ = a.Get()
+	effect := NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, a)
 		return nil
 	})
 	if !effect.IsActive() {
@@ -99,7 +99,7 @@ func TestReactiveMemoReturnsCachedValue(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 2)
 	b := NewSource(ctx, 3)
-	sum := NewComputed(ctx, func(*Context) int { return a.Get() + b.Get() })
+	sum := NewComputed(ctx, func(c *Compute) int { return Get(c, a) + Get(c, b) })
 	if got := sum.Get(); got != 5 {
 		t.Fatalf("sum = %d, want 5", got)
 	}
@@ -112,8 +112,8 @@ func TestReactiveMemoReturnsCachedValue(t *testing.T) {
 func TestReactiveMemoChainCascades(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
-	doubled := NewComputed(ctx, func(*Context) int { return src.Get() * 2 })
-	quadrupled := NewComputed(ctx, func(*Context) int { return doubled.Get() * 2 })
+	doubled := NewComputed(ctx, func(c *Compute) int { return Get(c, src) * 2 })
+	quadrupled := NewComputed(ctx, func(c *Compute) int { return Get(c, doubled) * 2 })
 	if got := quadrupled.Get(); got != 4 {
 		t.Fatalf("quadrupled = %d, want 4", got)
 	}
@@ -129,8 +129,8 @@ func TestReactiveNestedBatchDefersToOutermost(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 0)
 	runs := 0
-	NewEffect(ctx, func(*Context) func() {
-		_ = a.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, a)
 		runs++
 		return nil
 	})
@@ -167,8 +167,8 @@ func TestReactiveNoOpBatchNoSpuriousEffect(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 1)
 	runs := 0
-	NewEffect(ctx, func(*Context) func() {
-		_ = a.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, a)
 		runs++
 		return nil
 	})
@@ -185,8 +185,8 @@ func TestReactiveEqualWriteInsideBatchAbsorbed(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 5)
 	runs := 0
-	NewEffect(ctx, func(*Context) func() {
-		_ = a.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		_ = Get(c, a)
 		runs++
 		return nil
 	})
@@ -211,14 +211,14 @@ func TestReactiveEqualSetPreservesGraph(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 2)
 	slotFires := 0
-	dependent := NewSlot(ctx, func(*Context) int {
+	dependent := NewSlot(ctx, func(c *Compute) int {
 		slotFires++
-		return a.Get()
+		return Get(c, a)
 	})
 	effectFires := 0
-	NewEffect(ctx, func(*Context) func() {
+	NewEffect(ctx, func(c *Compute) func() {
 		effectFires++
-		a.Get()
+		Get(c, a)
 		return nil
 	})
 
@@ -245,8 +245,8 @@ func TestReactiveEqualSetPreservesGraph(t *testing.T) {
 func TestReactiveDifferentSetInvalidatesDependents(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 1)
-	lazy := NewSlot(ctx, func(*Context) int { return a.Get() + 1 })
-	eager := NewComputed(ctx, func(*Context) int { return a.Get() * 10 }).Eager()
+	lazy := NewSlot(ctx, func(c *Compute) int { return Get(c, a) + 1 })
+	eager := NewComputed(ctx, func(c *Compute) int { return Get(c, a) * 10 }).Eager()
 	if got := lazy.Get(); got != 2 {
 		t.Fatalf("lazy = %d, want 2", got)
 	}
@@ -273,14 +273,14 @@ func TestReactiveDifferentSetInvalidatesDependents(t *testing.T) {
 func TestReactiveSignalEqualRecomputePreservesDependents(t *testing.T) {
 	ctx := NewContext()
 	toggle := NewSource(ctx, "x")
-	stable := NewComputed(ctx, func(*Context) int {
-		_ = toggle.Get() // register the edge; output is constant
+	stable := NewComputed(ctx, func(c *Compute) int {
+		_ = Get(c, toggle) // register the edge; output is constant
 		return 42
 	}).Eager()
 	downstreamFires := 0
-	downstream := NewSlot(ctx, func(*Context) int {
+	downstream := NewSlot(ctx, func(c *Compute) int {
 		downstreamFires++
-		return stable.Get()
+		return Get(c, stable)
 	})
 	if got := downstream.Get(); got != 42 {
 		t.Fatalf("downstream = %d, want 42", got)
@@ -305,8 +305,8 @@ func TestReactiveSignalEqualRecomputePreservesDependents(t *testing.T) {
 func TestReactiveSignalDifferentRecomputeInvalidatesDependents(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
-	sig := NewComputed(ctx, func(*Context) int { return src.Get() * 2 }).Eager()
-	lazyChild := NewSlot(ctx, func(*Context) int { return sig.Get() + 1 })
+	sig := NewComputed(ctx, func(c *Compute) int { return Get(c, src) * 2 }).Eager()
+	lazyChild := NewSlot(ctx, func(c *Compute) int { return Get(c, sig) + 1 })
 	if got := lazyChild.Get(); got != 3 {
 		t.Fatalf("lazyChild = %d, want 3", got)
 	}
@@ -325,7 +325,7 @@ func TestReactiveSignalDifferentRecomputeInvalidatesDependents(t *testing.T) {
 func TestReactiveSignalMaterializedAfterRecompute(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 1)
-	sig := NewComputed(ctx, func(*Context) int { return a.Get() + 100 }).Eager()
+	sig := NewComputed(ctx, func(c *Compute) int { return Get(c, a) + 100 }).Eager()
 	if got := sig.Get(); got != 101 {
 		t.Fatalf("sig = %d, want 101", got)
 	}
@@ -347,12 +347,12 @@ func TestReactiveSignalMaterializedAfterRecompute(t *testing.T) {
 func TestReactiveDiamondDependencySingleRerun(t *testing.T) {
 	ctx := NewContext()
 	src := NewSource(ctx, 1)
-	left := NewComputed(ctx, func(*Context) int { return src.Get() + 1 })
-	right := NewComputed(ctx, func(*Context) int { return src.Get() * 2 })
+	left := NewComputed(ctx, func(c *Compute) int { return Get(c, src) + 1 })
+	right := NewComputed(ctx, func(c *Compute) int { return Get(c, src) * 2 })
 	runs := 0
 	var lastSum int
-	NewEffect(ctx, func(*Context) func() {
-		lastSum = left.Get() + right.Get()
+	NewEffect(ctx, func(c *Compute) func() {
+		lastSum = Get(c, left) + Get(c, right)
 		runs++
 		return nil
 	})
@@ -373,7 +373,7 @@ func TestReactiveDiamondDependencySingleRerun(t *testing.T) {
 func TestReactiveSignalDisposeRevertsToLazy(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 2)
-	sig := NewComputed(ctx, func(*Context) int { return a.Get() * 5 }).Eager()
+	sig := NewComputed(ctx, func(c *Compute) int { return Get(c, a) * 5 }).Eager()
 	if got := sig.Get(); got != 10 {
 		t.Fatalf("sig = %d, want 10", got)
 	}
@@ -437,8 +437,8 @@ func TestReactiveStateMachineDrivesReactiveGraph(t *testing.T) {
 	})
 	runs := 0
 	var last int
-	NewEffect(ctx, func(*Context) func() {
-		last = m.State()
+	NewEffect(ctx, func(c *Compute) func() {
+		last = Get(c, m.Cell())
 		runs++
 		return nil
 	})

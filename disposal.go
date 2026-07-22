@@ -33,7 +33,7 @@
 //
 // # Why reads of a disposed node panic
 //
-// A compute closure has signature `func(*Context) T`. There is no error channel
+// A compute closure has signature `func(*Compute) T`. There is no error channel
 // through it, so a nested read of a disposed dependency cannot be reported by a
 // return value without changing every user compute's signature. Panic/recover
 // is the only mechanism that crosses an arbitrary closure, and it matches the
@@ -201,18 +201,17 @@ func (c *Context) teardown(n reactiveNode) {
 // this slot — or any node it reads while recomputing — has been disposed.
 //
 // This is the boundary form: use it where a read may race a teardown. It
-// recovers the panic and restores the context's tracking stack to the depth it
-// had on entry, so a read that unwinds out of a half-finished compute cannot
-// strand a frame and corrupt every later read.
+// recovers the *DisposedError panic and returns it. Dependency tracking is
+// value-threaded through a per-recompute Compute view (there is no ambient stack
+// to unwind), so a read that panics out of a half-finished compute strands no
+// frame; the superseded view is simply discarded.
 func (s *Computed[T]) TryGet() (v T, err error) {
-	depth := len(s.ctx.stack)
 	defer func() {
 		if r := recover(); r != nil {
 			de, ok := r.(*DisposedError)
 			if !ok {
 				panic(r)
 			}
-			s.ctx.stack = s.ctx.stack[:depth]
 			var zero T
 			v, err = zero, de
 		}

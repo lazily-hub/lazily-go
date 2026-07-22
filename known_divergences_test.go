@@ -137,7 +137,7 @@ func TestTargetPullTimeMemoGuard(t *testing.T) {
 		ctx := NewContext()
 		src := NewSource(ctx, 1)
 		n := 0
-		m := NewComputed(ctx, func(*Context) int { n++; return src.Get() % 2 })
+		m := NewComputed(ctx, func(c *Compute) int { n++; return Get(c, src) % 2 })
 		_ = m.Get()
 		if n != 1 {
 			t.Fatalf("setup: computes = %d, want 1", n)
@@ -160,9 +160,9 @@ func TestTargetPullTimeMemoGuard(t *testing.T) {
 	t.Run("suppression survives and no write is lost at depth two", func(t *testing.T) {
 		ctx := NewContext()
 		src := NewSource(ctx, 2)
-		m := NewComputed(ctx, func(*Context) int { return src.Get() % 2 }) // 0 for evens
+		m := NewComputed(ctx, func(c *Compute) int { return Get(c, src) % 2 }) // 0 for evens
 		downstreamFires := 0
-		d := NewSlot(ctx, func(*Context) int { downstreamFires++; return m.Get() + 10 })
+		d := NewSlot(ctx, func(c *Compute) int { downstreamFires++; return Get(c, m) + 10 })
 		if got := d.Get(); got != 10 {
 			t.Fatalf("setup: d = %d, want 10", got)
 		}

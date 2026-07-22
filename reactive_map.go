@@ -350,7 +350,7 @@ func NewSlotMap[K comparable, V comparable](ctx *Context) *SlotMap[K, V] {
 		ctx,
 		EntryKindSlot,
 		func(ctx *Context, compute func() V) *Computed[V] {
-			return NewSlot(ctx, func(*Context) V { return compute() })
+			return NewSlot(ctx, func(c *Compute) V { return compute() })
 		},
 		func(h *Computed[V]) V { return h.Get() },
 		func(h *Computed[V]) { h.invalidate() },

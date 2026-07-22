@@ -89,7 +89,7 @@ func TestResilienceConformance(t *testing.T) {
 		ctx := NewContext()
 		cb := NewCircuitBreakerCell(ctx, cfg.Window, cfg.FailureThreshold, cfg.ResetTimeout)
 		sc := cb.StateCell()
-		observed := NewSlot(ctx, func(_ *Context) BreakerState { return sc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) BreakerState { return Get(c, sc) })
 		observed.Get()
 
 		for i, step := range fx.Steps {
@@ -130,7 +130,7 @@ func TestResilienceConformance(t *testing.T) {
 		ctx := NewContext()
 		r := NewRetryPolicyCell(ctx, cfg.Base, cfg.Cap)
 		dc := r.DelayCell()
-		observed := NewSlot(ctx, func(_ *Context) uint64 { return dc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) uint64 { return Get(c, dc) })
 		observed.Get()
 
 		for i, step := range fx.Steps {
@@ -166,7 +166,7 @@ func TestResilienceConformance(t *testing.T) {
 		ctx := NewContext()
 		b := NewBulkheadCell(ctx, cfg.Capacity)
 		uc := b.PermitsInUseCell()
-		observed := NewSlot(ctx, func(_ *Context) uint64 { return uc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) uint64 { return Get(c, uc) })
 		observed.Get()
 
 		for i, step := range fx.Steps {
@@ -200,7 +200,7 @@ func TestResilienceConformance(t *testing.T) {
 		ctx := NewContext()
 		to := NewTimeoutCell(ctx)
 		tc := to.IsTimedOutCell()
-		observed := NewSlot(ctx, func(_ *Context) bool { return tc.Get() })
+		observed := NewSlot(ctx, func(c *Compute) bool { return Get(c, tc) })
 		observed.Get()
 
 		for i, step := range fx.Steps {

@@ -23,7 +23,7 @@ func TestTrackedReadRegistersEdgeAgainstRecomputingNode(t *testing.T) {
 	a := NewSource(ctx, 1)
 
 	calls := 0
-	b := NewComputedC(ctx, func(c *Compute) int {
+	b := NewComputed(ctx, func(c *Compute) int {
 		calls++
 		// Tracked read: the edge must attribute to b, the node being recomputed —
 		// not to any ambient frame.
@@ -60,7 +60,7 @@ func TestUntrackedReadRegistersNoEdgeAndDoesNotRecompute(t *testing.T) {
 	a := NewSource(ctx, 1)
 
 	calls := 0
-	d := NewComputedC(ctx, func(c *Compute) int {
+	d := NewComputed(ctx, func(c *Compute) int {
 		calls++
 		// The explicit untracked escape: read a through the owning Context
 		// (c.Untracked()), which forms no dependency edge.
@@ -97,7 +97,7 @@ func TestEffectTracksThroughItsComputeView(t *testing.T) {
 	a := NewSource(ctx, 1)
 
 	runs := 0
-	watch := NewEffectC(ctx, func(c *Compute) func() {
+	watch := NewEffect(ctx, func(c *Compute) func() {
 		runs++
 		_ = Get[int](c, a)
 		return nil
@@ -127,7 +127,7 @@ func TestStaleComputeViewPanics(t *testing.T) {
 	a := NewSource(ctx, 1)
 
 	var escaped *Compute
-	b := NewComputedC(ctx, func(c *Compute) int {
+	b := NewComputed(ctx, func(c *Compute) int {
 		escaped = c // smuggle the view out of its recompute
 		return Get[int](c, a)
 	})
@@ -146,23 +146,22 @@ func TestStaleComputeViewPanics(t *testing.T) {
 	Get[int](escaped, a)
 }
 
-// TestComputeUntrackedIsTheOwningContext pins that the untracked escape is the
-// owning Context itself (idempotent), so both surfaces satisfy ComputeOps and a
-// bridged (func(*Context)) reader and a value-threaded (func(*Compute)) reader
-// can coexist over the same graph.
+// TestComputeViewAndContextBothSatisfyComputeOps pins that value-threaded readers
+// over the same cell each form a real edge through the Compute surface — the sole
+// tracking surface now that the ambient bridge is gone.
 func TestComputeViewAndContextBothSatisfyComputeOps(t *testing.T) {
 	ctx := NewContext()
 	a := NewSource(ctx, 3)
 
-	// A value-threaded reader and a legacy bridged reader over the same cell.
-	viaCompute := NewComputedC(ctx, func(c *Compute) int { return Get[int](c, a) + 1 })
-	viaBridge := NewComputed(ctx, func(*Context) int { return a.Get() + 100 })
+	// Two independent value-threaded readers over the same cell.
+	viaCompute := NewComputed(ctx, func(c *Compute) int { return Get[int](c, a) + 1 })
+	viaCompute2 := NewComputed(ctx, func(c *Compute) int { return Get(c, a) + 100 })
 
 	if got := viaCompute.Get(); got != 4 {
 		t.Fatalf("viaCompute = %d, want 4", got)
 	}
-	if got := viaBridge.Get(); got != 103 {
-		t.Fatalf("viaBridge = %d, want 103", got)
+	if got := viaCompute2.Get(); got != 103 {
+		t.Fatalf("viaCompute2 = %d, want 103", got)
 	}
 
 	// Both formed a real edge to a; a change recomputes both.
@@ -173,8 +172,8 @@ func TestComputeViewAndContextBothSatisfyComputeOps(t *testing.T) {
 	if got := viaCompute.Get(); got != 11 {
 		t.Fatalf("viaCompute = %d, want 11", got)
 	}
-	if got := viaBridge.Get(); got != 110 {
-		t.Fatalf("viaBridge = %d, want 110", got)
+	if got := viaCompute2.Get(); got != 110 {
+		t.Fatalf("viaCompute2 = %d, want 110", got)
 	}
 
 	// ComputeOps is satisfied by both concrete surfaces.
