@@ -722,6 +722,43 @@ func NewComputed[T comparable](ctx *Context, compute func(ctx *Context) T) *Comp
 	return s
 }
 
+// NewComputedRippleWhen creates a guarded Computed cell with an explicit change
+// predicate (#lzcellkernel). Like NewComputed, but downstream propagation is
+// gated by changed(old, new) instead of the value's natural == : changed returns
+// true to PROPAGATE (ripple) the recompute to dependents, and false to SUPPRESS
+// it (treat it as "no meaningful change"). So NewComputed(f) is exactly
+// NewComputedRippleWhen(f, func(o, n T) bool { return o != n }), and an unguarded
+// NewSlot(f) is NewComputedRippleWhen(f, func(_, _ T) bool { return true })
+// (always propagate).
+//
+// Because the predicate is supplied, T carries no comparable bound: this is the
+// guarded escape for non-comparable derived values — e.g. a []string / map
+// computed guarded via func(o, n []string) bool { return !slices.Equal(o, n) }.
+// It also serves a custom significance policy: dedup a large value by a
+// version/hash field, epsilon float compare, hysteresis, a monotonic gate, or
+// "propagate every N" when the counter lives in the value.
+//
+// The value is ALWAYS computed (the predicate needs new); changed gates only the
+// downstream cascade, not the computation. changed MUST be a pure function of
+// (old, new) — reading value-carried state (version/counter/sequence) is fine and
+// stays deterministic; capturing external mutable state is not (it keys off
+// recompute/read frequency under laziness and breaks determinism).
+//
+// The engine guards on equality (equal => suppress), so this installs
+// equals = !changed(old, new).
+func NewComputedRippleWhen[T any](ctx *Context, compute func(ctx *Context) T, changed func(old, next T) bool) *Computed[T] {
+	s := NewSlot(ctx, compute)
+	s.equals = func(prev, next T) bool { return !changed(prev, next) }
+	return s
+}
+
+// NewNamedComputedRippleWhen is NewComputedRippleWhen with a debug name.
+func NewNamedComputedRippleWhen[T any](ctx *Context, name string, compute func(ctx *Context) T, changed func(old, next T) bool) *Computed[T] {
+	s := NewComputedRippleWhen(ctx, compute, changed)
+	s.Name = name
+	return s
+}
+
 // Eager makes this Computed eager and returns the same handle (design §9.3.1).
 //
 // Eager is a state a Computed is in, not a separate kind: Eager attaches a puller

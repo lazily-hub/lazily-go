@@ -235,6 +235,20 @@ func NewAsyncMemo[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) 
 	return h
 }
 
+// NewAsyncComputedRippleWhen is the async mirror of NewComputedRippleWhen
+// (#lzcellkernel): a guarded async computed whose downstream propagation is gated
+// by an explicit, PURE predicate changed(old, next) — true propagates the
+// recompute to dependents, false suppresses it. It installs the engine's equality
+// guard as its negation (equal => suppress), so NewAsyncMemo(f, eq) and
+// NewAsyncComputedRippleWhen(f, func(o, n) bool { return !eq(o, n) }) are the same.
+// changed MUST be pure in (old, next); value-carried state is fine, external
+// mutable state is not.
+func NewAsyncComputedRippleWhen[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) (T, error), changed func(old, next T) bool) *AsyncSlotHandle[T] {
+	h := NewAsyncSlot(c, compute)
+	h.node.eq = func(a, b any) bool { return !changed(a.(T), b.(T)) }
+	return h
+}
+
 // State reports the current state-machine state.
 func (s *AsyncSlotHandle[T]) State() AsyncSlotState {
 	var st AsyncSlotState
