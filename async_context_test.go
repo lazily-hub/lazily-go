@@ -71,8 +71,12 @@ func TestAsyncComputingErrorAndRetry(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
 	boom := errors.New("boom")
+	var calls int32
 	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return 0, boom
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return 0, boom
+		}
+		return 7, nil
 	})
 	if _, err := slot.GetAsync(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("GetAsync err = %v, want boom", err)
@@ -80,15 +84,47 @@ func TestAsyncComputingErrorAndRetry(t *testing.T) {
 	if got := slot.State(); got != AsyncSlotError {
 		t.Fatalf("state = %q, want error", got)
 	}
-	// An errored slot returns its cached error on re-read (mirrors Dart
-	// getAsync, which throws _error in the error state — no auto-retry).
-	if _, err := slot.GetAsync(context.Background()); !errors.Is(err, boom) {
-		t.Fatalf("re-read err = %v, want cached boom", err)
+	// Error -> Computing: a slot in Error holds no cached result, so the next
+	// read re-spawns rather than replaying the stored error. Without this a
+	// transient failure is permanent for the slot's lifetime and no read path
+	// can recover it (docs/async.md § Async slot state machine;
+	// LazilyFormal.AsyncSlotState SlotEvent.retry).
+	if v, err := slot.GetAsync(context.Background()); err != nil || v != 7 {
+		t.Fatalf("retry GetAsync = (%d, %v), want (7, nil)", v, err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 2 {
+		t.Fatalf("compute calls = %d, want 2 (the retry must re-run the body)", got)
+	}
+	if got := slot.State(); got != AsyncSlotResolved {
+		t.Fatalf("state after retry = %q, want resolved", got)
 	}
 	// The runtime keeps running after a failing slot: a fresh slot resolves.
 	ok := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) { return 42, nil })
 	if v, err := ok.GetAsync(context.Background()); err != nil || v != 42 {
 		t.Fatalf("fresh slot GetAsync = (%d, %v), want (42, nil)", v, err)
+	}
+}
+
+// A slot whose compute keeps failing keeps re-spawning: the error is delivered
+// to each caller, never cached and replayed. This is the half of the retry
+// contract that a sticky-error binding also gets "right" by accident, so it is
+// asserted on the compute counter, not just the returned error.
+func TestAsyncErrorRetriesEveryRead(t *testing.T) {
+	ctx := NewAsyncContext()
+	defer ctx.Close()
+	boom := errors.New("boom")
+	var calls int32
+	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+		atomic.AddInt32(&calls, 1)
+		return 0, boom
+	})
+	for i := 0; i < 3; i++ {
+		if _, err := slot.GetAsync(context.Background()); !errors.Is(err, boom) {
+			t.Fatalf("read %d err = %v, want boom", i, err)
+		}
+	}
+	if got := atomic.LoadInt32(&calls); got != 3 {
+		t.Fatalf("compute calls = %d, want 3 (one per read; a cached error would report 1)", got)
 	}
 }
 

@@ -71,8 +71,10 @@ const (
 	// AsyncSlotResolved: the cached value is fresh, until dependency
 	// invalidation transitions back to computing.
 	AsyncSlotResolved AsyncSlotState = "resolved"
-	// AsyncSlotError: the last computation failed; callers receive the error
-	// or retry on the next GetAsync.
+	// AsyncSlotError: the last computation failed. Waiters on that attempt
+	// receive its error; the error is not cached. The next GetAsync re-spawns
+	// (Error -> Computing), per docs/async.md § Async slot state machine and
+	// LazilyFormal.AsyncSlotState SlotEvent.retry.
 	AsyncSlotError AsyncSlotState = "error"
 )
 
@@ -123,7 +125,6 @@ type asyncSlot struct {
 	revision int
 	value    any
 	hasValue bool
-	err      error
 	inFlight *inFlight
 	waiters  []chan asyncResult
 	deps     map[any]struct{}
@@ -313,11 +314,12 @@ func (s *AsyncSlotHandle[T]) GetAsync(ctx context.Context) (T, error) {
 				outVal = n.value
 				done = true
 				return
-			case AsyncSlotError:
-				outErr = n.err
-				done = true
-				return
 			}
+			// Empty and Error both fall through to the spawn path: an errored
+			// slot holds no cached result, so the read re-spawns for the
+			// current revision (Error -> Computing). Replaying n.err here
+			// would make a transient failure permanent for the slot's
+			// lifetime, with no read path able to recover it.
 			w := make(chan asyncResult, 1)
 			n.waiters = append(n.waiters, w)
 			waiter = w
@@ -718,7 +720,9 @@ func (c *AsyncContext) onComplete(s *asyncSlot, inf *inFlight, value any, err er
 	s.inFlight = nil
 	delete(c.computing, s)
 	if err != nil {
-		s.err = err
+		// The error is delivered to this attempt's waiters and deliberately not
+		// stored: a slot in Error holds no cached result, so the next GetAsync
+		// re-spawns (Error -> Computing) instead of replaying a stale failure.
 		s.state = AsyncSlotError
 		c.deliver(s, asyncResult{err: err})
 		return
@@ -731,7 +735,6 @@ func (c *AsyncContext) onComplete(s *asyncSlot, inf *inFlight, value any, err er
 	}
 	s.value = value
 	s.hasValue = true
-	s.err = nil
 	s.state = AsyncSlotResolved
 	c.deliver(s, asyncResult{value: value})
 }
