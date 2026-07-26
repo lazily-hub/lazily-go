@@ -1,6 +1,6 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test vet fmt fmt-check race cover conformance bench check tidy conformance-coverage
+.PHONY: all build test test-interop-peer vet fmt fmt-check race cover conformance bench check tidy conformance-coverage
 
 all: check
 
@@ -49,7 +49,10 @@ tidy:
 	go mod tidy
 
 # Full local gate — run before committing.
-check: fmt-check vet build test conformance-coverage
+test-interop-peer:
+	CGO_ENABLED=1 go run -race ./cmd/lazily-interop-peer --self-check
+
+check: fmt-check vet build test test-interop-peer conformance-coverage
 	@echo "lazily-go: check OK"
 
 # Conformance-coverage guard (#portconformancecoverage). Static: fails when the
