@@ -4,6 +4,43 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.23.0
+
+### Added
+
+- **The `ReactiveMap` Core surface now binds every flavor.** Ordering and atomic
+  move bound only the single-threaded map; the thread-safe and async maps
+  exposed the present set and nothing else. All flavors now carry `keys`, `len`,
+  `is_empty`, `contains_key`, `position`, `move_to` / `move_before` /
+  `move_after`, and `remove`, each with membership and order signals minted on
+  its own graph. A move touches no entry handle and awaits nothing, so it is
+  neither thread- nor async-coloured.
+- A shared, graph-agnostic `KeyedOrder` core holding the present set, the key
+  order, and the move algebra. It deliberately holds no reactivity: membership
+  and order invalidation is a graph write, so each flavor owns its own cells.
+- The canonical ordering fixtures now replay against all three flavors, with
+  invalidation measured by recompute count rather than a cache flag, plus
+  directional move coverage the canonical corpus does not provide (its only
+  `move_before` step moves a key that already follows its anchor, so the
+  `anchor - 1` branch was never exercised).
+
+### Fixed
+
+- The thread-safe and async maps stored plain values with no reactive nodes and
+  no context at all. Both are graph-backed now.
+- The **single-threaded** map's reactive reads registered no dependency edge:
+  `Keys` / `Len` / `ContainsKey` called the zero-argument `Source.Get()`, which
+  `core.go` documents as an untracked external read. A slot reading `m.Keys()`
+  was never invalidated when a key was added.
+
+### Changed (BREAKING, pre-v1)
+
+- Map constructors take their owning context, and the reactive reads take a
+  `ComputeOps` read surface, so a `*Compute` registers the edge and a `*Context`
+  does not. `MaterializeAll` / `GetOrInsertWith` / `Observe` / `Keys` / `Len` /
+  `ContainsKey` changed arity. Done now, deliberately, while the module is still
+  pre-v1 on an unversioned path.
+
 ## v0.22.0
 
 ### Changed
