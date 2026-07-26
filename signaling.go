@@ -214,6 +214,9 @@ func ParseClientMessage(data []byte) (ClientMessage, error) {
 	}
 	switch disc.Type {
 	case "join":
+		if err := rejectUnknownFields(data, "type", "peer", "capabilities"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			Peer         PeerId   `json:"peer"`
 			Capabilities []string `json:"capabilities"`
@@ -223,6 +226,9 @@ func ParseClientMessage(data []byte) (ClientMessage, error) {
 		}
 		return ClientJoin{Peer: w.Peer, Capabilities: w.Capabilities}, nil
 	case "offer":
+		if err := rejectUnknownFields(data, "type", "to", "sdp"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			To  PeerId `json:"to"`
 			Sdp string `json:"sdp"`
@@ -232,6 +238,9 @@ func ParseClientMessage(data []byte) (ClientMessage, error) {
 		}
 		return ClientOffer{To: w.To, Sdp: w.Sdp}, nil
 	case "answer":
+		if err := rejectUnknownFields(data, "type", "to", "sdp"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			To  PeerId `json:"to"`
 			Sdp string `json:"sdp"`
@@ -241,6 +250,9 @@ func ParseClientMessage(data []byte) (ClientMessage, error) {
 		}
 		return ClientAnswer{To: w.To, Sdp: w.Sdp}, nil
 	case "ice":
+		if err := rejectUnknownFields(data, "type", "to", "candidate"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			To        PeerId `json:"to"`
 			Candidate string `json:"candidate"`
@@ -250,6 +262,9 @@ func ParseClientMessage(data []byte) (ClientMessage, error) {
 		}
 		return ClientIce{To: w.To, Candidate: w.Candidate}, nil
 	case "relay":
+		if err := rejectUnknownFields(data, "type", "to", "payload"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			To      PeerId          `json:"to"`
 			Payload json.RawMessage `json:"payload"`
@@ -259,6 +274,9 @@ func ParseClientMessage(data []byte) (ClientMessage, error) {
 		}
 		return ClientRelay{To: w.To, Payload: w.Payload}, nil
 	case "leave":
+		if err := rejectUnknownFields(data, "type"); err != nil {
+			return nil, err
+		}
 		return ClientLeave{}, nil
 	default:
 		return nil, fmt.Errorf("unknown ClientMessage type: %q", disc.Type)
@@ -430,6 +448,9 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 	}
 	switch disc.Type {
 	case "welcome":
+		if err := rejectUnknownFields(data, "type", "peer", "peers"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			Peer  PeerId   `json:"peer"`
 			Peers []PeerId `json:"peers"`
@@ -437,8 +458,16 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 		if err := json.Unmarshal(data, &w); err != nil {
 			return nil, err
 		}
+		for _, rosterPeer := range w.Peers {
+			if rosterPeer == w.Peer {
+				return nil, fmt.Errorf("welcome roster must exclude the joining peer")
+			}
+		}
 		return ServerWelcome{Peer: w.Peer, Peers: w.Peers}, nil
 	case "peer-joined":
+		if err := rejectUnknownFields(data, "type", "peer"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			Peer PeerId `json:"peer"`
 		}
@@ -447,6 +476,9 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 		}
 		return ServerPeerJoined{Peer: w.Peer}, nil
 	case "peer-left":
+		if err := rejectUnknownFields(data, "type", "peer"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			Peer PeerId `json:"peer"`
 		}
@@ -455,6 +487,9 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 		}
 		return ServerPeerLeft{Peer: w.Peer}, nil
 	case "offer":
+		if err := rejectUnknownFields(data, "type", "from", "sdp"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			From PeerId `json:"from"`
 			Sdp  string `json:"sdp"`
@@ -464,6 +499,9 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 		}
 		return ServerOffer{From: w.From, Sdp: w.Sdp}, nil
 	case "answer":
+		if err := rejectUnknownFields(data, "type", "from", "sdp"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			From PeerId `json:"from"`
 			Sdp  string `json:"sdp"`
@@ -473,6 +511,9 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 		}
 		return ServerAnswer{From: w.From, Sdp: w.Sdp}, nil
 	case "ice":
+		if err := rejectUnknownFields(data, "type", "from", "candidate"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			From      PeerId `json:"from"`
 			Candidate string `json:"candidate"`
@@ -482,6 +523,9 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 		}
 		return ServerIce{From: w.From, Candidate: w.Candidate}, nil
 	case "relay":
+		if err := rejectUnknownFields(data, "type", "from", "payload"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			From    PeerId          `json:"from"`
 			Payload json.RawMessage `json:"payload"`
@@ -491,6 +535,9 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 		}
 		return ServerRelay{From: w.From, Payload: w.Payload}, nil
 	case "error":
+		if err := rejectUnknownFields(data, "type", "code", "message"); err != nil {
+			return nil, err
+		}
 		var w struct {
 			Code    string `json:"code"`
 			Message string `json:"message"`
@@ -502,6 +549,23 @@ func ParseServerMessage(data []byte) (ServerMessage, error) {
 	default:
 		return nil, fmt.Errorf("unknown ServerMessage type: %q", disc.Type)
 	}
+}
+
+func rejectUnknownFields(data []byte, allowed ...string) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	allowedFields := make(map[string]struct{}, len(allowed))
+	for _, field := range allowed {
+		allowedFields[field] = struct{}{}
+	}
+	for field := range object {
+		if _, ok := allowedFields[field]; !ok {
+			return fmt.Errorf("unexpected signaling field %q", field)
+		}
+	}
+	return nil
 }
 
 // relayPayload normalizes a nil relay payload to JSON null so the required

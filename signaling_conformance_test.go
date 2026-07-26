@@ -64,8 +64,16 @@ func jsonSemanticEqual(t *testing.T, a, b []byte) bool {
 // ---------------------------------------------------------------------------
 
 type framesFixture struct {
-	Kind   string        `json:"kind"`
-	Frames []signalFrame `json:"frames"`
+	Kind    string        `json:"kind"`
+	Frames  []signalFrame `json:"frames"`
+	Rejects []rejectFrame `json:"rejects"`
+}
+
+type rejectFrame struct {
+	Label     string          `json:"label"`
+	Direction string          `json:"direction"`
+	Wire      json.RawMessage `json:"wire"`
+	Input     *sessionInput   `json:"input"`
 }
 
 type signalFrame struct {
@@ -138,6 +146,20 @@ func TestSignalingFramesConformance(t *testing.T) {
 				t.Fatalf("unknown direction %q", fr.Direction)
 			}
 		})
+	}
+	for _, reject := range fx.Rejects {
+		var err error
+		switch reject.Direction {
+		case "client":
+			_, err = ParseClientMessage(reject.Wire)
+		case "server":
+			_, err = ParseServerMessage(reject.Wire)
+		default:
+			t.Fatalf("%s: unknown reject direction %q", reject.Label, reject.Direction)
+		}
+		if err == nil {
+			t.Errorf("%s: malformed signaling frame was accepted", reject.Label)
+		}
 	}
 }
 
@@ -242,9 +264,10 @@ func nonNilPeers(p []PeerId) []PeerId {
 // ---------------------------------------------------------------------------
 
 type sessionFixture struct {
-	Kind  string        `json:"kind"`
-	Mode  string        `json:"mode"`
-	Steps []sessionStep `json:"steps"`
+	Kind    string        `json:"kind"`
+	Mode    string        `json:"mode"`
+	Steps   []sessionStep `json:"steps"`
+	Rejects []rejectFrame `json:"rejects"`
 }
 
 type sessionStep struct {
@@ -322,6 +345,14 @@ func TestSignalingAntiSpoofSession(t *testing.T) {
 				t.Fatalf("step %d expect %d (to %q) mismatch\n got: %s\nwant: %s",
 					i, j, exp.To, gotBytes, exp.Frame)
 			}
+		}
+	}
+	for _, reject := range fx.Rejects {
+		if reject.Input == nil {
+			t.Fatalf("%s: reject has no input", reject.Label)
+		}
+		if _, err := ParseClientMessage(reject.Input.Recv); err == nil {
+			t.Errorf("%s: malformed client signaling frame was accepted", reject.Label)
 		}
 	}
 }
