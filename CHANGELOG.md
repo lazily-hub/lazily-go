@@ -4,6 +4,29 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.23.2
+
+### Fixed
+
+- **`ThreadSafeReactiveMap` read paths ran off the context lock — a real data
+  race, red under `-race` since v0.23.0.** Mint, the membership/order signal
+  bumps, entry disposal, and `Set` all took `tsctx.WithLock`; every *read* went
+  straight to the graph. A read is not passive in this kernel: `Get` on a stale
+  derived entry runs `refresh` → `recomputeNow` → `Context.newCompute`, which
+  bumps `computeGen` and `cachedCount` on the shared single-threaded `Context`,
+  so two goroutines reading two *different* keys wrote the same fields. Even a
+  `Source` read mutates the dependency edge set when the read surface is a
+  `*Compute`. `GetOrInsertWith`, `Observe`, `Keys`, `Len` and `ContainsKey` now
+  route through `read`/`track`. The lock is reentrant, so an entry compute that
+  reads back into the map is unaffected, and `mu` is still never held across
+  graph work, so lock order stays context-then-`mu`.
+
+  `TestTSComputedMapConcurrentMaterializationIsConfluent` — the confluence test
+  — was the one failing. It caught the `GetOrInsertWith` path only; the other
+  four sites were uncovered, so two new soaks drive them: concurrent tracked
+  reads against a reordering mutator, and concurrent `Observe` against a writing
+  mutator on a hot key set. All five sites are mutation-checked.
+
 ## v0.23.1
 
 No library behaviour changed — no non-test `.go` source differs from v0.23.0.

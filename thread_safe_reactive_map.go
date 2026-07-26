@@ -133,12 +133,37 @@ func (m *ThreadSafeReactiveMap[K, V, H]) mintWith(key K, compute func() V) H {
 	return stored
 }
 
+// read runs a graph read under the context lock.
+//
+// EVERY read that touches the graph has to go through here, not just the writes.
+// A read is not passive in this kernel: a `Get` of a stale derived entry runs
+// `refresh` → `recomputeNow` → `Context.newCompute`, which bumps `computeGen`
+// and `cachedCount` on the shared single-threaded Context. Two goroutines
+// reading two *different* keys therefore write the same context fields, and
+// `-race` reported exactly that. Even a `Source` read mutates the dependency
+// edge set when `c` is a `*Compute`.
+//
+// The lock is reentrant, so this is safe when the caller already holds it —
+// which it does whenever an entry's compute reads back into the map. Lock order
+// stays context-then-`mu`: `mu` is never held across graph work (see mintWith),
+// so this cannot invert against a concurrent mint.
+func (m *ThreadSafeReactiveMap[K, V, H]) read(fn func() V) V {
+	return Read(m.tsctx, func(*Context) V { return fn() })
+}
+
+// track runs a subscription-only graph read (a membership or order signal) under
+// the context lock. Same argument as read: registering a dependency edge is a
+// graph mutation.
+func (m *ThreadSafeReactiveMap[K, V, H]) track(fn func()) {
+	m.tsctx.WithLock(func(*Context) { fn() })
+}
+
 // GetOrInsertWith returns key's value, minting the entry via factory(key) on
 // first access (the lazy pull). An existing key returns its current value
 // without re-running the factory.
 func (m *ThreadSafeReactiveMap[K, V, H]) GetOrInsertWith(c ComputeOps, key K, factory func(K) V) V {
 	h := m.mintWith(key, func() V { return factory(key) })
-	return m.observe(c, h)
+	return m.read(func() V { return m.observe(c, h) })
 }
 
 // Handle returns key's existing entry handle, or (zero, false). Non-minting.
@@ -156,7 +181,7 @@ func (m *ThreadSafeReactiveMap[K, V, H]) Observe(c ComputeOps, key K) (V, bool) 
 		var zero V
 		return zero, false
 	}
-	return m.observe(c, h), true
+	return m.read(func() V { return m.observe(c, h) }), true
 }
 
 // IsPresent reports whether key is currently materialized. Non-reactive.
@@ -187,14 +212,14 @@ func (m *ThreadSafeReactiveMap[K, V, H]) PresentCount() int {
 // Subscribes the caller to order changes (add/remove and move/reorder), not to
 // per-entry value changes.
 func (m *ThreadSafeReactiveMap[K, V, H]) Keys(c ComputeOps) []K {
-	Get[int](c, m.orderSignal)
+	m.track(func() { Get[int](c, m.orderSignal) })
 	return m.PresentKeys()
 }
 
 // Len reports the reactive entry count. Subscribes the caller to membership
 // changes only.
 func (m *ThreadSafeReactiveMap[K, V, H]) Len(c ComputeOps) int {
-	Get[int](c, m.membership)
+	m.track(func() { Get[int](c, m.membership) })
 	return m.PresentCount()
 }
 
@@ -204,7 +229,7 @@ func (m *ThreadSafeReactiveMap[K, V, H]) IsEmpty(c ComputeOps) bool { return m.L
 // ContainsKey reports the reactive membership test for key. Subscribes the
 // caller to membership changes (add/remove of any key), not to value changes.
 func (m *ThreadSafeReactiveMap[K, V, H]) ContainsKey(c ComputeOps, key K) bool {
-	Get[int](c, m.membership)
+	m.track(func() { Get[int](c, m.membership) })
 	return m.IsPresent(key)
 }
 

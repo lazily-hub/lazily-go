@@ -162,3 +162,129 @@ func equalU32(a, b []uint32) bool {
 	}
 	return true
 }
+
+// The tracked reads race too, and nothing was driving them concurrently.
+//
+// The confluence soak above only exercises GetOrInsertWith, so when every graph
+// read moved under the context lock it covered exactly one of the five call
+// sites. Keys / Len / ContainsKey read the order and membership signals, and a
+// signal read mutates the dependency edge set — they were racing on the same
+// Context fields and no test could see it.
+//
+// Readers and a mutator run together on purpose: the mutator drives real
+// invalidation, so the readers hit refresh/recompute rather than a warm cache,
+// which is the path that writes computeGen.
+func TestTSComputedMapConcurrentTrackedReadsAreRaceFree(t *testing.T) {
+	ts := NewThreadSafeContext()
+	fam := NewThreadSafeComputedMap[uint32, uint32](ts)
+
+	const keys uint32 = 40
+	for k := uint32(0); k < keys; k++ {
+		_ = fam.GetOrInsertWith(ts.Context(), k, doubleU32)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func(seed uint32) {
+			defer wg.Done()
+			for r := uint32(0); r < 100; r++ {
+				k := (seed*7 + r) % keys
+				_ = fam.Keys(ts.Context())
+				_ = fam.Len(ts.Context())
+				_ = fam.ContainsKey(ts.Context(), k)
+				_, _ = fam.Observe(ts.Context(), k)
+				_ = fam.GetOrInsertWith(ts.Context(), keys+k, doubleU32)
+			}
+		}(uint32(i))
+	}
+	// The mutator: reordering bumps the order signal, so Keys readers really
+	// recompute instead of returning a cached list.
+	//
+	// The destination index must not be the key's current one. A first draft used
+	// MoveTo(k, k), which is a no-op on an insertion-ordered map — the order
+	// signal never moved, and unlocking the Keys read then raced with nothing.
+	// The stride keeps every move a real reorder.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for r := 0; r < 100; r++ {
+			fam.MoveTo(uint32(r)%keys, (r*13+1)%int(keys))
+		}
+	}()
+	wg.Wait()
+
+	// Confluence: the mutator only reordered and the readers only minted the
+	// upper half, so the final present set is exact regardless of interleaving.
+	if got := fam.PresentCount(); got != int(keys*2) {
+		t.Fatalf("present count = %d, want %d", got, keys*2)
+	}
+	if got := fam.Len(ts.Context()); got != int(keys*2) {
+		t.Fatalf("reactive Len = %d, want %d", got, keys*2)
+	}
+	if got := len(fam.Keys(ts.Context())); got != int(keys*2) {
+		t.Fatalf("Keys length = %d, want %d", got, keys*2)
+	}
+	for k := uint32(0); k < keys*2; k++ {
+		if got, ok := fam.Observe(ts.Context(), k); !ok || got != k*2 {
+			t.Fatalf("observe(%d) = (%d, %v), want (%d, true)", k, got, ok, k*2)
+		}
+	}
+}
+
+// Observe's lock is only load-bearing when an entry node is concurrently
+// WRITTEN, and the computed-map soak never dirties one: its entries compute once
+// and keep their value forever, so an unlocked read of a clean cached node races
+// with nothing. Unlocking Observe was invisible until this test existed.
+//
+// A source map is the shape that exposes it. Set invalidates the entry under the
+// context lock while readers observe the same key, so the reader touches
+// value/cached exactly while the writer is rewriting them.
+func TestTSSourceMapConcurrentSetAndObserveAreRaceFree(t *testing.T) {
+	ts := NewThreadSafeContext()
+	fam := NewThreadSafeSourceMap[uint32, uint32](ts)
+
+	// A small hot key set on purpose. Readers and the writer must contend on the
+	// SAME entry node for the read to overlap the write — spreading them over a
+	// wide key space makes the collision rare enough that the detector misses it,
+	// which is how an unlocked Observe first passed this test.
+	const keys uint32 = 4
+	for k := uint32(0); k < keys; k++ {
+		fam.Set(k, k)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func(uint32) {
+			defer wg.Done()
+			for r := uint32(0); r < 500; r++ {
+				k := r % keys
+				_, _ = fam.Observe(ts.Context(), k)
+				_ = fam.GetOrInsertWith(ts.Context(), k, doubleU32)
+			}
+		}(uint32(i))
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for r := uint32(0); r < 500; r++ {
+			fam.Set(r%keys, r)
+		}
+	}()
+	wg.Wait()
+
+	// Quiesce to a known state, then prove the map still reads correctly — a
+	// race-free run that lost writes would not be a pass.
+	for k := uint32(0); k < keys; k++ {
+		fam.Set(k, k*2)
+	}
+	if got := fam.Len(ts.Context()); got != int(keys) {
+		t.Fatalf("reactive Len = %d, want %d", got, keys)
+	}
+	for k := uint32(0); k < keys; k++ {
+		if got, ok := fam.Observe(ts.Context(), k); !ok || got != k*2 {
+			t.Fatalf("observe(%d) = (%d, %v), want (%d, true)", k, got, ok, k*2)
+		}
+	}
+}
