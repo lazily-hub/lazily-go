@@ -181,7 +181,7 @@ actions, and named fail-closed guards.
 
 ## Collections & CRDTs
 
-Keyed cell collections (`CellMap`, `CellTree`) with LIS move-minimized
+Keyed cell collections (`SourceMap`, `CellTree`) with LIS move-minimized
 reconciliation, the memoized semantic tree (`SemTree`), stable-id alignment, the
 **reactive queue** (`QueueCell` — a FIFO collection whose shell invalidates by
 reader kind: a push invalidates `Len`/`IsEmpty` (and `Head` when transitioning
@@ -205,12 +205,19 @@ and order**. Go generics can't add methods to a type alias, so its two
 specializations are thin distinct structs embedding `*ReactiveMap` with the
 handle kind fixed:
 
-- **`CellMap[K, V]`** — input-cell entries. Adds the cell-only `Set` and eager
+- **`SourceMap[K, V]`** — input-cell entries. Adds the cell-only `Set` and eager
   value-minting (`Entry` / `EntryWith`). Every entry is a writable `*Cell[V]`.
-- **`SlotMap[K, V]`** — derived-slot entries. `GetOrInsertWith` mints a slot on
-  first access (**lazy materialization**); `MaterializeAll` pre-mints the keyset
-  (**eager**). A slot's value is derived, so `SlotMap` has **no `Set`**. There is
-  **no eager/lazy mode flag** — eager is a pre-mint loop, lazy is mint-on-access.
+- **`ComputedMap[K, V]`** — derived-slot entries. `GetOrInsertWith` mints a slot
+  on first access (**lazy materialization**); `MaterializeAll` pre-mints the
+  keyset (**eager**). A slot's value is derived, so `ComputedMap` has **no
+  `Set`**. There is **no eager/lazy mode flag** — eager is a pre-mint loop, lazy
+  is mint-on-access.
+
+These were named `CellMap` / `SlotMap` before the v2 kernel renamed the node
+kinds to `Source` and `Computed`. The old spellings remain as **deprecated**
+generic type aliases (`CellMap` = `SourceMap`, `SlotMap` = `ComputedMap`, plus
+the `Async*` / `ThreadSafe*` flavors) with deprecated constructor wrappers, so
+existing callers keep compiling. Generic type aliases require **Go 1.24+**.
 
 The shared surface — `GetOrInsertWith` / `Remove` / `Move*` / `Keys` / `Len` /
 `ContainsKey` / membership + order signals — lives on the generic `ReactiveMap`.
@@ -218,7 +225,7 @@ The shared surface — `GetOrInsertWith` / `Remove` / `Move*` / `Keys` / `Len` /
 ```go
 ctx := lazily.NewContext()
 // Lazy derived-slot map over a large keyed space; only read keys are allocated.
-sheet := lazily.NewSlotMap[Key, int](ctx)
+sheet := lazily.NewComputedMap[Key, int](ctx)
 sheet.GetOrInsertWith(k, func(k Key) int { return recompute(k) }) // mint on first pull
 sheet.PresentCount()                                              // grows only with reads
 ```
@@ -231,8 +238,8 @@ strategy changes allocation timing and memory, never results. The laws —
 orthogonality (`cell_entries_materialized_in_every_mode` /
 `slot_entries_deferred_under_lazy`) — are proven in [`lazily-formal`][formal]'s
 `Materialization` module and pinned by the `conformance/materialization/*.json`
-fixtures. The `Send + Sync` (`ThreadSafeCellMap` / `ThreadSafeSlotMap`) and async
-(`AsyncCellMap` / `AsyncSlotMap`) flavors mirror the same surface.
+fixtures. The `Send + Sync` (`ThreadSafeSourceMap` / `ThreadSafeComputedMap`) and async
+(`AsyncSourceMap` / `AsyncComputedMap`) flavors mirror the same surface.
 
 ## lazily-spec IPC
 
@@ -288,7 +295,7 @@ race detector.
 See [BENCHMARKS.md](BENCHMARKS.md) for micro-benchmark results on the hot paths
 — reactive core read/write, slot/memo recompute, batch coalescing, keyed
 collections, and CRDT construction — with `ns/op` / `B/op` / `allocs/op` and
-what each case measures. The reactive steady state (`Cell` read/write, `CellMap`
+what each case measures. The reactive steady state (`Cell` read/write, `SourceMap`
 insert/read) is zero-allocation. Benchmarks are defined as Go `testing.B` cases
 in [`bench_test.go`](bench_test.go) (mirroring the in-library `RunBenchmarkSuite`)
 and reproducible with `make bench` (`go test -bench=. -benchmem ./...`).
@@ -312,15 +319,15 @@ notes and platform carve-outs lives in
 | Feature | Rust | Python | Kotlin | JS | Dart | Zig | Go | C++ | C# |
 | --------- | :----: | :------: | :------: | :--: | :----: | :---: | :--: | :---: | :--: |
 | Reactive graph — two cell kinds (nodes `SourceCell` / `ComputedCell`; handles `Source<T, M>` / `Computed<T>`) + `Effect` sink + eager `Computed` (`computed().eager()`) / all cells guarded / batch | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Keyed-map materialization (`SlotMap`) — mint-on-access derived slots: transparency + deferral (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Thread-safe keyed map (`ThreadSafeSlotMap`) — `Send + Sync` + materialization confluence (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Async keyed map (`AsyncSlotMap`) — eventual transparency (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Keyed-map materialization (`ComputedMap`) — mint-on-access derived slots: transparency + deferral (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Thread-safe keyed map (`ThreadSafeComputedMap`) — `Send + Sync` + materialization confluence (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Async keyed map (`AsyncComputedMap`) — eventual transparency (`#lzmatmode`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Keyed-map sync — membership propagation + materialize-on-ingest + derived-aggregate transparency (`#lzfamilysync`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Thread-safe context (lock-backed) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Async reactive context | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Flat state machine | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Harel state charts | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Keyed reactive maps (`ReactiveMap`: `CellMap` / `SlotMap`) + `CellTree` + reconcile | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Keyed reactive maps (`ReactiveMap`: `SourceMap` / `ComputedMap`) + `CellTree` + reconcile | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Memoized semantic tree (`SemTree`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Stable-id alignment (manufactured identity) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |

@@ -7,14 +7,14 @@ import (
 
 // Tests mirror lazily-rs thread_safe_reactive_family.rs, naming the lazily-formal
 // Materialization theorems (incl. the confluence pair) each assertion rests on.
-// The unified model (#reactivemap): ThreadSafeSlotMap (derived slots, lazy
+// The unified model (#reactivemap): ThreadSafeComputedMap (derived slots, lazy
 // GetOrInsertWith mint-on-access + eager MaterializeAll pre-mint, no Set) and
-// ThreadSafeCellMap (input cells, Set). No eager/lazy mode flag.
+// ThreadSafeSourceMap (input cells, Set). No eager/lazy mode flag.
 
 func doubleU32(k uint32) uint32 { return k * 2 }
 
-func TestTSCellMapEntryKindAndSet(t *testing.T) {
-	fam := NewThreadSafeCellMap[uint32, bool]()
+func TestTSSourceMapEntryKindAndSet(t *testing.T) {
+	fam := NewThreadSafeSourceMap[uint32, bool]()
 	if fam.EntryKind() != EntryKindCell {
 		t.Fatalf("kind = %v, want cell", fam.EntryKind())
 	}
@@ -32,8 +32,8 @@ func TestTSCellMapEntryKindAndSet(t *testing.T) {
 	}
 }
 
-func TestTSSlotMapEagerMaterializesAllAtBuild(t *testing.T) {
-	fam := NewThreadSafeSlotMap[uint32, uint32]()
+func TestTSComputedMapEagerMaterializesAllAtBuild(t *testing.T) {
+	fam := NewThreadSafeComputedMap[uint32, uint32]()
 	fam.MaterializeAll([]uint32{1, 2, 3}, doubleU32)
 	if fam.EntryKind() != EntryKindSlot {
 		t.Fatalf("kind = %v, want slot", fam.EntryKind())
@@ -46,8 +46,8 @@ func TestTSSlotMapEagerMaterializesAllAtBuild(t *testing.T) {
 	}
 }
 
-func TestTSSlotMapLazyDefersUntilRead(t *testing.T) {
-	fam := NewThreadSafeSlotMap[uint32, uint32]()
+func TestTSComputedMapLazyDefersUntilRead(t *testing.T) {
+	fam := NewThreadSafeComputedMap[uint32, uint32]()
 	if got := fam.PresentCount(); got != 0 {
 		t.Fatalf("present count = %d, want 0", got)
 	}
@@ -65,10 +65,10 @@ func TestTSSlotMapLazyDefersUntilRead(t *testing.T) {
 	}
 }
 
-func TestTSSlotMapObservationalTransparency(t *testing.T) {
-	eager := NewThreadSafeSlotMap[uint32, uint32]()
+func TestTSComputedMapObservationalTransparency(t *testing.T) {
+	eager := NewThreadSafeComputedMap[uint32, uint32]()
 	eager.MaterializeAll([]uint32{1, 2, 3}, doubleU32)
-	lazy := NewThreadSafeSlotMap[uint32, uint32]()
+	lazy := NewThreadSafeComputedMap[uint32, uint32]()
 	for _, k := range []uint32{1, 2, 3} {
 		ev, _ := eager.Observe(k)
 		lv := lazy.GetOrInsertWith(k, doubleU32)
@@ -78,8 +78,8 @@ func TestTSSlotMapObservationalTransparency(t *testing.T) {
 	}
 }
 
-func TestTSSlotMapPresentSetGrowsMonotonically(t *testing.T) {
-	fam := NewThreadSafeSlotMap[uint32, uint32]()
+func TestTSComputedMapPresentSetGrowsMonotonically(t *testing.T) {
+	fam := NewThreadSafeComputedMap[uint32, uint32]()
 	id := func(k uint32) uint32 { return k }
 	_ = fam.GetOrInsertWith(5, id)
 	_ = fam.GetOrInsertWith(5, id) // repeat: no growth
@@ -92,8 +92,8 @@ func TestTSSlotMapPresentSetGrowsMonotonically(t *testing.T) {
 	}
 }
 
-func TestTSCellMapSetOverwrites(t *testing.T) {
-	fam := NewThreadSafeCellMap[uint32, bool]()
+func TestTSSourceMapSetOverwrites(t *testing.T) {
+	fam := NewThreadSafeSourceMap[uint32, bool]()
 	fam.Set(10, true)
 	fam.Set(20, true)
 	if v, ok := fam.Observe(20); !ok || !v {
@@ -111,8 +111,8 @@ func TestTSCellMapSetOverwrites(t *testing.T) {
 // Confluence soak: N goroutines materialize an overlapping key space
 // concurrently. The present SET and every observed value must be independent of
 // interleaving (materialize_present_comm / materialize_observe_comm).
-func TestTSSlotMapConcurrentMaterializationIsConfluent(t *testing.T) {
-	fam := NewThreadSafeSlotMap[uint32, uint32]()
+func TestTSComputedMapConcurrentMaterializationIsConfluent(t *testing.T) {
+	fam := NewThreadSafeComputedMap[uint32, uint32]()
 
 	const n = 4
 	const span uint32 = 50

@@ -1,14 +1,14 @@
 package lazily
 
 // ReactiveMap materialization conformance (#reactivemap) — replays the shared
-// lazily-spec/conformance/materialization/*.json fixtures (model "SlotMap") and
+// lazily-spec/conformance/materialization/*.json fixtures (model "ComputedMap") and
 // mirrors the lazily-rs materialization_conformance.rs + cell_family.rs test
 // suites. Each test names the law it exercises (proven in lazily-formal's
 // Materialization module).
 //
-// The unified model: SlotMap over derived slots — eager materialization is a
+// The unified model: ComputedMap over derived slots — eager materialization is a
 // pre-mint loop (MaterializeAll); lazy is mint-on-access (GetOrInsertWith). There
-// is no eager/lazy mode flag. CellMap over input cells always materializes an
+// is no eager/lazy mode flag. SourceMap over input cells always materializes an
 // entry on mint (Entry / Set).
 
 import (
@@ -62,6 +62,18 @@ func loadMatFixture(t *testing.T, name string) matFixture {
 	return f
 }
 
+// isSourceMapModel / isComputedMapModel accept both the current fixture
+// spelling ("SourceMap" / "ComputedMap", emitted by lazily-spec since the v2
+// kernel rename) and the pre-rename spelling ("CellMap" / "SlotMap"), so this
+// runner replays against either a current or an older lazily-spec checkout.
+func isSourceMapModel(model string) bool {
+	return model == "SourceMap" || model == "CellMap"
+}
+
+func isComputedMapModel(model string) bool {
+	return model == "ComputedMap" || model == "SlotMap"
+}
+
 func strSet(keys []string) map[string]struct{} {
 	s := make(map[string]struct{}, len(keys))
 	for _, k := range keys {
@@ -97,7 +109,7 @@ func matSortedKeys(m map[string]int) []string {
 // ---------------------------------------------------------------------------
 
 // observe_canonical / eager_lazy_observationally_equivalent / default_mode_eager:
-// a keyed SlotMap of derived slots built eager (MaterializeAll pre-mint) vs lazy
+// a keyed ComputedMap of derived slots built eager (MaterializeAll pre-mint) vs lazy
 // (GetOrInsertWith mint-on-access) returns identical values; eager materializes
 // every key up front, lazy only the read keys.
 func TestMaterializationObservationalTransparency(t *testing.T) {
@@ -105,14 +117,14 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 	if f.Expected.DefaultMode != "eager" {
 		t.Fatalf("default strategy must be eager (fixture=%q)", f.Expected.DefaultMode)
 	}
-	if f.Model != "SlotMap" {
-		t.Fatalf("fixture model = %q, want SlotMap", f.Model)
+	if !isComputedMapModel(f.Model) {
+		t.Fatalf("fixture model = %q, want ComputedMap (or the deprecated SlotMap spelling)", f.Model)
 	}
 	keys := matSortedKeys(f.Spec.Val)
 	factory := func(k string) int { return f.Spec.Val[k] }
 
 	ctx := NewContext()
-	eager := NewSlotMap[string, int](ctx)
+	eager := NewComputedMap[string, int](ctx)
 	eager.MaterializeAll(keys, factory)
 	if eager.EntryKind() != EntryKindSlot {
 		t.Fatalf("slot map mis-tagged: kind=%v", eager.EntryKind())
@@ -123,7 +135,7 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 	assertSameSet(t, eager.PresentKeys(), f.Expected.EagerPresent, "eager_present")
 
 	// Lazy defers every derived slot: nothing present at build.
-	lazy := NewSlotMap[string, int](ctx)
+	lazy := NewComputedMap[string, int](ctx)
 	if lazy.PresentCount() != 0 {
 		t.Fatalf("lazy present count %d != 0 (lazy_defers_slots)", lazy.PresentCount())
 	}
@@ -140,7 +152,7 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 
 	// Replay the read sequence on a FRESH lazy map; the present set is exactly
 	// the read keys.
-	fresh := NewSlotMap[string, int](ctx)
+	fresh := NewComputedMap[string, int](ctx)
 	for _, k := range f.Reads {
 		fresh.GetOrInsertWith(k, factory)
 	}
@@ -154,7 +166,7 @@ func TestMaterializationDeferralNotDeallocation(t *testing.T) {
 	factory := func(k string) int { return f.Spec.Val[k] }
 
 	ctx := NewContext()
-	lazy := NewSlotMap[string, int](ctx)
+	lazy := NewComputedMap[string, int](ctx)
 
 	var sizes []int
 	for _, k := range f.Reads {
@@ -182,7 +194,7 @@ func TestMaterializationDeferralNotDeallocation(t *testing.T) {
 
 // cell_entries_materialized_in_every_mode / slot_entries_deferred_under_lazy:
 // entry kind is orthogonal to strategy. A mixed-kind key space is modelled by a
-// CellMap over the cell entries and a SlotMap over the slot entries.
+// SourceMap over the cell entries and a ComputedMap over the slot entries.
 func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	f := loadMatFixture(t, "entry_kind_orthogonal_to_mode.json")
 	if f.Expected.DefaultMode != "eager" {
@@ -207,11 +219,11 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	ctx := NewContext()
 
 	// Eager build: cells pre-minted (always materialized) + slots pre-minted.
-	eagerCells := NewCellMap[string, int](ctx)
+	eagerCells := NewSourceMap[string, int](ctx)
 	for _, k := range cellKeys {
 		eagerCells.Entry(k, vals[k])
 	}
-	eagerSlots := NewSlotMap[string, int](ctx)
+	eagerSlots := NewComputedMap[string, int](ctx)
 	eagerSlots.MaterializeAll(slotKeys, factory)
 	if eagerCells.EntryKind() != EntryKindCell || eagerSlots.EntryKind() != EntryKindSlot {
 		t.Fatalf("entry kinds mis-tagged")
@@ -220,11 +232,11 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	assertSameSet(t, eagerPresent, f.Expected.EagerPresent, "eager_present")
 
 	// Lazy build: cells present at build (always materialized), slots deferred.
-	lazyCells := NewCellMap[string, int](ctx)
+	lazyCells := NewSourceMap[string, int](ctx)
 	for _, k := range cellKeys {
 		lazyCells.Entry(k, vals[k])
 	}
-	lazySlots := NewSlotMap[string, int](ctx)
+	lazySlots := NewComputedMap[string, int](ctx)
 	if lazySlots.PresentCount() != 0 {
 		t.Fatalf("slots must defer at build, present=%d", lazySlots.PresentCount())
 	}
@@ -267,9 +279,9 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 // Unit tests mirroring lazily-rs/src/cell_family.rs
 // ---------------------------------------------------------------------------
 
-func TestSlotMapEagerMaterializesAll(t *testing.T) {
+func TestComputedMapEagerMaterializesAll(t *testing.T) {
 	ctx := NewContext()
-	m := NewSlotMap[int, int](ctx)
+	m := NewComputedMap[int, int](ctx)
 	m.MaterializeAll([]int{0, 1, 2, 5, 9}, func(k int) int { return k * 3 })
 	if m.PresentCount() != 5 {
 		t.Fatalf("eager present count %d != 5", m.PresentCount())
@@ -281,9 +293,9 @@ func TestSlotMapEagerMaterializesAll(t *testing.T) {
 	}
 }
 
-func TestSlotMapLazyDefersThenMintsOnAccess(t *testing.T) {
+func TestComputedMapLazyDefersThenMintsOnAccess(t *testing.T) {
 	ctx := NewContext()
-	m := NewSlotMap[int, int](ctx)
+	m := NewComputedMap[int, int](ctx)
 	if m.PresentCount() != 0 || m.IsPresent(5) {
 		t.Fatalf("lazy must defer slots; present=%d", m.PresentCount())
 	}
@@ -300,9 +312,9 @@ func TestSlotMapLazyDefersThenMintsOnAccess(t *testing.T) {
 	assertSameSet(t, keysToStr(m.PresentKeys()), []string{"5"}, "present after single read")
 }
 
-func TestSlotMapPresentSetMonotone(t *testing.T) {
+func TestComputedMapPresentSetMonotone(t *testing.T) {
 	ctx := NewContext()
-	m := NewSlotMap[int, int](ctx)
+	m := NewComputedMap[int, int](ctx)
 	factory := func(k int) int { return k * 2 }
 	var sizes []int
 	for _, k := range []int{2, 4, 2, 5} {
@@ -317,9 +329,9 @@ func TestSlotMapPresentSetMonotone(t *testing.T) {
 	}
 }
 
-func TestCellMapEntryCachesOneCellPerKey(t *testing.T) {
+func TestSourceMapEntryCachesOneCellPerKey(t *testing.T) {
 	ctx := NewContext()
-	m := NewCellMap[string, int](ctx)
+	m := NewSourceMap[string, int](ctx)
 	a1 := m.Entry("a", 1)
 	a2 := m.Entry("a", 999)
 	// Same key -> same cell; the second default is ignored.
@@ -334,9 +346,9 @@ func TestCellMapEntryCachesOneCellPerKey(t *testing.T) {
 	}
 }
 
-func TestCellMapSetIsCellOnly(t *testing.T) {
+func TestSourceMapSetIsCellOnly(t *testing.T) {
 	ctx := NewContext()
-	m := NewCellMap[int, int](ctx)
+	m := NewSourceMap[int, int](ctx)
 	m.Set(7, 42)
 	if got, ok := m.Read(7); !ok || got != 42 {
 		t.Fatalf("Read(7)=(%d,%v) want (42,true)", got, ok)
@@ -346,7 +358,64 @@ func TestCellMapSetIsCellOnly(t *testing.T) {
 		t.Fatalf("Read(7)=%d want 100 after Set", got)
 	}
 	if m.EntryKind() != EntryKindCell {
-		t.Fatalf("CellMap kind = %v, want cell", m.EntryKind())
+		t.Fatalf("SourceMap kind = %v, want cell", m.EntryKind())
+	}
+}
+
+// TestDeprecatedMapNameAliases pins the source compatibility promise of the
+// v2-kernel rename: the pre-rename names still resolve, and because they are
+// type *aliases* (not new defined types) a value built through the deprecated
+// constructor is assignable to the new type, and vice versa.
+func TestDeprecatedMapNameAliases(t *testing.T) {
+	ctx := NewContext()
+
+	var src *SourceMap[string, int] = NewCellMap[string, int](ctx)
+	var cell *CellMap[string, int] = NewSourceMap[string, int](ctx)
+	src.Set("a", 1)
+	cell.Set("a", 1)
+	if got, _ := src.Get("a"); got != 1 {
+		t.Fatalf("CellMap alias: Get(a)=%d want 1", got)
+	}
+	if src.EntryKind() != EntryKindCell || cell.EntryKind() != EntryKindCell {
+		t.Fatalf("CellMap alias: entry kind drifted")
+	}
+
+	var cmp *ComputedMap[string, int] = NewSlotMap[string, int](ctx)
+	var slot *SlotMap[string, int] = NewComputedMap[string, int](ctx)
+	cmp.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
+	slot.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
+	if got, _ := cmp.Observe("a"); got != 7 {
+		t.Fatalf("SlotMap alias: Observe(a)=%d want 7", got)
+	}
+	if cmp.EntryKind() != EntryKindSlot || slot.EntryKind() != EntryKindSlot {
+		t.Fatalf("SlotMap alias: entry kind drifted")
+	}
+
+	var tsSrc *ThreadSafeSourceMap[string, int] = NewThreadSafeCellMap[string, int]()
+	var tsCell *ThreadSafeCellMap[string, int] = NewThreadSafeSourceMap[string, int]()
+	tsSrc.Set("a", 1)
+	tsCell.Set("a", 1)
+	var tsCmp *ThreadSafeComputedMap[string, int] = NewThreadSafeSlotMap[string, int]()
+	var tsSlot *ThreadSafeSlotMap[string, int] = NewThreadSafeComputedMap[string, int]()
+	tsCmp.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
+	tsSlot.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
+	if got, ok := tsCmp.Observe("a"); !ok || got != 7 {
+		t.Fatalf("ThreadSafeSlotMap alias: Observe(a)=(%d,%v) want (7,true)", got, ok)
+	}
+	if tsSrc.EntryKind() != EntryKindCell || tsSlot.EntryKind() != EntryKindSlot {
+		t.Fatalf("ThreadSafe alias: entry kind drifted")
+	}
+
+	var asSrc *AsyncSourceMap[string, int] = NewAsyncCellMap[string, int]()
+	var asCell *AsyncCellMap[string, int] = NewAsyncSourceMap[string, int]()
+	asSrc.Set("a", 1)
+	asCell.Set("a", 1)
+	var asCmp *AsyncComputedMap[string, int] = NewAsyncSlotMap[string, int]()
+	var asSlot *AsyncSlotMap[string, int] = NewAsyncComputedMap[string, int]()
+	asCmp.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
+	asSlot.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
+	if got := asCmp.Drive("a", func(k string) int { return 7 }); got != 7 {
+		t.Fatalf("AsyncSlotMap alias: Drive(a)=%d want 7", got)
 	}
 }
 

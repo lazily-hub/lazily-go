@@ -1,7 +1,7 @@
 package lazily
 
 // Unified keyed reactive collection — the generic ReactiveMap primitive and its
-// SlotMap specialization (#reactivemap). CellMap (collections.go) is the other
+// ComputedMap specialization (#reactivemap). SourceMap (collections.go) is the other
 // specialization.
 //
 // Spec:   lazily-spec/cell-model.md § Keyed cell collections
@@ -15,19 +15,19 @@ package lazily
 // are themselves reactive, with one independently-tracked reactive node per
 // entry.
 //
-//   - CellMap[K, V]  = ReactiveMap over *Cell[V] — input-cell entries. Adds the
-//     cell-only Set and eager value-minting (Entry / EntryWith).
-//   - SlotMap[K, V]  = ReactiveMap over *Slot[V] — derived-slot entries.
+//   - SourceMap[K, V]   = ReactiveMap over *Cell[V] — input-cell entries. Adds
+//     the cell-only Set and eager value-minting (Entry / EntryWith).
+//   - ComputedMap[K, V] = ReactiveMap over *Slot[V] — derived-slot entries.
 //     GetOrInsertWith mints a slot on first access (lazy materialization);
 //     MaterializeAll pre-mints the keyset (eager). A slot's value is derived, so
-//     SlotMap has no Set. There is no eager/lazy mode flag — eager is a pre-mint
-//     loop, lazy is mint-on-access.
+//     ComputedMap has no Set. There is no eager/lazy mode flag — eager is a
+//     pre-mint loop, lazy is mint-on-access.
 //
 // The shared surface — GetOrInsertWith / Remove / Move* / membership / order /
 // Keys / Len / ContainsKey — lives on the generic ReactiveMap. Go generics cannot
-// add methods to a type alias, so CellMap and SlotMap are thin distinct structs
-// embedding *ReactiveMap with the handle kind fixed; the kind-specific methods
-// (Set on CellMap, MaterializeAll on SlotMap) live on those wrappers.
+// add methods to a type alias, so SourceMap and ComputedMap are thin distinct
+// structs embedding *ReactiveMap with the handle kind fixed; the kind-specific
+// methods (Set on SourceMap, MaterializeAll on ComputedMap) live on those wrappers.
 
 // EntryKind is which kind of reactive node a ReactiveMap entry is — the
 // handle-kind axis the map abstracts over. Mirrors EntryKind in lazily-formal's
@@ -66,7 +66,7 @@ func (k EntryKind) String() string {
 // readers only.
 //
 // The handle-kind operations (mint / observe / clear) are supplied by the
-// CellMap / SlotMap constructor — the Go analog of the Rust MapHandle trait.
+// SourceMap / ComputedMap constructor — the Go analog of the Rust MapHandle trait.
 type ReactiveMap[K comparable, V comparable, H any] struct {
 	ctx  *Context
 	kind EntryKind
@@ -93,7 +93,7 @@ type ReactiveMap[K comparable, V comparable, H any] struct {
 }
 
 // newReactiveMap builds the shared reactive-map core bound to ctx, with the
-// given handle-kind operations. Used by NewCellMap / NewSlotMap.
+// given handle-kind operations. Used by NewSourceMap / NewComputedMap.
 func newReactiveMap[K comparable, V comparable, H any](
 	ctx *Context,
 	kind EntryKind,
@@ -144,8 +144,8 @@ func (m *ReactiveMap[K, V, H]) mintWith(key K, compute func() V) H {
 }
 
 // GetOrInsertWith returns the value at key, minting the entry via factory(key)
-// first if absent — the mint-on-access recipe. For a SlotMap this is the lazy
-// materialization pull; for a CellMap it seeds an input cell. Bumps reactive
+// first if absent — the mint-on-access recipe. For a ComputedMap this is the lazy
+// materialization pull; for a SourceMap it seeds an input cell. Bumps reactive
 // membership only on insert; an existing key returns its current value without
 // re-running the factory.
 func (m *ReactiveMap[K, V, H]) GetOrInsertWith(key K, factory func(K) V) V {
@@ -332,20 +332,20 @@ func (m *ReactiveMap[K, V, H]) ContainsKey(key K) bool {
 // anything.
 func (m *ReactiveMap[K, V, H]) LenUntracked() int { return len(m.order) }
 
-// EntryKind returns this map's entry kind (EntryKindCell for a CellMap,
-// EntryKindSlot for a SlotMap).
+// EntryKind returns this map's entry kind (EntryKindCell for a SourceMap,
+// EntryKindSlot for a ComputedMap).
 func (m *ReactiveMap[K, V, H]) EntryKind() EntryKind { return m.kind }
 
-// SlotMap is the derived-slot specialization of ReactiveMap: every entry is a
-// derived *Slot[V]. GetOrInsertWith mints a slot on first access (lazy
+// ComputedMap is the derived-slot specialization of ReactiveMap: every entry is
+// a derived *Slot[V]. GetOrInsertWith mints a slot on first access (lazy
 // materialization); MaterializeAll pre-mints the keyset (eager). A slot's value
-// is derived, so SlotMap has no Set.
-type SlotMap[K comparable, V comparable] struct {
+// is derived, so ComputedMap has no Set.
+type ComputedMap[K comparable, V comparable] struct {
 	*ReactiveMap[K, V, *Computed[V]]
 }
 
-// NewSlotMap creates an empty derived-slot map bound to ctx.
-func NewSlotMap[K comparable, V comparable](ctx *Context) *SlotMap[K, V] {
+// NewComputedMap creates an empty derived-slot map bound to ctx.
+func NewComputedMap[K comparable, V comparable](ctx *Context) *ComputedMap[K, V] {
 	rm := newReactiveMap[K, V, *Computed[V]](
 		ctx,
 		EntryKindSlot,
@@ -355,12 +355,25 @@ func NewSlotMap[K comparable, V comparable](ctx *Context) *SlotMap[K, V] {
 		func(h *Computed[V]) V { return h.Get() },
 		func(h *Computed[V]) { h.invalidate() },
 	)
-	return &SlotMap[K, V]{ReactiveMap: rm}
+	return &ComputedMap[K, V]{ReactiveMap: rm}
+}
+
+// SlotMap is the pre-v2-kernel name for ComputedMap, kept as an alias so
+// existing callers keep compiling.
+//
+// Deprecated: renamed to ComputedMap.
+type SlotMap[K comparable, V comparable] = ComputedMap[K, V]
+
+// NewSlotMap creates an empty derived-slot map bound to ctx.
+//
+// Deprecated: renamed to NewComputedMap.
+func NewSlotMap[K comparable, V comparable](ctx *Context) *ComputedMap[K, V] {
+	return NewComputedMap[K, V](ctx)
 }
 
 // Slot returns the derived slot handle for key (nil if not materialized).
 // Non-reactive.
-func (m *SlotMap[K, V]) Slot(key K) *Computed[V] {
+func (m *ComputedMap[K, V]) Slot(key K) *Computed[V] {
 	h, _ := m.Handle(key)
 	return h
 }
@@ -368,7 +381,7 @@ func (m *SlotMap[K, V]) Slot(key K) *Computed[V] {
 // MaterializeAll eagerly pre-mints a derived slot for every key via factory, up
 // front. Observationally identical to minting each key lazily on first read
 // (GetOrInsertWith) — it only changes when the nodes are allocated.
-func (m *SlotMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
+func (m *ComputedMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
 	for _, key := range keys {
 		m.GetOrInsertWith(key, factory)
 	}

@@ -91,10 +91,10 @@ func sameStringSet(a, b []string) bool {
 }
 
 // ---------------------------------------------------------------------------
-// CellMap steps: value / membership / order reactivity independence + moves
+// SourceMap steps: value / membership / order reactivity independence + moves
 // ---------------------------------------------------------------------------
 
-func applyCellMapOp(m *CellMap[string, int], op map[string]any) {
+func applySourceMapOp(m *SourceMap[string, int], op map[string]any) {
 	switch op["type"].(string) {
 	case "set_value":
 		m.Set(jsStr(op["key"]), jsInt(op["value"]))
@@ -129,13 +129,19 @@ func applyCellMapOp(m *CellMap[string, int], op map[string]any) {
 	}
 }
 
-func runCellMapStepsFixture(t *testing.T, name string) {
+func runSourceMapStepsFixture(t *testing.T, name string) {
 	fixture, ok := loadCollectionFixture(t, name)
 	if !ok {
 		return
 	}
+	// The fixture must actually be a source-map fixture. Accepts both the
+	// current "SourceMap" spelling and the pre-v2-kernel "CellMap" spelling.
+	if model := jsStr(fixture["model"]); !isSourceMapModel(model) {
+		t.Fatalf("%s: fixture model = %q, want SourceMap (or the deprecated CellMap spelling)", name, model)
+	}
+
 	ctx := NewContext()
-	m := NewCellMap[string, int](ctx)
+	m := NewSourceMap[string, int](ctx)
 
 	initial := jsMap(fixture["initial"])
 	values := jsMap(initial["values"])
@@ -172,7 +178,7 @@ func runCellMapStepsFixture(t *testing.T, name string) {
 			}
 		}
 
-		applyCellMapOp(m, op)
+		applySourceMapOp(m, op)
 
 		// Value readers: only survivor keys are checked (removed keys are not).
 		expectedValueInval := map[string]bool{}
@@ -235,12 +241,12 @@ func runCellMapStepsFixture(t *testing.T, name string) {
 	}
 }
 
-func TestCollectionsCellMapIndependence(t *testing.T) {
-	runCellMapStepsFixture(t, "cellmap_independence.json")
+func TestCollectionsSourceMapIndependence(t *testing.T) {
+	runSourceMapStepsFixture(t, "cellmap_independence.json")
 }
 
-func TestCollectionsCellMapAtomicMove(t *testing.T) {
-	runCellMapStepsFixture(t, "cellmap_atomic_move.json")
+func TestCollectionsSourceMapAtomicMove(t *testing.T) {
+	runSourceMapStepsFixture(t, "cellmap_atomic_move.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +335,7 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 
 	// Convergence: applying the minimal op set reproduces result_order.
 	ctx := NewContext()
-	m := NewCellMap[string, int](ctx)
+	m := NewSourceMap[string, int](ctx)
 	for _, e := range prior {
 		m.Set(e.Key, e.Value)
 	}

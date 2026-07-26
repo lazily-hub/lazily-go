@@ -1,4 +1,4 @@
-// Keyed cell collections — CellMap, CellTree, and keyed reconciliation
+// Keyed cell collections — SourceMap, CellTree, and keyed reconciliation
 // (cell-model.md § Keyed cell collections).
 //
 // A keyed cell collection is a *composition of cells*, not a new cell kind. It
@@ -24,13 +24,13 @@
 // re-mints the entry's *Cell, so the same pointer (and its dependents) survive.
 package lazily
 
-// CellMap is the input-cell specialization of ReactiveMap: a keyed collection
+// SourceMap is the input-cell specialization of ReactiveMap: a keyed collection
 // of reactive cells with independent value / membership / order reactivity
 // (cell-model.md § Keyed cell collections).
 //
 // Each entry is an ordinary Cell[V]; the collection adds no new merge unit. The
 // shared reactive-membership / order / move / remove surface is inherited from
-// the embedded ReactiveMap; CellMap adds the cell-only Set and eager
+// the embedded ReactiveMap; SourceMap adds the cell-only Set and eager
 // value-minting (Entry / EntryWith), plus the Go-specific Insert / Reconcile
 // keyed-reconciliation helpers.
 //
@@ -41,12 +41,12 @@ package lazily
 // An atomic move (MoveTo / MoveBefore / MoveAfter, inherited) bumps only the
 // order signal once and keeps the moved entry's same Cell handle, dependents,
 // and lineage — it is not a remove + re-mint.
-type CellMap[K comparable, V comparable] struct {
+type SourceMap[K comparable, V comparable] struct {
 	*ReactiveMap[K, V, *Source[V]]
 }
 
-// NewCellMap creates an empty keyed cell collection bound to ctx.
-func NewCellMap[K comparable, V comparable](ctx *Context) *CellMap[K, V] {
+// NewSourceMap creates an empty keyed cell collection bound to ctx.
+func NewSourceMap[K comparable, V comparable](ctx *Context) *SourceMap[K, V] {
 	rm := newReactiveMap[K, V, *Source[V]](
 		ctx,
 		EntryKindCell,
@@ -57,13 +57,27 @@ func NewCellMap[K comparable, V comparable](ctx *Context) *CellMap[K, V] {
 		// notified that its source is gone.
 		func(h *Source[V]) { h.Invalidate() },
 	)
-	return &CellMap[K, V]{ReactiveMap: rm}
+	return &SourceMap[K, V]{ReactiveMap: rm}
+}
+
+// CellMap is the pre-v2-kernel name for SourceMap, kept as an alias so existing
+// callers keep compiling. The v2 kernel renamed the node kinds to Source and
+// Computed; the keyed collections follow.
+//
+// Deprecated: renamed to SourceMap.
+type CellMap[K comparable, V comparable] = SourceMap[K, V]
+
+// NewCellMap creates an empty keyed cell collection bound to ctx.
+//
+// Deprecated: renamed to NewSourceMap.
+func NewCellMap[K comparable, V comparable](ctx *Context) *SourceMap[K, V] {
+	return NewSourceMap[K, V](ctx)
 }
 
 // EntryWith returns the value cell for key, minting it with defaultValue() on
 // first access. Adding a new key bumps reactive membership; re-fetching an
 // existing key does not.
-func (m *CellMap[K, V]) EntryWith(key K, defaultValue func() V) *Source[V] {
+func (m *SourceMap[K, V]) EntryWith(key K, defaultValue func() V) *Source[V] {
 	if existing, ok := m.entries[key]; ok {
 		return existing
 	}
@@ -72,18 +86,18 @@ func (m *CellMap[K, V]) EntryWith(key K, defaultValue func() V) *Source[V] {
 
 // Entry returns the value cell for key, minting it with defaultValue on first
 // access. Convenience wrapper over EntryWith.
-func (m *CellMap[K, V]) Entry(key K, defaultValue V) *Source[V] {
+func (m *SourceMap[K, V]) Entry(key K, defaultValue V) *Source[V] {
 	return m.EntryWith(key, func() V { return defaultValue })
 }
 
 // Cell returns the existing value cell for key, or nil. Non-reactive: does not
 // subscribe the caller to membership.
-func (m *CellMap[K, V]) Cell(key K) *Source[V] {
+func (m *SourceMap[K, V]) Cell(key K) *Source[V] {
 	return m.entries[key]
 }
 
 // Get reads the value at key if present (peek). Non-reactive.
-func (m *CellMap[K, V]) Get(key K) (V, bool) {
+func (m *SourceMap[K, V]) Get(key K) (V, bool) {
 	if handle, ok := m.entries[key]; ok {
 		return handle.Peek(), true
 	}
@@ -93,7 +107,7 @@ func (m *CellMap[K, V]) Get(key K) (V, bool) {
 
 // Read reads the value at key if present, subscribing the caller to that
 // entry's cell (reactive inside a Slot / Signal computation).
-func (m *CellMap[K, V]) Read(key K) (V, bool) {
+func (m *SourceMap[K, V]) Read(key K) (V, bool) {
 	if handle, ok := m.entries[key]; ok {
 		return handle.Get(), true
 	}
@@ -105,8 +119,8 @@ func (m *CellMap[K, V]) Read(key K) (V, bool) {
 // if it does not exist yet. Updating an existing entry leaves membership
 // untouched and invalidates only that entry's dependents.
 //
-// Cell-only: an input is settable; a derived SlotMap slot is not.
-func (m *CellMap[K, V]) Set(key K, value V) {
+// Cell-only: an input is settable; a derived ComputedMap slot is not.
+func (m *SourceMap[K, V]) Set(key K, value V) {
 	if handle, ok := m.entries[key]; ok {
 		handle.Set(value)
 		return
@@ -122,7 +136,7 @@ func (m *CellMap[K, V]) Set(key K, value V) {
 //
 // Go lacks Dart's optional named args: pass InsertAtEnd with a zero anchor for
 // the common append case.
-func (m *CellMap[K, V]) Insert(key K, value V, at InsertAt, anchor K) bool {
+func (m *SourceMap[K, V]) Insert(key K, value V, at InsertAt, anchor K) bool {
 	if _, ok := m.entries[key]; ok {
 		m.Set(key, value)
 		return false
@@ -145,7 +159,7 @@ func (m *CellMap[K, V]) Insert(key K, value V, at InsertAt, anchor K) bool {
 // Reconcile reconciles to targetOrder + targetValues: compute the minimal diff
 // and apply it per-cell. Stable entries (unchanged value, in the LIS) keep
 // their cell handles and stay cached.
-func (m *CellMap[K, V]) Reconcile(targetOrder []K, targetValues map[K]V) {
+func (m *SourceMap[K, V]) Reconcile(targetOrder []K, targetValues map[K]V) {
 	prior := make([]KeyValue[K, V], 0, len(m.order))
 	for _, k := range m.order {
 		v, _ := m.Get(k)
@@ -169,14 +183,14 @@ func (m *CellMap[K, V]) Reconcile(targetOrder []K, targetValues map[K]V) {
 	}
 }
 
-// InsertAt is the position specifier for CellMap.Insert (mirrors
+// InsertAt is the position specifier for SourceMap.Insert (mirrors
 // lazily-kt::InsertAt). The string values are the normative wire tokens.
 type InsertAt string
 
 const (
 	// InsertAtEnd appends at the end (default).
 	InsertAtEnd InsertAt = "end"
-	// InsertAtIndex inserts at an absolute index (use CellMap.MoveTo after
+	// InsertAtIndex inserts at an absolute index (use SourceMap.MoveTo after
 	// insert to position).
 	InsertAtIndex InsertAt = "at"
 	// InsertAtBefore inserts just before the anchor.
@@ -356,7 +370,7 @@ func longestIncreasingSubsequence(seq []int) []int {
 // CellTree is an ordered keyed tree (cell-model.md § Ordered keyed tree).
 //
 // Each node is (stable id, value cell, ordered keyed child collection). A
-// node's children are a CellMap keyed by child id, so per-level
+// node's children are a SourceMap keyed by child id, so per-level
 // membership/order reactivity and the atomic-move guarantee are inherited. The
 // tree is still a composition of cells — not a new cell kind — so per-cell merge
 // applies node-by-node. Recursive, mirroring lazily-rs/src/cell_tree.rs.
@@ -364,7 +378,7 @@ type CellTree[K comparable, V comparable] struct {
 	ctx      *Context
 	ID       K
 	Value    *Source[V]
-	Children *CellMap[K, *CellTree[K, V]]
+	Children *SourceMap[K, *CellTree[K, V]]
 }
 
 // NewCellTree creates a tree node with id and initialValue and an empty child
@@ -374,7 +388,7 @@ func NewCellTree[K comparable, V comparable](ctx *Context, id K, initialValue V)
 		ctx:      ctx,
 		ID:       id,
 		Value:    NewSource[V](ctx, initialValue),
-		Children: NewCellMap[K, *CellTree[K, V]](ctx),
+		Children: NewSourceMap[K, *CellTree[K, V]](ctx),
 	}
 }
 

@@ -16,9 +16,9 @@ package lazily
 // carries its own lock and caches canonical values directly (a pure factory
 // produces each), rather than routing through a per-thread reactive Context.
 //
-// Its two specializations are ThreadSafeCellMap (input cells — adds Set) and
-// ThreadSafeSlotMap (derived slots — adds MaterializeAll, no Set). Go generics
-// cannot add methods to a type alias, so both are thin distinct structs
+// Its two specializations are ThreadSafeSourceMap (input cells — adds Set) and
+// ThreadSafeComputedMap (derived slots — adds MaterializeAll, no Set). Go
+// generics cannot add methods to a type alias, so both are thin distinct structs
 // embedding *ThreadSafeReactiveMap with the handle kind fixed.
 //
 // It obeys the same laws as the single-threaded map plus materialization
@@ -78,8 +78,8 @@ func (m *ThreadSafeReactiveMap[K, V, H]) materializeLocked(key K, factory func(K
 
 // GetOrInsertWith returns key's value, minting it via factory(key) on first
 // access (the lazy pull) under the lock. An existing key returns its cached value
-// without re-running the factory. For a SlotMap this is the lazy materialization
-// pull; for a CellMap it seeds an input cell.
+// without re-running the factory. For a ComputedMap this is the lazy
+// materialization pull; for a SourceMap it seeds an input cell.
 func (m *ThreadSafeReactiveMap[K, V, H]) GetOrInsertWith(key K, factory func(K) V) V {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -127,20 +127,33 @@ func (m *ThreadSafeReactiveMap[K, V, H]) EntryKind() EntryKind {
 	return h.mapEntryKind()
 }
 
-// ThreadSafeCellMap is the input-cell specialization of ThreadSafeReactiveMap:
+// ThreadSafeSourceMap is the input-cell specialization of ThreadSafeReactiveMap:
 // every entry is a settable input cell. Adds the cell-only Set.
-type ThreadSafeCellMap[K comparable, V comparable] struct {
+type ThreadSafeSourceMap[K comparable, V comparable] struct {
 	*ThreadSafeReactiveMap[K, V, threadSafeCellHandle]
 }
 
+// NewThreadSafeSourceMap creates an empty thread-safe input-cell map.
+func NewThreadSafeSourceMap[K comparable, V comparable]() *ThreadSafeSourceMap[K, V] {
+	return &ThreadSafeSourceMap[K, V]{newThreadSafeReactiveMap[K, V, threadSafeCellHandle]()}
+}
+
+// ThreadSafeCellMap is the pre-v2-kernel name for ThreadSafeSourceMap, kept as
+// an alias so existing callers keep compiling.
+//
+// Deprecated: renamed to ThreadSafeSourceMap.
+type ThreadSafeCellMap[K comparable, V comparable] = ThreadSafeSourceMap[K, V]
+
 // NewThreadSafeCellMap creates an empty thread-safe input-cell map.
-func NewThreadSafeCellMap[K comparable, V comparable]() *ThreadSafeCellMap[K, V] {
-	return &ThreadSafeCellMap[K, V]{newThreadSafeReactiveMap[K, V, threadSafeCellHandle]()}
+//
+// Deprecated: renamed to NewThreadSafeSourceMap.
+func NewThreadSafeCellMap[K comparable, V comparable]() *ThreadSafeSourceMap[K, V] {
+	return NewThreadSafeSourceMap[K, V]()
 }
 
 // Set overwrites key's value (cells are writable inputs), materializing the
-// entry if absent. Cell-only: a derived SlotMap slot is not settable.
-func (m *ThreadSafeCellMap[K, V]) Set(key K, value V) {
+// entry if absent. Cell-only: a derived ComputedMap slot is not settable.
+func (m *ThreadSafeSourceMap[K, V]) Set(key K, value V) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.materialized[key]; !ok {
@@ -149,21 +162,34 @@ func (m *ThreadSafeCellMap[K, V]) Set(key K, value V) {
 	m.materialized[key] = value // overwrite in place; no re-order.
 }
 
-// ThreadSafeSlotMap is the derived-slot specialization of ThreadSafeReactiveMap:
-// GetOrInsertWith mints a slot on first access (lazy); MaterializeAll pre-mints
-// the keyset (eager). No Set.
-type ThreadSafeSlotMap[K comparable, V comparable] struct {
+// ThreadSafeComputedMap is the derived-slot specialization of
+// ThreadSafeReactiveMap: GetOrInsertWith mints a slot on first access (lazy);
+// MaterializeAll pre-mints the keyset (eager). No Set.
+type ThreadSafeComputedMap[K comparable, V comparable] struct {
 	*ThreadSafeReactiveMap[K, V, threadSafeSlotHandle]
 }
 
+// NewThreadSafeComputedMap creates an empty thread-safe derived-slot map.
+func NewThreadSafeComputedMap[K comparable, V comparable]() *ThreadSafeComputedMap[K, V] {
+	return &ThreadSafeComputedMap[K, V]{newThreadSafeReactiveMap[K, V, threadSafeSlotHandle]()}
+}
+
+// ThreadSafeSlotMap is the pre-v2-kernel name for ThreadSafeComputedMap, kept as
+// an alias so existing callers keep compiling.
+//
+// Deprecated: renamed to ThreadSafeComputedMap.
+type ThreadSafeSlotMap[K comparable, V comparable] = ThreadSafeComputedMap[K, V]
+
 // NewThreadSafeSlotMap creates an empty thread-safe derived-slot map.
-func NewThreadSafeSlotMap[K comparable, V comparable]() *ThreadSafeSlotMap[K, V] {
-	return &ThreadSafeSlotMap[K, V]{newThreadSafeReactiveMap[K, V, threadSafeSlotHandle]()}
+//
+// Deprecated: renamed to NewThreadSafeComputedMap.
+func NewThreadSafeSlotMap[K comparable, V comparable]() *ThreadSafeComputedMap[K, V] {
+	return NewThreadSafeComputedMap[K, V]()
 }
 
 // MaterializeAll eagerly pre-mints every key via factory. Observationally
 // identical to minting each key lazily on first read (GetOrInsertWith).
-func (m *ThreadSafeSlotMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
+func (m *ThreadSafeComputedMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
 	for _, key := range keys {
 		m.GetOrInsertWith(key, factory)
 	}

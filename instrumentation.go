@@ -105,9 +105,9 @@ func RunBenchmarkSuite(iterations int) []BenchmarkResult {
 				}
 			})
 		}, iterations),
-		Benchmark("CellMap insert + read", func() {
+		Benchmark("SourceMap insert + read", func() {
 			ctx := NewContext()
-			m := NewCellMap[string, int](ctx)
+			m := NewSourceMap[string, int](ctx)
 			for i := 0; i < 10; i++ {
 				m.Set(fmt.Sprintf("k%d", i), i)
 			}

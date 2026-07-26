@@ -4,12 +4,12 @@ import "testing"
 
 // Tests mirror lazily-rs async_reactive_family.rs, naming the lazily-formal
 // AsyncMaterialization theorems each assertion rests on. The unified model
-// (#reactivemap, async): AsyncSlotMap (derived slots — minted pending, driven to
-// resolution; MaterializeAll pre-mint; no Set) and AsyncCellMap (input cells —
+// (#reactivemap, async): AsyncComputedMap (derived slots — minted pending, driven to
+// resolution; MaterializeAll pre-mint; no Set) and AsyncSourceMap (input cells —
 // always resolved; Set).
 
-func TestAsyncCellMapResolvesImmediately(t *testing.T) {
-	fam := NewAsyncCellMap[uint32, bool]()
+func TestAsyncSourceMapResolvesImmediately(t *testing.T) {
+	fam := NewAsyncSourceMap[uint32, bool]()
 	if fam.EntryKind() != EntryKindCell {
 		t.Fatalf("kind = %v, want cell", fam.EntryKind())
 	}
@@ -28,8 +28,8 @@ func TestAsyncCellMapResolvesImmediately(t *testing.T) {
 	}
 }
 
-func TestAsyncSlotMapLazyDefersThenResolves(t *testing.T) {
-	fam := NewAsyncSlotMap[uint32, uint32]()
+func TestAsyncComputedMapLazyDefersThenResolves(t *testing.T) {
+	fam := NewAsyncComputedMap[uint32, uint32]()
 	factory := func(k uint32) uint32 { return k * 10 }
 	if fam.EntryKind() != EntryKindSlot {
 		t.Fatalf("kind = %v, want slot", fam.EntryKind())
@@ -62,8 +62,8 @@ func TestAsyncSlotMapLazyDefersThenResolves(t *testing.T) {
 	}
 }
 
-func TestAsyncSlotMapPendingReadIsNone(t *testing.T) {
-	fam := NewAsyncSlotMap[uint32, uint32]()
+func TestAsyncComputedMapPendingReadIsNone(t *testing.T) {
+	fam := NewAsyncComputedMap[uint32, uint32]()
 	factory := func(k uint32) uint32 { return k * 2 }
 	fam.MaterializeAll([]uint32{5, 6}, factory)
 	// Eager allocates the slots (present) but they start pending.
@@ -82,11 +82,11 @@ func TestAsyncSlotMapPendingReadIsNone(t *testing.T) {
 	}
 }
 
-func TestAsyncSlotMapEventualTransparency(t *testing.T) {
+func TestAsyncComputedMapEventualTransparency(t *testing.T) {
 	factory := func(k uint32) uint32 { return k * 2 }
-	eager := NewAsyncSlotMap[uint32, uint32]()
+	eager := NewAsyncComputedMap[uint32, uint32]()
 	eager.MaterializeAll([]uint32{1, 2, 3}, factory)
-	lazy := NewAsyncSlotMap[uint32, uint32]()
+	lazy := NewAsyncComputedMap[uint32, uint32]()
 	for _, k := range []uint32{1, 2, 3} {
 		if eager.Drive(k, factory) != lazy.Drive(k, factory) {
 			t.Fatalf("eventual transparency broke at k=%d", k)
@@ -94,8 +94,8 @@ func TestAsyncSlotMapEventualTransparency(t *testing.T) {
 	}
 }
 
-func TestAsyncSlotMapPresentSetGrowsMonotonically(t *testing.T) {
-	fam := NewAsyncSlotMap[uint32, uint32]()
+func TestAsyncComputedMapPresentSetGrowsMonotonically(t *testing.T) {
+	fam := NewAsyncComputedMap[uint32, uint32]()
 	id := func(k uint32) uint32 { return k }
 	_ = fam.Drive(5, id)
 	_ = fam.Drive(5, id) // repeat: no growth
@@ -108,8 +108,8 @@ func TestAsyncSlotMapPresentSetGrowsMonotonically(t *testing.T) {
 	}
 }
 
-func TestAsyncCellMapReactsToSet(t *testing.T) {
-	fam := NewAsyncCellMap[uint32, bool]()
+func TestAsyncSourceMapReactsToSet(t *testing.T) {
+	fam := NewAsyncSourceMap[uint32, bool]()
 	fam.Set(10, true)
 	fam.Set(20, true)
 	if v, ok := fam.Observe(20, nil); !ok || v != true {
@@ -121,8 +121,8 @@ func TestAsyncCellMapReactsToSet(t *testing.T) {
 	}
 }
 
-func TestAsyncSlotMapResolveOneNeverDisturbsAnother(t *testing.T) {
-	fam := NewAsyncSlotMap[uint32, uint32]()
+func TestAsyncComputedMapResolveOneNeverDisturbsAnother(t *testing.T) {
+	fam := NewAsyncComputedMap[uint32, uint32]()
 	factory := func(k uint32) uint32 { return k * 2 }
 	fam.MaterializeAll([]uint32{1, 2}, factory)
 	if got := fam.Drive(1, factory); got != 2 {

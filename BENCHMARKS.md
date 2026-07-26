@@ -40,7 +40,7 @@ cpu: AMD Ryzen 9 9950X3D 16-Core Processor
 | Benchmark | ns/op | B/op | allocs/op | What it measures |
 |-----------|------:|-----:|----------:|------------------|
 | `CellReadWrite` | 7.58 | 0 | 0 | `Cell.Set` (PartialEq guard) + `Cell.Get` round trip — the core mutation path, alloc-free. |
-| `CellMapInsertRead` | 15.7 | 0 | 0 | `CellMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
+| `SourceMapInsertRead` | 15.7 | 0 | 0 | `SourceMap.Set` + `Read` on a keyed collection — alloc-free steady state. |
 | `MemoEqualityGuard` | 96.6 | 0 | 0 | `Memo` recompute that yields an equal value, suppressing the downstream cascade (an `Effect` stays put). |
 | `SlotRecompute` | 98.6 | 0 | 0 | Invalidate a `Cell`, then re-pull a dependent `Slot` (edge re-tracking + recompute). |
 | `BatchCoalesce` | 981 | 160 | 1 | 10 cell writes inside one `Batch`, coalesced into a single invalidation pass, then one `Slot` recompute. |
@@ -61,7 +61,7 @@ standalone run). The actual comparator allocates nothing.
 
 ## Notes
 
-- The reactive core steady-state (`CellReadWrite`, `CellMapInsertRead`) is
+- The reactive core steady-state (`CellReadWrite`, `SourceMapInsertRead`) is
   **zero-allocation** — reads and equality-guarded writes don't touch the heap.
 - `SlotRecompute` / `MemoEqualityGuard` are now **zero-allocation** per cascade
   as well: dependency-edge maps are `clear()`-reused in place instead of being

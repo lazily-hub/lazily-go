@@ -21,9 +21,9 @@ package lazily
 // node resolves, its observed value is the canonical value — identical to what
 // the synchronous map observes.
 //
-// Its two specializations are AsyncCellMap (input cells — adds Set) and
-// AsyncSlotMap (derived slots — adds MaterializeAll, no Set). Go generics cannot
-// add methods to a type alias, so both are thin distinct structs embedding
+// Its two specializations are AsyncSourceMap (input cells — adds Set) and
+// AsyncComputedMap (derived slots — adds MaterializeAll, no Set). Go generics
+// cannot add methods to a type alias, so both are thin distinct structs embedding
 // *AsyncReactiveMap with the handle kind fixed.
 
 import "sync"
@@ -172,20 +172,33 @@ func (m *AsyncReactiveMap[K, V, H]) EntryKind() EntryKind {
 	return h.mapEntryKind()
 }
 
-// AsyncCellMap is the input-cell specialization of AsyncReactiveMap: every entry
+// AsyncSourceMap is the input-cell specialization of AsyncReactiveMap: every entry
 // is an always-resolved input cell. Adds the cell-only Set.
-type AsyncCellMap[K comparable, V comparable] struct {
+type AsyncSourceMap[K comparable, V comparable] struct {
 	*AsyncReactiveMap[K, V, asyncCellHandle]
 }
 
+// NewAsyncSourceMap creates an empty async input-cell map.
+func NewAsyncSourceMap[K comparable, V comparable]() *AsyncSourceMap[K, V] {
+	return &AsyncSourceMap[K, V]{newAsyncReactiveMap[K, V, asyncCellHandle]()}
+}
+
+// AsyncCellMap is the pre-v2-kernel name for AsyncSourceMap, kept as an alias so
+// existing callers keep compiling.
+//
+// Deprecated: renamed to AsyncSourceMap.
+type AsyncCellMap[K comparable, V comparable] = AsyncSourceMap[K, V]
+
 // NewAsyncCellMap creates an empty async input-cell map.
-func NewAsyncCellMap[K comparable, V comparable]() *AsyncCellMap[K, V] {
-	return &AsyncCellMap[K, V]{newAsyncReactiveMap[K, V, asyncCellHandle]()}
+//
+// Deprecated: renamed to NewAsyncSourceMap.
+func NewAsyncCellMap[K comparable, V comparable]() *AsyncSourceMap[K, V] {
+	return NewAsyncSourceMap[K, V]()
 }
 
 // Set overwrites key's value (cells are writable, always resolved), materializing
-// the entry if absent. Cell-only: a derived AsyncSlotMap slot is not settable.
-func (m *AsyncCellMap[K, V]) Set(key K, value V) {
+// the entry if absent. Cell-only: a derived AsyncComputedMap slot is not settable.
+func (m *AsyncSourceMap[K, V]) Set(key K, value V) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.materialized[key]; !ok {
@@ -194,22 +207,35 @@ func (m *AsyncCellMap[K, V]) Set(key K, value V) {
 	m.materialized[key] = asyncMapEntry[V]{resolved: true, value: value}
 }
 
-// AsyncSlotMap is the derived-slot specialization of AsyncReactiveMap: entries
+// AsyncComputedMap is the derived-slot specialization of AsyncReactiveMap: entries
 // are minted pending and driven to resolution via Drive; MaterializeAll pre-mints
 // the keyset (still pending until driven). No Set.
-type AsyncSlotMap[K comparable, V comparable] struct {
+type AsyncComputedMap[K comparable, V comparable] struct {
 	*AsyncReactiveMap[K, V, asyncSlotHandle]
 }
 
+// NewAsyncComputedMap creates an empty async derived-slot map.
+func NewAsyncComputedMap[K comparable, V comparable]() *AsyncComputedMap[K, V] {
+	return &AsyncComputedMap[K, V]{newAsyncReactiveMap[K, V, asyncSlotHandle]()}
+}
+
+// AsyncSlotMap is the pre-v2-kernel name for AsyncComputedMap, kept as an alias
+// so existing callers keep compiling.
+//
+// Deprecated: renamed to AsyncComputedMap.
+type AsyncSlotMap[K comparable, V comparable] = AsyncComputedMap[K, V]
+
 // NewAsyncSlotMap creates an empty async derived-slot map.
-func NewAsyncSlotMap[K comparable, V comparable]() *AsyncSlotMap[K, V] {
-	return &AsyncSlotMap[K, V]{newAsyncReactiveMap[K, V, asyncSlotHandle]()}
+//
+// Deprecated: renamed to NewAsyncComputedMap.
+func NewAsyncSlotMap[K comparable, V comparable]() *AsyncComputedMap[K, V] {
+	return NewAsyncComputedMap[K, V]()
 }
 
 // MaterializeAll eagerly pre-mints (allocates, still pending) a derived slot for
 // every key. Drive each to resolution. Observationally identical (once driven) to
 // minting lazily on first access.
-func (m *AsyncSlotMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
+func (m *AsyncComputedMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
 	for _, key := range keys {
 		m.Observe(key, factory)
 	}

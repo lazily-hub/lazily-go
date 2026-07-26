@@ -77,9 +77,9 @@ func BenchmarkBatchCoalesce(b *testing.B) {
 	}
 }
 
-func BenchmarkCellMapInsertRead(b *testing.B) {
+func BenchmarkSourceMapInsertRead(b *testing.B) {
 	ctx := NewContext()
-	m := NewCellMap[int, int](ctx)
+	m := NewSourceMap[int, int](ctx)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
