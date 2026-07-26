@@ -1,145 +1,289 @@
 package lazily
 
-// Thread-safe keyed reactive map (`ThreadSafeReactiveMap`) — the Send + Sync
-// flavor of ReactiveMap (#reactivemap, thread-safe).
-//
-// Spec:   lazily-spec/cell-model.md § Keyed cell collections
-// Formal: lazily-formal/LazilyFormal/Materialization.lean
-//   (materialize_present_comm / materialize_observe_comm — the confluence pair)
-// Rust reference: lazily-rs/src/thread_safe_reactive_family.rs
-//
-// Where ReactiveMap (reactive_map.go) is a single-goroutine keyed map over the
-// (non-synchronized) reactive graph, this map guards its present-set state — the
-// materialized value cache + first-materialization order — behind a sync.Mutex,
-// so a keyed map can live in an owner shared across goroutines and serve
-// Observe / GetOrInsertWith from any goroutine. Like the Zig/Rust flavors it
-// carries its own lock and caches canonical values directly (a pure factory
-// produces each), rather than routing through a per-thread reactive Context.
-//
-// Its two specializations are ThreadSafeSourceMap (input cells — adds Set) and
-// ThreadSafeComputedMap (derived slots — adds MaterializeAll, no Set). Go
-// generics cannot add methods to a type alias, so both are thin distinct structs
-// embedding *ThreadSafeReactiveMap with the handle kind fixed.
-//
-// It obeys the same laws as the single-threaded map plus materialization
-// confluence: the present set and every observed value are independent of the
-// order in which keys are materialized (materialize_present_comm /
-// materialize_observe_comm).
-
 import "sync"
 
-// ThreadSafeMapHandle is the entry-handle kind a ThreadSafeReactiveMap abstracts
-// over — the Send + Sync analog of the Rust ThreadSafeMapHandle trait. Sealed to
-// the two node kinds of the cell model (input cells / derived slots); bindings do
-// not add new kinds.
-type ThreadSafeMapHandle interface{ mapEntryKind() EntryKind }
-
-type threadSafeCellHandle struct{}
-
-func (threadSafeCellHandle) mapEntryKind() EntryKind { return EntryKindSource }
-
-type threadSafeSlotHandle struct{}
-
-func (threadSafeSlotHandle) mapEntryKind() EntryKind { return EntryKindComputed }
-
-// ThreadSafeReactiveMap is the thread-safe keyed reactive map (#reactivemap)
+// ThreadSafeReactiveMap is the thread-safe keyed reactive map (#reactivemap),
 // generic over the entry handle kind H, with all present-set mutation serialized
-// by an internal mutex. V is constrained comparable to mirror the single-threaded
-// map (a cell entry needs a PartialEq guard).
+// by an internal mutex and all graph work serialized by the owning
+// ThreadSafeContext's lock.
 //
-// Once built its address is stable, so concurrent readers may share a
-// *ThreadSafeReactiveMap. See the package doc for the eager/lazy behavior,
-// observational transparency, present-set monotonicity, and confluence.
-type ThreadSafeReactiveMap[K comparable, V comparable, H ThreadSafeMapHandle] struct {
-	mu sync.RWMutex
-	// materialized is the currently-allocated ("present") set and each entry's
-	// cached canonical value. Guarded by mu; grows on materialize, never shrinks.
-	materialized map[K]V
-	// order is the present set in first-materialization order (grows only).
-	order []K
+// It is graph-backed. Before the Core-surface work this map stored plain values
+// in a map[K]V with no reactive nodes at all, no context, and no ordering
+// surface: it had PresentKeys and PresentCount and nothing else. "Thread-safe
+// map" was a mutex-guarded cache wearing the reactive family's name. Entries are
+// now real nodes on the underlying graph, and membership and order are real
+// signals minted on that same graph — the ordering plane binds this flavor
+// exactly as it binds the single-threaded one, because a move touches no entry
+// handle and awaits nothing.
+//
+// Reads take a ComputeOps read surface (#lzcellkernel). A *Compute registers a
+// dependency edge; a *Context registers none. A read spellable only as a
+// zero-argument call could never subscribe from inside a derived node — which is
+// precisely how the single-threaded map's Keys/Len/ContainsKey silently
+// registered no edge at all.
+//
+// V is constrained comparable to mirror the single-threaded map (an input entry
+// needs an equality guard). Once built its address is stable, so concurrent
+// readers may share a *ThreadSafeReactiveMap.
+type ThreadSafeReactiveMap[K comparable, V comparable, H any] struct {
+	tsctx *ThreadSafeContext
+	kind  EntryKind
+
+	// mint allocates one entry node with compute as its canonical value
+	// producer; observe reads it through the caller's read surface; clear
+	// detaches a removed entry's node from the graph.
+	mint    func(ctx *Context, compute func() V) H
+	observe func(c ComputeOps, h H) V
+	clear   func(h H)
+
+	// mu guards the present set. It is never held across graph work: a set can
+	// drive a dependent recompute that re-enters this map.
+	mu    sync.RWMutex
+	keyed keyedOrder[K, H]
+
+	// Membership and order signals, minted on THIS flavor's graph. A shared
+	// graph-agnostic core cannot supply reactivity; each flavor owns its cells.
+	membership  *Source[int]
+	orderSignal *Source[int]
+
+	// Version mirrors, guarded by mu.
+	membershipVersion int
+	orderVersion      int
 }
 
-func newThreadSafeReactiveMap[K comparable, V comparable, H ThreadSafeMapHandle]() *ThreadSafeReactiveMap[K, V, H] {
-	return &ThreadSafeReactiveMap[K, V, H]{materialized: map[K]V{}}
-}
-
-// materializeLocked caches key's value on first access (the lazy pull), recording
-// first-materialization order. Caller MUST hold mu. A warm key is a no-op — the
-// present set only grows.
-func (m *ThreadSafeReactiveMap[K, V, H]) materializeLocked(key K, factory func(K) V) V {
-	if v, ok := m.materialized[key]; ok {
-		return v // warm: already allocated.
+func newThreadSafeReactiveMap[K comparable, V comparable, H any](
+	ts *ThreadSafeContext,
+	kind EntryKind,
+	mint func(ctx *Context, compute func() V) H,
+	observe func(c ComputeOps, h H) V,
+	clear func(h H),
+) *ThreadSafeReactiveMap[K, V, H] {
+	m := &ThreadSafeReactiveMap[K, V, H]{
+		tsctx:   ts,
+		kind:    kind,
+		mint:    mint,
+		observe: observe,
+		clear:   clear,
+		keyed:   newKeyedOrder[K, H](),
 	}
-	v := factory(key)
-	m.materialized[key] = v
-	m.order = append(m.order, key)
-	return v
+	ts.WithLock(func(ctx *Context) {
+		m.membership = NewSource[int](ctx, 0)
+		m.orderSignal = NewSource[int](ctx, 0)
+	})
+	return m
 }
 
-// GetOrInsertWith returns key's value, minting it via factory(key) on first
-// access (the lazy pull) under the lock. An existing key returns its cached value
-// without re-running the factory. For a ComputedMap this is the lazy
-// materialization pull; for a SourceMap it seeds an input cell.
-func (m *ThreadSafeReactiveMap[K, V, H]) GetOrInsertWith(key K, factory func(K) V) V {
+// bumpOrder bumps only the order signal (invalidates Keys readers). A pure move
+// bumps only this. Runs under the context lock with mu released.
+func (m *ThreadSafeReactiveMap[K, V, H]) bumpOrder() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.materializeLocked(key, factory)
+	m.orderVersion++
+	next := m.orderVersion
+	m.mu.Unlock()
+	m.tsctx.WithLock(func(*Context) { m.orderSignal.Set(next) })
 }
 
-// Observe reads key's cached value if present, without minting. Returns
-// (zero, false) if the key is not materialized.
-func (m *ThreadSafeReactiveMap[K, V, H]) Observe(key K) (V, bool) {
+// bumpMembership bumps set-membership (invalidates Len / ContainsKey readers),
+// then the order signal too — the key set changed, so the ordered list did too.
+func (m *ThreadSafeReactiveMap[K, V, H]) bumpMembership() {
+	m.mu.Lock()
+	m.membershipVersion++
+	next := m.membershipVersion
+	m.mu.Unlock()
+	m.tsctx.WithLock(func(*Context) { m.membership.Set(next) })
+	m.bumpOrder()
+}
+
+// applyMove bumps the order signal only when the order actually changed. A
+// no-op move still reports success but must invalidate no reader.
+func (m *ThreadSafeReactiveMap[K, V, H]) applyMove(outcome mapMove) bool {
+	if !outcome.applied() {
+		return false
+	}
+	if outcome.changed() {
+		m.bumpOrder()
+	}
+	return true
+}
+
+// mintWith allocates key's entry node on first access, caches the handle,
+// records order, and bumps reactive membership. A warm key returns its cached
+// handle unchanged (cell-identity).
+func (m *ThreadSafeReactiveMap[K, V, H]) mintWith(key K, compute func() V) H {
+	m.mu.RLock()
+	warm, ok := m.keyed.get(key)
+	m.mu.RUnlock()
+	if ok {
+		return warm
+	}
+
+	// Allocate off mu, under the context lock.
+	var fresh H
+	m.tsctx.WithLock(func(ctx *Context) { fresh = m.mint(ctx, compute) })
+
+	m.mu.Lock()
+	stored, mutation := m.keyed.insert(key, fresh)
+	m.mu.Unlock()
+
+	// Lost a materialization race: first writer wins so the key keeps a stable
+	// handle. Our freshly-allocated node is orphaned (never observed).
+	if mutation.changed() {
+		m.bumpMembership()
+	}
+	return stored
+}
+
+// GetOrInsertWith returns key's value, minting the entry via factory(key) on
+// first access (the lazy pull). An existing key returns its current value
+// without re-running the factory.
+func (m *ThreadSafeReactiveMap[K, V, H]) GetOrInsertWith(c ComputeOps, key K, factory func(K) V) V {
+	h := m.mintWith(key, func() V { return factory(key) })
+	return m.observe(c, h)
+}
+
+// Handle returns key's existing entry handle, or (zero, false). Non-minting.
+func (m *ThreadSafeReactiveMap[K, V, H]) Handle(key K) (H, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	v, ok := m.materialized[key]
-	return v, ok
+	return m.keyed.get(key)
+}
+
+// Observe reads key's value if the entry is present, subscribing the caller to
+// that entry's node. Returns (zero, false) if absent. Non-minting.
+func (m *ThreadSafeReactiveMap[K, V, H]) Observe(c ComputeOps, key K) (V, bool) {
+	h, ok := m.Handle(key)
+	if !ok {
+		var zero V
+		return zero, false
+	}
+	return m.observe(c, h), true
 }
 
 // IsPresent reports whether key is currently materialized. Non-reactive.
 func (m *ThreadSafeReactiveMap[K, V, H]) IsPresent(key K) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	_, ok := m.materialized[key]
-	return ok
+	return m.keyed.contains(key)
 }
 
-// PresentKeys returns a stable snapshot of the currently-materialized keys, in
-// first-materialization order (a copy — the internal order must not escape the
-// lock).
+// PresentKeys returns a snapshot of the currently-materialized keys, in current
+// order. Non-reactive — see Keys for the tracked read.
 func (m *ThreadSafeReactiveMap[K, V, H]) PresentKeys() []K {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := make([]K, len(m.order))
-	copy(out, m.order)
-	return out
+	return m.keyed.keys()
 }
 
 // PresentCount returns the number of currently-materialized entries.
 func (m *ThreadSafeReactiveMap[K, V, H]) PresentCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.order)
+	return m.keyed.length()
+}
+
+// -- Core surface: ordering, atomic move, and reactive membership --
+
+// Keys returns a reactive snapshot of the keys in their current order.
+// Subscribes the caller to order changes (add/remove and move/reorder), not to
+// per-entry value changes.
+func (m *ThreadSafeReactiveMap[K, V, H]) Keys(c ComputeOps) []K {
+	Get[int](c, m.orderSignal)
+	return m.PresentKeys()
+}
+
+// Len reports the reactive entry count. Subscribes the caller to membership
+// changes only.
+func (m *ThreadSafeReactiveMap[K, V, H]) Len(c ComputeOps) int {
+	Get[int](c, m.membership)
+	return m.PresentCount()
+}
+
+// IsEmpty reports the reactive emptiness check.
+func (m *ThreadSafeReactiveMap[K, V, H]) IsEmpty(c ComputeOps) bool { return m.Len(c) == 0 }
+
+// ContainsKey reports the reactive membership test for key. Subscribes the
+// caller to membership changes (add/remove of any key), not to value changes.
+func (m *ThreadSafeReactiveMap[K, V, H]) ContainsKey(c ComputeOps, key K) bool {
+	Get[int](c, m.membership)
+	return m.IsPresent(key)
+}
+
+// LenUntracked reports the non-reactive count.
+func (m *ThreadSafeReactiveMap[K, V, H]) LenUntracked() int { return m.PresentCount() }
+
+// Position reports key's current 0-based position in the order. Non-reactive.
+func (m *ThreadSafeReactiveMap[K, V, H]) Position(key K) (int, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.keyed.position(key)
+}
+
+// MoveTo atomically moves key to index in the order (#lzcellmove). The entry
+// keeps the same node, the same dependents, and its CRDT lineage — unlike a
+// Remove + re-mint, which re-allocates and bumps membership twice. Only the
+// order signal is bumped, so Keys readers recompute while Len / ContainsKey
+// readers stay cached. index is clamped to [0, len).
+func (m *ThreadSafeReactiveMap[K, V, H]) MoveTo(key K, index int) bool {
+	m.mu.Lock()
+	outcome := m.keyed.moveTo(key, index)
+	m.mu.Unlock()
+	return m.applyMove(outcome)
+}
+
+// MoveBefore atomically moves key to just before anchor (#lzcellmove).
+func (m *ThreadSafeReactiveMap[K, V, H]) MoveBefore(key, anchor K) bool {
+	m.mu.Lock()
+	outcome := m.keyed.moveBefore(key, anchor)
+	m.mu.Unlock()
+	return m.applyMove(outcome)
+}
+
+// MoveAfter atomically moves key to just after anchor (#lzcellmove).
+func (m *ThreadSafeReactiveMap[K, V, H]) MoveAfter(key, anchor K) bool {
+	m.mu.Lock()
+	outcome := m.keyed.moveAfter(key, anchor)
+	m.mu.Unlock()
+	return m.applyMove(outcome)
+}
+
+// Remove removes key's entry, detaching the removed node so no reader is left
+// on a stale value, and bumps reactive membership. Returns whether the key was
+// present.
+func (m *ThreadSafeReactiveMap[K, V, H]) Remove(key K) bool {
+	m.mu.Lock()
+	h, mutation := m.keyed.remove(key)
+	m.mu.Unlock()
+	if !mutation.changed() {
+		return false
+	}
+	// Off mu: teardown and the membership bump can both drive a dependent
+	// recompute that re-enters this map.
+	m.tsctx.WithLock(func(*Context) { m.clear(h) })
+	m.bumpMembership()
+	return true
 }
 
 // EntryKind returns this map's entry kind.
-func (m *ThreadSafeReactiveMap[K, V, H]) EntryKind() EntryKind {
-	var h H
-	return h.mapEntryKind()
-}
+func (m *ThreadSafeReactiveMap[K, V, H]) EntryKind() EntryKind { return m.kind }
 
 // ThreadSafeSourceMap is the input-cell specialization of ThreadSafeReactiveMap:
 // every entry is a settable input cell. Adds the cell-only Set.
 type ThreadSafeSourceMap[K comparable, V comparable] struct {
-	*ThreadSafeReactiveMap[K, V, threadSafeCellHandle]
+	*ThreadSafeReactiveMap[K, V, *Source[V]]
 }
 
-// NewThreadSafeSourceMap creates an empty thread-safe input-cell map.
-func NewThreadSafeSourceMap[K comparable, V comparable]() *ThreadSafeSourceMap[K, V] {
-	return &ThreadSafeSourceMap[K, V]{newThreadSafeReactiveMap[K, V, threadSafeCellHandle]()}
+// NewThreadSafeSourceMap creates an empty thread-safe input-cell map bound to ts.
+func NewThreadSafeSourceMap[K comparable, V comparable](ts *ThreadSafeContext) *ThreadSafeSourceMap[K, V] {
+	return &ThreadSafeSourceMap[K, V]{newThreadSafeReactiveMap[K, V, *Source[V]](
+		ts,
+		EntryKindSource,
+		func(ctx *Context, compute func() V) *Source[V] { return NewSource(ctx, compute()) },
+		func(c ComputeOps, h *Source[V]) V { return Get[V](c, h) },
+		func(h *Source[V]) { h.Invalidate() },
+	)}
 }
 
-// ThreadSafeCellMap is the pre-v2-kernel name for ThreadSafeSourceMap, kept as
-// an alias so existing callers keep compiling.
+// ThreadSafeCellMap is the pre-v2-kernel name for ThreadSafeSourceMap.
 //
 // Deprecated: renamed to ThreadSafeSourceMap.
 type ThreadSafeCellMap[K comparable, V comparable] = ThreadSafeSourceMap[K, V]
@@ -147,35 +291,48 @@ type ThreadSafeCellMap[K comparable, V comparable] = ThreadSafeSourceMap[K, V]
 // NewThreadSafeCellMap creates an empty thread-safe input-cell map.
 //
 // Deprecated: renamed to NewThreadSafeSourceMap.
-func NewThreadSafeCellMap[K comparable, V comparable]() *ThreadSafeSourceMap[K, V] {
-	return NewThreadSafeSourceMap[K, V]()
+func NewThreadSafeCellMap[K comparable, V comparable](ts *ThreadSafeContext) *ThreadSafeSourceMap[K, V] {
+	return NewThreadSafeSourceMap[K, V](ts)
 }
 
-// Set overwrites key's value (cells are writable inputs), materializing the
-// entry if absent. Cell-only: a derived ComputedMap slot is not settable.
+// Cell returns key's existing input cell, or nil. Non-reactive.
+func (m *ThreadSafeSourceMap[K, V]) Cell(key K) *Source[V] {
+	h, _ := m.Handle(key)
+	return h
+}
+
+// Set overwrites key's value, materializing the entry if absent. Cell-only: a
+// derived ComputedMap slot is not settable. Updating an existing entry leaves
+// membership and order untouched and invalidates only that entry's dependents.
 func (m *ThreadSafeSourceMap[K, V]) Set(key K, value V) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, ok := m.materialized[key]; !ok {
-		m.order = append(m.order, key)
+	if h, ok := m.Handle(key); ok {
+		m.tsctx.WithLock(func(*Context) { h.Set(value) })
+		return
 	}
-	m.materialized[key] = value // overwrite in place; no re-order.
+	m.mintWith(key, func() V { return value })
 }
 
-// ThreadSafeComputedMap is the derived-slot specialization of
-// ThreadSafeReactiveMap: GetOrInsertWith mints a slot on first access (lazy);
-// MaterializeAll pre-mints the keyset (eager). No Set.
+// ThreadSafeComputedMap is the derived-slot specialization: GetOrInsertWith
+// mints a slot on first access (lazy); MaterializeAll pre-mints the keyset
+// (eager). No Set.
 type ThreadSafeComputedMap[K comparable, V comparable] struct {
-	*ThreadSafeReactiveMap[K, V, threadSafeSlotHandle]
+	*ThreadSafeReactiveMap[K, V, *Computed[V]]
 }
 
 // NewThreadSafeComputedMap creates an empty thread-safe derived-slot map.
-func NewThreadSafeComputedMap[K comparable, V comparable]() *ThreadSafeComputedMap[K, V] {
-	return &ThreadSafeComputedMap[K, V]{newThreadSafeReactiveMap[K, V, threadSafeSlotHandle]()}
+func NewThreadSafeComputedMap[K comparable, V comparable](ts *ThreadSafeContext) *ThreadSafeComputedMap[K, V] {
+	return &ThreadSafeComputedMap[K, V]{newThreadSafeReactiveMap[K, V, *Computed[V]](
+		ts,
+		EntryKindComputed,
+		func(ctx *Context, compute func() V) *Computed[V] {
+			return NewSlot(ctx, func(c *Compute) V { return compute() })
+		},
+		func(c ComputeOps, h *Computed[V]) V { return Get[V](c, h) },
+		func(h *Computed[V]) { h.invalidate() },
+	)}
 }
 
-// ThreadSafeSlotMap is the pre-v2-kernel name for ThreadSafeComputedMap, kept as
-// an alias so existing callers keep compiling.
+// ThreadSafeSlotMap is the pre-v2-kernel name for ThreadSafeComputedMap.
 //
 // Deprecated: renamed to ThreadSafeComputedMap.
 type ThreadSafeSlotMap[K comparable, V comparable] = ThreadSafeComputedMap[K, V]
@@ -183,14 +340,20 @@ type ThreadSafeSlotMap[K comparable, V comparable] = ThreadSafeComputedMap[K, V]
 // NewThreadSafeSlotMap creates an empty thread-safe derived-slot map.
 //
 // Deprecated: renamed to NewThreadSafeComputedMap.
-func NewThreadSafeSlotMap[K comparable, V comparable]() *ThreadSafeComputedMap[K, V] {
-	return NewThreadSafeComputedMap[K, V]()
+func NewThreadSafeSlotMap[K comparable, V comparable](ts *ThreadSafeContext) *ThreadSafeComputedMap[K, V] {
+	return NewThreadSafeComputedMap[K, V](ts)
+}
+
+// Slot returns key's derived slot handle, or nil. Non-reactive.
+func (m *ThreadSafeComputedMap[K, V]) Slot(key K) *Computed[V] {
+	h, _ := m.Handle(key)
+	return h
 }
 
 // MaterializeAll eagerly pre-mints every key via factory. Observationally
-// identical to minting each key lazily on first read (GetOrInsertWith).
+// identical to minting each lazily on first read.
 func (m *ThreadSafeComputedMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
 	for _, key := range keys {
-		m.GetOrInsertWith(key, factory)
+		m.mintWith(key, func() V { return factory(key) })
 	}
 }

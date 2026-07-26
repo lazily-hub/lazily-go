@@ -51,7 +51,7 @@ func NewSourceMap[K comparable, V comparable](ctx *Context) *SourceMap[K, V] {
 		ctx,
 		EntryKindSource,
 		func(ctx *Context, compute func() V) *Source[V] { return NewSource(ctx, compute()) },
-		func(h *Source[V]) V { return h.Get() },
+		func(c ComputeOps, h *Source[V]) V { return Get[V](c, h) },
 		// Invalidate the orphaned cell's dependents on remove (mirrors lazily-rs
 		// CellHandle::clear_dependents): any reader that read this entry is
 		// notified that its source is gone.
@@ -78,7 +78,7 @@ func NewCellMap[K comparable, V comparable](ctx *Context) *SourceMap[K, V] {
 // first access. Adding a new key bumps reactive membership; re-fetching an
 // existing key does not.
 func (m *SourceMap[K, V]) EntryWith(key K, defaultValue func() V) *Source[V] {
-	if existing, ok := m.entries[key]; ok {
+	if existing, ok := m.keyed.get(key); ok {
 		return existing
 	}
 	return m.mintWith(key, defaultValue)
@@ -93,12 +93,13 @@ func (m *SourceMap[K, V]) Entry(key K, defaultValue V) *Source[V] {
 // Cell returns the existing value cell for key, or nil. Non-reactive: does not
 // subscribe the caller to membership.
 func (m *SourceMap[K, V]) Cell(key K) *Source[V] {
-	return m.entries[key]
+	handle, _ := m.keyed.get(key)
+	return handle
 }
 
 // Get reads the value at key if present (peek). Non-reactive.
 func (m *SourceMap[K, V]) Get(key K) (V, bool) {
-	if handle, ok := m.entries[key]; ok {
+	if handle, ok := m.keyed.get(key); ok {
 		return handle.Peek(), true
 	}
 	var zero V
@@ -108,7 +109,7 @@ func (m *SourceMap[K, V]) Get(key K) (V, bool) {
 // Read reads the value at key if present, subscribing the caller to that
 // entry's cell (reactive inside a Slot / Signal computation).
 func (m *SourceMap[K, V]) Read(key K) (V, bool) {
-	if handle, ok := m.entries[key]; ok {
+	if handle, ok := m.keyed.get(key); ok {
 		return handle.Get(), true
 	}
 	var zero V
@@ -121,7 +122,7 @@ func (m *SourceMap[K, V]) Read(key K) (V, bool) {
 //
 // Cell-only: an input is settable; a derived ComputedMap slot is not.
 func (m *SourceMap[K, V]) Set(key K, value V) {
-	if handle, ok := m.entries[key]; ok {
+	if handle, ok := m.keyed.get(key); ok {
 		handle.Set(value)
 		return
 	}
@@ -137,7 +138,7 @@ func (m *SourceMap[K, V]) Set(key K, value V) {
 // Go lacks Dart's optional named args: pass InsertAtEnd with a zero anchor for
 // the common append case.
 func (m *SourceMap[K, V]) Insert(key K, value V, at InsertAt, anchor K) bool {
-	if _, ok := m.entries[key]; ok {
+	if ok := m.keyed.contains(key); ok {
 		m.Set(key, value)
 		return false
 	}
@@ -160,8 +161,8 @@ func (m *SourceMap[K, V]) Insert(key K, value V, at InsertAt, anchor K) bool {
 // and apply it per-cell. Stable entries (unchanged value, in the LIS) keep
 // their cell handles and stay cached.
 func (m *SourceMap[K, V]) Reconcile(targetOrder []K, targetValues map[K]V) {
-	prior := make([]KeyValue[K, V], 0, len(m.order))
-	for _, k := range m.order {
+	prior := make([]KeyValue[K, V], 0, m.keyed.length())
+	for _, k := range m.keyed.keys() {
 		v, _ := m.Get(k)
 		prior = append(prior, KeyValue[K, V]{Key: k, Value: v})
 	}
@@ -452,10 +453,12 @@ func (t *SourceTree[K, V]) MoveChildBefore(id, anchor K) bool {
 func (t *SourceTree[K, V]) MoveChildAfter(id, anchor K) bool { return t.Children.MoveAfter(id, anchor) }
 
 // ChildIDs returns a reactive snapshot of this node's child ids in order.
-func (t *SourceTree[K, V]) ChildIDs() []K { return t.Children.Keys() }
+func (t *SourceTree[K, V]) ChildIDs(c ComputeOps) []K { return t.Children.Keys(c) }
 
 // ChildCount returns the reactive child count for this node.
-func (t *SourceTree[K, V]) ChildCount() int { return t.Children.Len() }
+func (t *SourceTree[K, V]) ChildCount(c ComputeOps) int { return t.Children.Len(c) }
 
 // HasChild reports the reactive membership test for a child of this node.
-func (t *SourceTree[K, V]) HasChild(id K) bool { return t.Children.ContainsKey(id) }
+func (t *SourceTree[K, V]) HasChild(c ComputeOps, id K) bool {
+	return t.Children.ContainsKey(c, id)
+}

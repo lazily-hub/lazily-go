@@ -9,7 +9,9 @@ import "testing"
 // always resolved; Set).
 
 func TestAsyncSourceMapResolvesImmediately(t *testing.T) {
-	fam := NewAsyncSourceMap[uint32, bool]()
+	actx := NewAsyncContext()
+	defer actx.Close()
+	fam := NewAsyncSourceMap[uint32, bool](actx)
 	if fam.EntryKind() != EntryKindSource {
 		t.Fatalf("kind = %v, want cell", fam.EntryKind())
 	}
@@ -29,7 +31,9 @@ func TestAsyncSourceMapResolvesImmediately(t *testing.T) {
 }
 
 func TestAsyncComputedMapLazyDefersThenResolves(t *testing.T) {
-	fam := NewAsyncComputedMap[uint32, uint32]()
+	actx := NewAsyncContext()
+	defer actx.Close()
+	fam := NewAsyncComputedMap[uint32, uint32](actx)
 	factory := func(k uint32) uint32 { return k * 10 }
 	if fam.EntryKind() != EntryKindComputed {
 		t.Fatalf("kind = %v, want slot", fam.EntryKind())
@@ -63,7 +67,9 @@ func TestAsyncComputedMapLazyDefersThenResolves(t *testing.T) {
 }
 
 func TestAsyncComputedMapPendingReadIsNone(t *testing.T) {
-	fam := NewAsyncComputedMap[uint32, uint32]()
+	actx := NewAsyncContext()
+	defer actx.Close()
+	fam := NewAsyncComputedMap[uint32, uint32](actx)
 	factory := func(k uint32) uint32 { return k * 2 }
 	fam.MaterializeAll([]uint32{5, 6}, factory)
 	// Eager allocates the slots (present) but they start pending.
@@ -83,10 +89,12 @@ func TestAsyncComputedMapPendingReadIsNone(t *testing.T) {
 }
 
 func TestAsyncComputedMapEventualTransparency(t *testing.T) {
+	actx := NewAsyncContext()
+	defer actx.Close()
 	factory := func(k uint32) uint32 { return k * 2 }
-	eager := NewAsyncComputedMap[uint32, uint32]()
+	eager := NewAsyncComputedMap[uint32, uint32](actx)
 	eager.MaterializeAll([]uint32{1, 2, 3}, factory)
-	lazy := NewAsyncComputedMap[uint32, uint32]()
+	lazy := NewAsyncComputedMap[uint32, uint32](actx)
 	for _, k := range []uint32{1, 2, 3} {
 		if eager.Drive(k, factory) != lazy.Drive(k, factory) {
 			t.Fatalf("eventual transparency broke at k=%d", k)
@@ -95,7 +103,9 @@ func TestAsyncComputedMapEventualTransparency(t *testing.T) {
 }
 
 func TestAsyncComputedMapPresentSetGrowsMonotonically(t *testing.T) {
-	fam := NewAsyncComputedMap[uint32, uint32]()
+	actx := NewAsyncContext()
+	defer actx.Close()
+	fam := NewAsyncComputedMap[uint32, uint32](actx)
 	id := func(k uint32) uint32 { return k }
 	_ = fam.Drive(5, id)
 	_ = fam.Drive(5, id) // repeat: no growth
@@ -109,7 +119,9 @@ func TestAsyncComputedMapPresentSetGrowsMonotonically(t *testing.T) {
 }
 
 func TestAsyncSourceMapReactsToSet(t *testing.T) {
-	fam := NewAsyncSourceMap[uint32, bool]()
+	actx := NewAsyncContext()
+	defer actx.Close()
+	fam := NewAsyncSourceMap[uint32, bool](actx)
 	fam.Set(10, true)
 	fam.Set(20, true)
 	if v, ok := fam.Observe(20, nil); !ok || v != true {
@@ -122,7 +134,9 @@ func TestAsyncSourceMapReactsToSet(t *testing.T) {
 }
 
 func TestAsyncComputedMapResolveOneNeverDisturbsAnother(t *testing.T) {
-	fam := NewAsyncComputedMap[uint32, uint32]()
+	actx := NewAsyncContext()
+	defer actx.Close()
+	fam := NewAsyncComputedMap[uint32, uint32](actx)
 	factory := func(k uint32) uint32 { return k * 2 }
 	fam.MaterializeAll([]uint32{1, 2}, factory)
 	if got := fam.Drive(1, factory); got != 2 {

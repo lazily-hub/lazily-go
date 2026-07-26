@@ -158,7 +158,7 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 		// Prime readers against the CURRENT key set so each step's invalidation
 		// is measured in isolation (matches lazily-rs / lazily-dart).
 		valueReaders := map[string]*Computed[int]{}
-		for _, k := range m.Keys() {
+		for _, k := range m.Keys(ctx) {
 			key := k
 			slot := NewSlot(ctx, func(c *Compute) int { return Get(c, m.Cell(key)) })
 			slot.Get() // prime
@@ -186,7 +186,7 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 			expectedValueInval[k] = true
 		}
 		survivors := map[string]bool{}
-		for _, k := range m.Keys() {
+		for _, k := range m.Keys(ctx) {
 			survivors[k] = true
 		}
 		for k, slot := range valueReaders {
@@ -215,11 +215,11 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 		}
 
 		// Resulting state.
-		if got := m.Keys(); !reflect.DeepEqual(got, jsStrList(expected["order"])) {
+		if got := m.Keys(ctx); !reflect.DeepEqual(got, jsStrList(expected["order"])) {
 			t.Errorf("%s step %d %s: order = %v, want %v", name, i, op["type"], got, jsStrList(expected["order"]))
 		}
-		if !sameStringSet(m.Keys(), jsStrList(expected["membership"])) {
-			t.Errorf("%s step %d %s: membership = %v, want set %v", name, i, op["type"], m.Keys(), jsStrList(expected["membership"]))
+		if !sameStringSet(m.Keys(ctx), jsStrList(expected["membership"])) {
+			t.Errorf("%s step %d %s: membership = %v, want set %v", name, i, op["type"], m.Keys(ctx), jsStrList(expected["membership"]))
 		}
 		if ev := jsMap(expected["values"]); ev != nil {
 			for k, want := range ev {
@@ -346,7 +346,7 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 		targetValues[e.Key] = e.Value
 	}
 	m.Reconcile(targetOrder, targetValues)
-	if got := m.Keys(); !reflect.DeepEqual(got, resultOrder) {
+	if got := m.Keys(ctx); !reflect.DeepEqual(got, resultOrder) {
 		t.Errorf("%s: convergence order = %v, want %v", name, got, resultOrder)
 	}
 

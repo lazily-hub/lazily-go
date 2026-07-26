@@ -90,14 +90,15 @@ type ReactiveMap[K comparable, V comparable, H any] struct {
 	// mint allocates one entry node with compute as its canonical value producer
 	// (a cell sets it directly; a derived slot wraps it as its recomputation).
 	mint func(ctx *Context, compute func() V) H
-	// observe reads the entry through its owning context (subscribes the caller).
-	observe func(h H) V
+	// observe reads the entry through the caller's read surface. A *Compute
+	// registers a dependency edge; a *Context (or Untracked) registers none.
+	observe func(c ComputeOps, h H) V
 	// clear detaches a removed entry's node from the graph (clears dependents).
 	clear func(h H)
 
-	entries map[K]H
-	// order is the authoritative key list in first-materialization order.
-	order []K
+	// keyed is the present set + key order + the move algebra. Graph-agnostic
+	// and shared with the thread-safe and async flavors; see keyed_order.go.
+	keyed keyedOrder[K, H]
 
 	// membership is bumped only when the set of keys changes (add/remove).
 	membership *Source[int]
@@ -114,7 +115,7 @@ func newReactiveMap[K comparable, V comparable, H any](
 	ctx *Context,
 	kind EntryKind,
 	mint func(ctx *Context, compute func() V) H,
-	observe func(h H) V,
+	observe func(c ComputeOps, h H) V,
 	clear func(h H),
 ) *ReactiveMap[K, V, H] {
 	return &ReactiveMap[K, V, H]{
@@ -123,8 +124,7 @@ func newReactiveMap[K comparable, V comparable, H any](
 		mint:        mint,
 		observe:     observe,
 		clear:       clear,
-		entries:     map[K]H{},
-		order:       nil,
+		keyed:       newKeyedOrder[K, H](),
 		membership:  NewSource[int](ctx, 0),
 		orderSignal: NewSource[int](ctx, 0),
 	}
@@ -149,13 +149,13 @@ func (m *ReactiveMap[K, V, H]) bumpMembership() {
 // as its canonical value producer), caches the handle, records order, and bumps
 // reactive membership. Re-minting an existing key returns the cached handle.
 func (m *ReactiveMap[K, V, H]) mintWith(key K, compute func() V) H {
-	if h, ok := m.entries[key]; ok {
+	if h, ok := m.keyed.get(key); ok {
 		return h // warm: already allocated.
 	}
-	h := m.mint(m.ctx, compute)
-	m.entries[key] = h
-	m.order = append(m.order, key)
-	m.bumpMembership()
+	h, mutation := m.keyed.insert(key, m.mint(m.ctx, compute))
+	if mutation.changed() {
+		m.bumpMembership()
+	}
 	return h
 }
 
@@ -164,26 +164,25 @@ func (m *ReactiveMap[K, V, H]) mintWith(key K, compute func() V) H {
 // materialization pull; for a SourceMap it seeds an input cell. Bumps reactive
 // membership only on insert; an existing key returns its current value without
 // re-running the factory.
-func (m *ReactiveMap[K, V, H]) GetOrInsertWith(key K, factory func(K) V) V {
-	if h, ok := m.entries[key]; ok {
-		return m.observe(h)
+func (m *ReactiveMap[K, V, H]) GetOrInsertWith(c ComputeOps, key K, factory func(K) V) V {
+	if h, ok := m.keyed.get(key); ok {
+		return m.observe(c, h)
 	}
 	h := m.mintWith(key, func() V { return factory(key) })
-	return m.observe(h)
+	return m.observe(c, h)
 }
 
 // Handle returns the existing entry handle for key, or (zero, false).
 // Non-reactive: does not subscribe the caller to membership.
 func (m *ReactiveMap[K, V, H]) Handle(key K) (H, bool) {
-	h, ok := m.entries[key]
-	return h, ok
+	return m.keyed.get(key)
 }
 
 // Observe reads the value at key if present, subscribing the caller to that
 // entry's node (reactive on that entry only). Returns (zero, false) if absent.
-func (m *ReactiveMap[K, V, H]) Observe(key K) (V, bool) {
-	if h, ok := m.entries[key]; ok {
-		return m.observe(h), true
+func (m *ReactiveMap[K, V, H]) Observe(c ComputeOps, key K) (V, bool) {
+	if h, ok := m.keyed.get(key); ok {
+		return m.observe(c, h), true
 	}
 	var zero V
 	return zero, false
@@ -195,64 +194,55 @@ func (m *ReactiveMap[K, V, H]) Observe(key K) (V, bool) {
 // The orphaned node stops driving any dependents; the runtime exposes no
 // node-recycle yet (mirrors lazily-rs).
 func (m *ReactiveMap[K, V, H]) Remove(key K) bool {
-	h, ok := m.entries[key]
-	if !ok {
+	h, mutation := m.keyed.remove(key)
+	if !mutation.changed() {
 		return false
 	}
-	delete(m.entries, key)
-	m.removeFromOrder(key)
 	m.clear(h)
 	m.bumpMembership()
 	return true
 }
 
-func (m *ReactiveMap[K, V, H]) removeFromOrder(key K) {
-	for i, k := range m.order {
-		if k == key {
-			m.order = append(m.order[:i], m.order[i+1:]...)
-			return
-		}
+// applyMove bumps the order signal only when the order actually changed. A
+// no-op move still reports success but must invalidate no reader.
+func (m *ReactiveMap[K, V, H]) applyMove(outcome mapMove) bool {
+	if !outcome.applied() {
+		return false
 	}
+	if outcome.changed() {
+		m.bumpOrder()
+	}
+	return true
 }
 
 // Keys returns a reactive snapshot of the keys in their current order.
 // Subscribes the caller to order changes (add/remove and move/reorder), not to
 // per-entry value changes.
-func (m *ReactiveMap[K, V, H]) Keys() []K {
-	m.orderSignal.Get() // subscribe to the order signal.
-	out := make([]K, len(m.order))
-	copy(out, m.order)
-	return out
+func (m *ReactiveMap[K, V, H]) Keys(c ComputeOps) []K {
+	Get[int](c, m.orderSignal) // subscribe to the order signal.
+	return m.keyed.keys()
 }
 
 // PresentKeys returns the currently-materialized keys in first-materialization
 // order. Non-reactive; the present set only grows (deferral, not de-allocation).
 func (m *ReactiveMap[K, V, H]) PresentKeys() []K {
-	out := make([]K, len(m.order))
-	copy(out, m.order)
-	return out
+	return m.keyed.keys()
 }
 
 // PresentCount returns the number of currently-materialized entries.
 // Non-reactive.
-func (m *ReactiveMap[K, V, H]) PresentCount() int { return len(m.order) }
+func (m *ReactiveMap[K, V, H]) PresentCount() int { return m.keyed.length() }
 
 // IsPresent reports whether key is currently materialized (present in the
 // allocated set). Non-reactive.
 func (m *ReactiveMap[K, V, H]) IsPresent(key K) bool {
-	_, ok := m.entries[key]
-	return ok
+	return m.keyed.contains(key)
 }
 
 // Position reports the current 0-based position of key in the order, or false
 // if absent. Non-reactive.
 func (m *ReactiveMap[K, V, H]) Position(key K) (int, bool) {
-	for i, k := range m.order {
-		if k == key {
-			return i, true
-		}
-	}
-	return 0, false
+	return m.keyed.position(key)
 }
 
 // MoveTo atomically moves key to index in the order (#lzcellmove).
@@ -266,87 +256,41 @@ func (m *ReactiveMap[K, V, H]) Position(key K) (int, bool) {
 // index is clamped to [0, len). A no-op move (already at position) bumps
 // nothing. Returns whether key was present.
 func (m *ReactiveMap[K, V, H]) MoveTo(key K, index int) bool {
-	from, ok := m.Position(key)
-	if !ok {
-		return false
-	}
-	to := index
-	if to < 0 {
-		to = 0
-	}
-	if hi := len(m.order) - 1; to > hi {
-		to = hi
-	}
-	if from == to {
-		return true
-	}
-	m.order = append(m.order[:from], m.order[from+1:]...)
-	// Re-insert at `to`.
-	m.order = append(m.order, key) // grow
-	copy(m.order[to+1:], m.order[to:])
-	m.order[to] = key
-	m.bumpOrder()
-	return true
+	return m.applyMove(m.keyed.moveTo(key, index))
 }
 
 // MoveBefore atomically moves key to just before anchor (#lzcellmove). Returns
 // whether the move could be expressed.
 func (m *ReactiveMap[K, V, H]) MoveBefore(key, anchor K) bool {
-	anchorIdx, ok := m.Position(anchor)
-	if !ok {
-		return false
-	}
-	from, ok := m.Position(key)
-	if !ok {
-		return false
-	}
-	// Removing key first shifts anchor left by one when key precedes it.
-	target := anchorIdx
-	if from < anchorIdx {
-		target = anchorIdx - 1
-	}
-	return m.MoveTo(key, target)
+	return m.applyMove(m.keyed.moveBefore(key, anchor))
 }
 
 // MoveAfter atomically moves key to just after anchor (#lzcellmove).
 func (m *ReactiveMap[K, V, H]) MoveAfter(key, anchor K) bool {
-	anchorIdx, ok := m.Position(anchor)
-	if !ok {
-		return false
-	}
-	from, ok := m.Position(key)
-	if !ok {
-		return false
-	}
-	target := anchorIdx + 1
-	if from <= anchorIdx {
-		target = anchorIdx
-	}
-	return m.MoveTo(key, target)
+	return m.applyMove(m.keyed.moveAfter(key, anchor))
 }
 
 // Len reports the reactive entry count. Subscribes the caller to membership
 // changes only.
-func (m *ReactiveMap[K, V, H]) Len() int {
-	m.membership.Get()
-	return len(m.order)
+func (m *ReactiveMap[K, V, H]) Len(c ComputeOps) int {
+	Get[int](c, m.membership)
+	return m.keyed.length()
 }
 
 // IsEmpty reports the reactive emptiness check. Subscribes the caller to
 // membership changes.
-func (m *ReactiveMap[K, V, H]) IsEmpty() bool { return m.Len() == 0 }
+func (m *ReactiveMap[K, V, H]) IsEmpty(c ComputeOps) bool { return m.Len(c) == 0 }
 
 // ContainsKey reports the reactive membership test for key. Subscribes the
 // caller to membership changes (add/remove of any key), not to value changes.
-func (m *ReactiveMap[K, V, H]) ContainsKey(key K) bool {
-	m.membership.Get()
-	_, ok := m.entries[key]
-	return ok
+func (m *ReactiveMap[K, V, H]) ContainsKey(c ComputeOps, key K) bool {
+	Get[int](c, m.membership)
+	return m.keyed.contains(key)
 }
 
 // LenUntracked reports the non-reactive count. Does not subscribe the caller to
 // anything.
-func (m *ReactiveMap[K, V, H]) LenUntracked() int { return len(m.order) }
+func (m *ReactiveMap[K, V, H]) LenUntracked() int { return m.keyed.length() }
 
 // EntryKind returns this map's entry kind (EntryKindSource for a SourceMap,
 // EntryKindComputed for a ComputedMap).
@@ -368,7 +312,7 @@ func NewComputedMap[K comparable, V comparable](ctx *Context) *ComputedMap[K, V]
 		func(ctx *Context, compute func() V) *Computed[V] {
 			return NewSlot(ctx, func(c *Compute) V { return compute() })
 		},
-		func(h *Computed[V]) V { return h.Get() },
+		func(c ComputeOps, h *Computed[V]) V { return Get[V](c, h) },
 		func(h *Computed[V]) { h.invalidate() },
 	)
 	return &ComputedMap[K, V]{ReactiveMap: rm}
@@ -397,8 +341,8 @@ func (m *ComputedMap[K, V]) Slot(key K) *Computed[V] {
 // MaterializeAll eagerly pre-mints a derived slot for every key via factory, up
 // front. Observationally identical to minting each key lazily on first read
 // (GetOrInsertWith) — it only changes when the nodes are allocated.
-func (m *ComputedMap[K, V]) MaterializeAll(keys []K, factory func(K) V) {
+func (m *ComputedMap[K, V]) MaterializeAll(c ComputeOps, keys []K, factory func(K) V) {
 	for _, key := range keys {
-		m.GetOrInsertWith(key, factory)
+		m.GetOrInsertWith(c, key, factory)
 	}
 }

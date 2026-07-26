@@ -126,7 +126,7 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 
 	ctx := NewContext()
 	eager := NewComputedMap[string, int](ctx)
-	eager.MaterializeAll(keys, factory)
+	eager.MaterializeAll(ctx, keys, factory)
 	if eager.EntryKind() != EntryKindComputed {
 		t.Fatalf("slot map mis-tagged: kind=%v", eager.EntryKind())
 	}
@@ -143,11 +143,11 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 
 	// Identical observed values under either strategy.
 	for k, want := range f.Expected.Observe {
-		if got, _ := eager.Observe(k); got != want {
-			t.Fatalf("eager.Observe(%q)=%d want %d", k, got, want)
+		if got, _ := eager.Observe(ctx, k); got != want {
+			t.Fatalf("eager.Observe(ctx, %q)=%d want %d", k, got, want)
 		}
-		if got := lazy.GetOrInsertWith(k, factory); got != want {
-			t.Fatalf("lazy.GetOrInsertWith(%q)=%d want %d", k, got, want)
+		if got := lazy.GetOrInsertWith(ctx, k, factory); got != want {
+			t.Fatalf("lazy.GetOrInsertWith(ctx, %q)=%d want %d", k, got, want)
 		}
 	}
 
@@ -155,7 +155,7 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 	// the read keys.
 	fresh := NewComputedMap[string, int](ctx)
 	for _, k := range f.Reads {
-		fresh.GetOrInsertWith(k, factory)
+		fresh.GetOrInsertWith(ctx, k, factory)
 	}
 	assertSameSet(t, fresh.PresentKeys(), f.Expected.LazyPresentAfterReads, "lazy_present_after_reads")
 }
@@ -171,7 +171,7 @@ func TestMaterializationDeferralNotDeallocation(t *testing.T) {
 
 	var sizes []int
 	for _, k := range f.Reads {
-		lazy.GetOrInsertWith(k, factory)
+		lazy.GetOrInsertWith(ctx, k, factory)
 		sizes = append(sizes, lazy.PresentCount())
 	}
 	if len(sizes) != len(f.Expected.PresentAfterEachRead) {
@@ -273,7 +273,7 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 		eagerCells.Entry(k, vals[k])
 	}
 	eagerSlots := NewComputedMap[string, int](ctx)
-	eagerSlots.MaterializeAll(slotKeys, factory)
+	eagerSlots.MaterializeAll(ctx, slotKeys, factory)
 	if eagerCells.EntryKind() != EntryKindSource || eagerSlots.EntryKind() != EntryKindComputed {
 		t.Fatalf("entry kinds mis-tagged")
 	}
@@ -295,7 +295,7 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	slotSet := strSet(slotKeys)
 	for _, k := range f.Reads {
 		if _, ok := slotSet[k]; ok {
-			lazySlots.GetOrInsertWith(k, factory)
+			lazySlots.GetOrInsertWith(ctx, k, factory)
 		} else {
 			lazyCells.Entry(k, vals[k])
 		}
@@ -314,11 +314,11 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 				t.Fatalf("lazyCells.Read(%q)=%d want %d", k, got, want)
 			}
 		} else {
-			if got, _ := eagerSlots.Observe(k); got != want {
-				t.Fatalf("eagerSlots.Observe(%q)=%d want %d", k, got, want)
+			if got, _ := eagerSlots.Observe(ctx, k); got != want {
+				t.Fatalf("eagerSlots.Observe(ctx, %q)=%d want %d", k, got, want)
 			}
-			if got := lazySlots.GetOrInsertWith(k, factory); got != want {
-				t.Fatalf("lazySlots.GetOrInsertWith(%q)=%d want %d", k, got, want)
+			if got := lazySlots.GetOrInsertWith(ctx, k, factory); got != want {
+				t.Fatalf("lazySlots.GetOrInsertWith(ctx, %q)=%d want %d", k, got, want)
 			}
 		}
 	}
@@ -331,7 +331,7 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 func TestComputedMapEagerMaterializesAll(t *testing.T) {
 	ctx := NewContext()
 	m := NewComputedMap[int, int](ctx)
-	m.MaterializeAll([]int{0, 1, 2, 5, 9}, func(k int) int { return k * 3 })
+	m.MaterializeAll(ctx, []int{0, 1, 2, 5, 9}, func(k int) int { return k * 3 })
 	if m.PresentCount() != 5 {
 		t.Fatalf("eager present count %d != 5", m.PresentCount())
 	}
@@ -348,14 +348,14 @@ func TestComputedMapLazyDefersThenMintsOnAccess(t *testing.T) {
 	if m.PresentCount() != 0 || m.IsPresent(5) {
 		t.Fatalf("lazy must defer slots; present=%d", m.PresentCount())
 	}
-	if got := m.GetOrInsertWith(5, func(k int) int { return k * 3 }); got != 15 {
+	if got := m.GetOrInsertWith(ctx, 5, func(k int) int { return k * 3 }); got != 15 {
 		t.Fatalf("GetOrInsertWith(5)=%d want 15", got)
 	}
 	if !m.IsPresent(5) {
 		t.Fatalf("key 5 must be present after mint-on-access")
 	}
 	// Same key -> same slot; factory not re-run.
-	if got := m.GetOrInsertWith(5, func(k int) int { return k * 999 }); got != 15 {
+	if got := m.GetOrInsertWith(ctx, 5, func(k int) int { return k * 999 }); got != 15 {
 		t.Fatalf("GetOrInsertWith(5) re-run=%d want cached 15", got)
 	}
 	assertSameSet(t, keysToStr(m.PresentKeys()), []string{"5"}, "present after single read")
@@ -367,7 +367,7 @@ func TestComputedMapPresentSetMonotone(t *testing.T) {
 	factory := func(k int) int { return k * 2 }
 	var sizes []int
 	for _, k := range []int{2, 4, 2, 5} {
-		m.GetOrInsertWith(k, factory)
+		m.GetOrInsertWith(ctx, k, factory)
 		sizes = append(sizes, m.PresentCount())
 	}
 	want := []int{1, 2, 2, 3}
@@ -416,6 +416,9 @@ func TestSourceMapSetIsCellOnly(t *testing.T) {
 // type *aliases* (not new defined types) a value built through the deprecated
 // constructor is assignable to the new type, and vice versa.
 func TestDeprecatedMapNameAliases(t *testing.T) {
+	actx := NewAsyncContext()
+	defer actx.Close()
+	ts := NewThreadSafeContext()
 	ctx := NewContext()
 
 	var src *SourceMap[string, int] = NewCellMap[string, int](ctx)
@@ -431,36 +434,36 @@ func TestDeprecatedMapNameAliases(t *testing.T) {
 
 	var cmp *ComputedMap[string, int] = NewSlotMap[string, int](ctx)
 	var slot *SlotMap[string, int] = NewComputedMap[string, int](ctx)
-	cmp.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
-	slot.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
-	if got, _ := cmp.Observe("a"); got != 7 {
+	cmp.MaterializeAll(ctx, []string{"a"}, func(k string) int { return 7 })
+	slot.MaterializeAll(ctx, []string{"a"}, func(k string) int { return 7 })
+	if got, _ := cmp.Observe(ctx, "a"); got != 7 {
 		t.Fatalf("SlotMap alias: Observe(a)=%d want 7", got)
 	}
 	if cmp.EntryKind() != EntryKindComputed || slot.EntryKind() != EntryKindComputed {
 		t.Fatalf("SlotMap alias: entry kind drifted")
 	}
 
-	var tsSrc *ThreadSafeSourceMap[string, int] = NewThreadSafeCellMap[string, int]()
-	var tsCell *ThreadSafeCellMap[string, int] = NewThreadSafeSourceMap[string, int]()
+	var tsSrc *ThreadSafeSourceMap[string, int] = NewThreadSafeCellMap[string, int](ts)
+	var tsCell *ThreadSafeCellMap[string, int] = NewThreadSafeSourceMap[string, int](ts)
 	tsSrc.Set("a", 1)
 	tsCell.Set("a", 1)
-	var tsCmp *ThreadSafeComputedMap[string, int] = NewThreadSafeSlotMap[string, int]()
-	var tsSlot *ThreadSafeSlotMap[string, int] = NewThreadSafeComputedMap[string, int]()
+	var tsCmp *ThreadSafeComputedMap[string, int] = NewThreadSafeSlotMap[string, int](ts)
+	var tsSlot *ThreadSafeSlotMap[string, int] = NewThreadSafeComputedMap[string, int](ts)
 	tsCmp.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
 	tsSlot.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
-	if got, ok := tsCmp.Observe("a"); !ok || got != 7 {
+	if got, ok := tsCmp.Observe(ctx, "a"); !ok || got != 7 {
 		t.Fatalf("ThreadSafeSlotMap alias: Observe(a)=(%d,%v) want (7,true)", got, ok)
 	}
 	if tsSrc.EntryKind() != EntryKindSource || tsSlot.EntryKind() != EntryKindComputed {
 		t.Fatalf("ThreadSafe alias: entry kind drifted")
 	}
 
-	var asSrc *AsyncSourceMap[string, int] = NewAsyncCellMap[string, int]()
-	var asCell *AsyncCellMap[string, int] = NewAsyncSourceMap[string, int]()
+	var asSrc *AsyncSourceMap[string, int] = NewAsyncCellMap[string, int](actx)
+	var asCell *AsyncCellMap[string, int] = NewAsyncSourceMap[string, int](actx)
 	asSrc.Set("a", 1)
 	asCell.Set("a", 1)
-	var asCmp *AsyncComputedMap[string, int] = NewAsyncSlotMap[string, int]()
-	var asSlot *AsyncSlotMap[string, int] = NewAsyncComputedMap[string, int]()
+	var asCmp *AsyncComputedMap[string, int] = NewAsyncSlotMap[string, int](actx)
+	var asSlot *AsyncSlotMap[string, int] = NewAsyncComputedMap[string, int](actx)
 	asCmp.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
 	asSlot.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
 	if got := asCmp.Drive("a", func(k string) int { return 7 }); got != 7 {
@@ -482,13 +485,13 @@ func TestDeprecatedCellTreeNameAlias(t *testing.T) {
 	if got := child.Get(); got != 10 {
 		t.Fatalf("CellTree alias: child Get()=%d want 10", got)
 	}
-	if got := srcTree.ChildCount(); got != 2 {
+	if got := srcTree.ChildCount(ctx); got != 2 {
 		t.Fatalf("CellTree alias: ChildCount()=%d want 2", got)
 	}
 	if !srcTree.MoveChildBefore("b", "a") {
 		t.Fatalf("CellTree alias: MoveChildBefore failed")
 	}
-	if ids := srcTree.ChildIDs(); len(ids) != 2 || ids[0] != "b" || ids[1] != "a" {
+	if ids := srcTree.ChildIDs(ctx); len(ids) != 2 || ids[0] != "b" || ids[1] != "a" {
 		t.Fatalf("CellTree alias: ChildIDs()=%v want [b a]", ids)
 	}
 
