@@ -181,7 +181,7 @@ actions, and named fail-closed guards.
 
 ## Collections & CRDTs
 
-Keyed cell collections (`SourceMap`, `CellTree`) with LIS move-minimized
+Keyed cell collections (`SourceMap`, `SourceTree`) with LIS move-minimized
 reconciliation, the memoized semantic tree (`SemTree`), stable-id alignment, the
 **reactive queue** (`QueueCell` — a FIFO collection whose shell invalidates by
 reader kind: a push invalidates `Len`/`IsEmpty` (and `Head` when transitioning
@@ -216,8 +216,9 @@ handle kind fixed:
 These were named `CellMap` / `SlotMap` before the v2 kernel renamed the node
 kinds to `Source` and `Computed`. The old spellings remain as **deprecated**
 generic type aliases (`CellMap` = `SourceMap`, `SlotMap` = `ComputedMap`, plus
-the `Async*` / `ThreadSafe*` flavors) with deprecated constructor wrappers, so
-existing callers keep compiling. Generic type aliases require **Go 1.24+**.
+the `Async*` / `ThreadSafe*` flavors, and `CellTree` = `SourceTree` for the
+ordered keyed tree) with deprecated constructor wrappers, so existing callers
+keep compiling. Generic type aliases require **Go 1.24+**.
 
 The shared surface — `GetOrInsertWith` / `Remove` / `Move*` / `Keys` / `Len` /
 `ContainsKey` / membership + order signals — lives on the generic `ReactiveMap`.
@@ -327,7 +328,7 @@ notes and platform carve-outs lives in
 | Async reactive context | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Flat state machine | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Harel state charts | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Keyed reactive maps (`ReactiveMap`: `SourceMap` / `ComputedMap`) + `CellTree` + reconcile | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Keyed reactive maps (`ReactiveMap`: `SourceMap` / `ComputedMap`) + `SourceTree` + reconcile | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Memoized semantic tree (`SemTree`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Stable-id alignment (manufactured identity) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Reactive queue (`QueueCell` SPSC/MPSC + `QueueStorage` adapter) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |

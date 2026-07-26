@@ -1,4 +1,4 @@
-// Keyed cell collections — SourceMap, CellTree, and keyed reconciliation
+// Keyed cell collections — SourceMap, SourceTree, and keyed reconciliation
 // (cell-model.md § Keyed cell collections).
 //
 // A keyed cell collection is a *composition of cells*, not a new cell kind. It
@@ -367,54 +367,69 @@ func longestIncreasingSubsequence(seq []int) []int {
 	return res
 }
 
-// CellTree is an ordered keyed tree (cell-model.md § Ordered keyed tree).
+// SourceTree is an ordered keyed tree (cell-model.md § Ordered keyed tree).
 //
 // Each node is (stable id, value cell, ordered keyed child collection). A
 // node's children are a SourceMap keyed by child id, so per-level
 // membership/order reactivity and the atomic-move guarantee are inherited. The
 // tree is still a composition of cells — not a new cell kind — so per-cell merge
 // applies node-by-node. Recursive, mirroring lazily-rs/src/cell_tree.rs.
-type CellTree[K comparable, V comparable] struct {
+type SourceTree[K comparable, V comparable] struct {
 	ctx      *Context
 	ID       K
 	Value    *Source[V]
-	Children *SourceMap[K, *CellTree[K, V]]
+	Children *SourceMap[K, *SourceTree[K, V]]
 }
 
-// NewCellTree creates a tree node with id and initialValue and an empty child
+// NewSourceTree creates a tree node with id and initialValue and an empty child
 // collection.
-func NewCellTree[K comparable, V comparable](ctx *Context, id K, initialValue V) *CellTree[K, V] {
-	return &CellTree[K, V]{
+func NewSourceTree[K comparable, V comparable](ctx *Context, id K, initialValue V) *SourceTree[K, V] {
+	return &SourceTree[K, V]{
 		ctx:      ctx,
 		ID:       id,
 		Value:    NewSource[V](ctx, initialValue),
-		Children: NewSourceMap[K, *CellTree[K, V]](ctx),
+		Children: NewSourceMap[K, *SourceTree[K, V]](ctx),
 	}
 }
 
+// CellTree is the pre-v2-kernel name for SourceTree, kept as an alias so
+// existing callers keep compiling. The v2 kernel renamed the node kinds to
+// Source and Computed; the keyed collections follow.
+//
+// Deprecated: renamed to SourceTree.
+type CellTree[K comparable, V comparable] = SourceTree[K, V]
+
+// NewCellTree creates a tree node with id and initialValue and an empty child
+// collection.
+//
+// Deprecated: renamed to NewSourceTree.
+func NewCellTree[K comparable, V comparable](ctx *Context, id K, initialValue V) *SourceTree[K, V] {
+	return NewSourceTree[K, V](ctx, id, initialValue)
+}
+
 // Get reads this node's value (reactive).
-func (t *CellTree[K, V]) Get() V { return t.Value.Get() }
+func (t *SourceTree[K, V]) Get() V { return t.Value.Get() }
 
 // Set sets this node's value (PartialEq-guarded).
-func (t *CellTree[K, V]) Set(next V) { t.Value.Set(next) }
+func (t *SourceTree[K, V]) Set(next V) { t.Value.Set(next) }
 
 // NodeID returns the id of this node (stable handle).
-func (t *CellTree[K, V]) NodeID() K { return t.ID }
+func (t *SourceTree[K, V]) NodeID() K { return t.ID }
 
 // InsertChild inserts a fresh child id with value, returning the child node. If
 // the child already exists, its value is updated and the existing node returned.
-func (t *CellTree[K, V]) InsertChild(id K, value V) *CellTree[K, V] {
+func (t *SourceTree[K, V]) InsertChild(id K, value V) *SourceTree[K, V] {
 	if existing := t.Children.Cell(id); existing != nil {
 		existing.Peek().Set(value)
 		return existing.Peek()
 	}
-	child := NewCellTree[K, V](t.ctx, id, value)
+	child := NewSourceTree[K, V](t.ctx, id, value)
 	t.Children.Set(id, child)
 	return child
 }
 
 // Child returns the child node for id, or nil. Non-reactive.
-func (t *CellTree[K, V]) Child(id K) *CellTree[K, V] {
+func (t *SourceTree[K, V]) Child(id K) *SourceTree[K, V] {
 	child, ok := t.Children.Get(id)
 	if !ok {
 		return nil
@@ -423,22 +438,24 @@ func (t *CellTree[K, V]) Child(id K) *CellTree[K, V] {
 }
 
 // RemoveChild removes the child id. Returns whether it was present.
-func (t *CellTree[K, V]) RemoveChild(id K) bool { return t.Children.Remove(id) }
+func (t *SourceTree[K, V]) RemoveChild(id K) bool { return t.Children.Remove(id) }
 
 // MoveChildTo atomically moves child id to index within this node's children.
-func (t *CellTree[K, V]) MoveChildTo(id K, index int) bool { return t.Children.MoveTo(id, index) }
+func (t *SourceTree[K, V]) MoveChildTo(id K, index int) bool { return t.Children.MoveTo(id, index) }
 
 // MoveChildBefore atomically moves child id to just before anchor.
-func (t *CellTree[K, V]) MoveChildBefore(id, anchor K) bool { return t.Children.MoveBefore(id, anchor) }
+func (t *SourceTree[K, V]) MoveChildBefore(id, anchor K) bool {
+	return t.Children.MoveBefore(id, anchor)
+}
 
 // MoveChildAfter atomically moves child id to just after anchor.
-func (t *CellTree[K, V]) MoveChildAfter(id, anchor K) bool { return t.Children.MoveAfter(id, anchor) }
+func (t *SourceTree[K, V]) MoveChildAfter(id, anchor K) bool { return t.Children.MoveAfter(id, anchor) }
 
 // ChildIDs returns a reactive snapshot of this node's child ids in order.
-func (t *CellTree[K, V]) ChildIDs() []K { return t.Children.Keys() }
+func (t *SourceTree[K, V]) ChildIDs() []K { return t.Children.Keys() }
 
 // ChildCount returns the reactive child count for this node.
-func (t *CellTree[K, V]) ChildCount() int { return t.Children.Len() }
+func (t *SourceTree[K, V]) ChildCount() int { return t.Children.Len() }
 
 // HasChild reports the reactive membership test for a child of this node.
-func (t *CellTree[K, V]) HasChild(id K) bool { return t.Children.ContainsKey(id) }
+func (t *SourceTree[K, V]) HasChild(id K) bool { return t.Children.ContainsKey(id) }

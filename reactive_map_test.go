@@ -419,6 +419,40 @@ func TestDeprecatedMapNameAliases(t *testing.T) {
 	}
 }
 
+// TestDeprecatedCellTreeNameAlias pins the same promise for the ordered keyed
+// tree: CellTree is an alias of SourceTree, so nodes cross the old/new spellings
+// in both directions and the deprecated constructor still builds a live tree.
+func TestDeprecatedCellTreeNameAlias(t *testing.T) {
+	ctx := NewContext()
+
+	var srcTree *SourceTree[string, int] = NewCellTree[string, int](ctx, "root", 1)
+	var cellTree *CellTree[string, int] = NewSourceTree[string, int](ctx, "root", 1)
+
+	var child *CellTree[string, int] = srcTree.InsertChild("a", 10)
+	srcTree.InsertChild("b", 20)
+	if got := child.Get(); got != 10 {
+		t.Fatalf("CellTree alias: child Get()=%d want 10", got)
+	}
+	if got := srcTree.ChildCount(); got != 2 {
+		t.Fatalf("CellTree alias: ChildCount()=%d want 2", got)
+	}
+	if !srcTree.MoveChildBefore("b", "a") {
+		t.Fatalf("CellTree alias: MoveChildBefore failed")
+	}
+	if ids := srcTree.ChildIDs(); len(ids) != 2 || ids[0] != "b" || ids[1] != "a" {
+		t.Fatalf("CellTree alias: ChildIDs()=%v want [b a]", ids)
+	}
+
+	var back *SourceTree[string, int] = cellTree
+	back.Set(2)
+	if got := cellTree.Get(); got != 2 {
+		t.Fatalf("CellTree alias: Get()=%d want 2", got)
+	}
+	if cellTree.NodeID() != "root" {
+		t.Fatalf("CellTree alias: NodeID()=%q want root", cellTree.NodeID())
+	}
+}
+
 func keysToStr(ks []int) []string {
 	out := make([]string, len(ks))
 	for i, k := range ks {
