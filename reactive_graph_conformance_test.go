@@ -3,6 +3,7 @@ package lazily
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,6 +49,7 @@ var reactiveGraphReplayed = []string{
 	"disposal_does_not_run_surviving_effects.json",
 	"dispose_detaches_edges_both_directions.json",
 	"dispose_signal_reverts_to_lazy.json",
+	"failed_compute_is_never_cached.json",
 	"read_after_dispose_is_an_error.json",
 	"recycled_id_inherits_nothing.json",
 	"scope_teardown_equals_fold_of_disposals.json",
@@ -173,6 +175,11 @@ type graphModel interface {
 	// corpus spells `dispose_signal`, not a graph teardown.
 	disposeSignal(n nodeRef)
 	batch(run func())
+	// failNext arms the next `count` computes of an existing node to fail, so a
+	// fixture can assert on computesOf that a failed compute is never cached:
+	// the node re-runs per read instead of replaying a stored error. It creates
+	// nothing and does not touch the node's dependency set.
+	failNext(id string, count int)
 	// computesOf is the cumulative number of times a node's compute body ran.
 	// It is the only observable that separates an eager signal from the lazy
 	// slot it is built on: their values are identical for every read sequence.
@@ -248,11 +255,42 @@ func (c *computeLog) count(id string) int {
 
 // --- sync model -------------------------------------------------------------
 
+// errComputeFailed is the failure a `fail_next`-armed compute body raises. It is
+// a runner-owned sentinel, not a library error: the contract under test is that
+// the library does not CACHE it, so what it is matters less than that the same
+// body raises it once per armed run and the node still re-runs afterwards.
+var errComputeFailed = errors.New("reactive-graph: compute_failed (fail_next)")
+
+// armedFailures counts, per node id, how many upcoming compute bodies must fail.
+type armedFailures map[string]int
+
+func (a *armedFailures) arm(id string, count int) {
+	if *a == nil {
+		*a = armedFailures{}
+	}
+	if count <= 0 {
+		count = 1
+	}
+	(*a)[id] += count
+}
+
+// take reports whether this run is armed to fail, consuming one arming. Called
+// from inside the compute body, after the compute counter ticks, so an armed run
+// is counted exactly like a successful one.
+func (a *armedFailures) take(id string) bool {
+	if *a == nil || (*a)[id] <= 0 {
+		return false
+	}
+	(*a)[id]--
+	return true
+}
+
 // syncModel replays against the default single-threaded *Context.
 type syncModel struct {
 	ctx      *Context
 	log      effectLog
 	computes computeLog
+	armed    armedFailures
 }
 
 func newSyncModel() graphModel { return &syncModel{ctx: NewContext()} }
@@ -286,6 +324,9 @@ func (m *syncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
 	s := NewNamedSlot(m.ctx, id, func(c *Compute) int {
 		m.computes.tick(id)
+		if m.armed.take(id) {
+			panic(errComputeFailed)
+		}
 		sum := offset
 		for _, d := range deps {
 			sum += m.trackRead(c, d)
@@ -319,6 +360,8 @@ func (m *syncModel) batch(run func()) { m.ctx.Batch(run) }
 
 func (m *syncModel) computesOf(id string) int { return m.computes.count(id) }
 
+func (m *syncModel) failNext(id string, count int) { m.armed.arm(id, count) }
+
 func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
 	e := NewEffect(m.ctx, func(c *Compute) func() {
@@ -344,7 +387,18 @@ func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
 	return nodeRef{kind: kindEffect, id: id, h: e}
 }
 
-func (m *syncModel) read(r nodeRef) (int, error) {
+func (m *syncModel) read(r nodeRef) (v int, err error) {
+	// A `fail_next`-armed compute body panics; the corpus observes that as a
+	// failed read, exactly like the disposed-node error TryGet already returns.
+	defer func() {
+		if rec := recover(); rec != nil {
+			if rec == errComputeFailed {
+				v, err = 0, errComputeFailed
+				return
+			}
+			panic(rec)
+		}
+	}()
 	switch r.kind {
 	case kindCell:
 		return r.h.(*Source[int]).TryGet()
@@ -426,6 +480,7 @@ type asyncModel struct {
 	ctx      *AsyncContext
 	log      effectLog
 	computes computeLog
+	armed    armedFailures
 }
 
 func newAsyncModel() graphModel { return &asyncModel{ctx: NewAsyncContext()} }
@@ -493,6 +548,9 @@ func (m *asyncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
 	s := NewAsyncSlot(m.ctx, func(cc *AsyncComputeContext) (int, error) {
 		m.computes.tick(id)
+		if m.armed.take(id) {
+			return 0, errComputeFailed
+		}
 		sum := offset
 		for _, d := range deps {
 			v, err := m.trackRead(cc, d)
@@ -525,6 +583,8 @@ func (m *asyncModel) disposeSignal(r nodeRef) {
 func (m *asyncModel) batch(run func()) { m.ctx.Batch(run) }
 
 func (m *asyncModel) computesOf(id string) int { return m.computes.count(id) }
+
+func (m *asyncModel) failNext(id string, count int) { m.armed.arm(id, count) }
 
 func (m *asyncModel) effect(id string, reads []nodeRef) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
@@ -744,13 +804,25 @@ func (e *replayEngine) put(id string, r nodeRef) {
 // readID is a top-level read. A non-nil error is the corpus's
 // `read_after_dispose`; once a node has errored it stays poisoned, matching a
 // live reader that names a disposed dependency and does not recover.
+// readID reads through the model, latching disposal so a torn-down id stays
+// unreadable without re-entering the graph.
+//
+// The latch is deliberately NOT applied to a `fail_next` compute failure. Those
+// are two different things the corpus must be able to tell apart: disposal is
+// permanent by contract, a failed compute is recoverable by contract (the next
+// read re-runs the body). Latching both was safe while disposal was the only
+// error a read could produce; with `failed_compute_is_never_cached.json` it
+// would make the engine report the very defect that fixture exists to catch,
+// against bindings that are correct.
 func (e *replayEngine) readID(id string) (int, error) {
 	if e.poisoned[id] {
 		return 0, ErrDisposed
 	}
 	v, err := e.m.read(e.node(id))
 	if err != nil {
-		e.poisoned[id] = true
+		if !errors.Is(err, errComputeFailed) {
+			e.poisoned[id] = true
+		}
 		return 0, err
 	}
 	return v, nil
@@ -807,6 +879,8 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 			return nil, true
 		}
 		return &v, false
+	case "fail_next":
+		e.m.failNext(op.ID, op.Count)
 	case "set_cell":
 		if op.Value == nil {
 			e.t.Fatalf("%s#%d: set_cell op has no value", e.fixture, e.step)
@@ -964,7 +1038,11 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 			case "error":
 				var want *string
 				e.unmarshal(key, raw, &want)
-				e.check("error", opError, want != nil && *want == "read_after_dispose")
+				// Any non-null error code means "this op must fail"; null means
+				// "must not". The runner does not model error identity — the
+				// fixtures carry the code so the contract is legible, and each
+				// binding's own tests pin which error type it raises.
+				e.check("error", opError, want != nil)
 			case "read":
 				var want map[string]int
 				e.unmarshal(key, raw, &want)
