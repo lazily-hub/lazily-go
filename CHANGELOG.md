@@ -4,6 +4,22 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.22.0
+
+### Changed
+
+- **Renamed the keyed maps to `SourceMap` / `ComputedMap`**, finishing the v2 kernel
+  migration: the node kinds became `Source` and `Computed`, and the map names now say which
+  kind of entry they hold instead of the pre-v2 `Cell` / `Slot` vocabulary.
+  `CellMap` -> `SourceMap`, `SlotMap` -> `ComputedMap`, and the `ThreadSafe*` / `Async*`
+  variants alongside them.
+
+### Deprecated
+
+- The old names are kept as deprecated aliases of the new ones, so existing callers still
+  compile. Conformance runners accept both the old and new `model` spellings in a fixture;
+  the corpus emits only the new. Fixture FILE names are unchanged.
+
 ## Unreleased
 
 ### Added — disposal, teardown scopes, and edge-degree introspection (`#lzspecedgeindex`)
