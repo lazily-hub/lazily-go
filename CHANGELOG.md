@@ -4,6 +4,27 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.23.1
+
+No library behaviour changed — no non-test `.go` source differs from v0.23.0.
+
+### Changed
+
+- **Coverage table sync: rs ships the queue family on all three flavors.** Six
+  rows in the README support matrix flip to ✅ in the Rust column — `QueueCell`,
+  `TopicCell`, and `WorkQueueCell` each gain their thread-safe and async
+  flavors. The Go column is unchanged; these rows report another binding's
+  status, not this one's.
+
+### Added
+
+- A conformance-coverage guard (`make conformance-coverage`) that fails the
+  build when the canonical corpus grows a fixture no test in this repo even
+  names, backed by a runtime manifest proving the fixture bytes were really
+  read rather than merely mentioned.
+- A vendored-fixture drift test that fails the build when a vendored fixture
+  diverges from its canonical counterpart.
+
 ## v0.23.0
 
 ### Added
