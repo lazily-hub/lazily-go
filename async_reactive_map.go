@@ -39,12 +39,12 @@ type AsyncMapHandle interface {
 
 type asyncCellHandle struct{}
 
-func (asyncCellHandle) mapEntryKind() EntryKind { return EntryKindCell }
+func (asyncCellHandle) mapEntryKind() EntryKind { return EntryKindSource }
 func (asyncCellHandle) resolvedOnMint() bool    { return true }
 
 type asyncSlotHandle struct{}
 
-func (asyncSlotHandle) mapEntryKind() EntryKind { return EntryKindSlot }
+func (asyncSlotHandle) mapEntryKind() EntryKind { return EntryKindComputed }
 func (asyncSlotHandle) resolvedOnMint() bool    { return false }
 
 // asyncMapEntry is one allocated (present) entry: resolved tracks the async

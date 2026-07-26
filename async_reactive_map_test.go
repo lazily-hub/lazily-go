@@ -10,7 +10,7 @@ import "testing"
 
 func TestAsyncSourceMapResolvesImmediately(t *testing.T) {
 	fam := NewAsyncSourceMap[uint32, bool]()
-	if fam.EntryKind() != EntryKindCell {
+	if fam.EntryKind() != EntryKindSource {
 		t.Fatalf("kind = %v, want cell", fam.EntryKind())
 	}
 	for _, k := range []uint32{1, 2, 3} {
@@ -31,7 +31,7 @@ func TestAsyncSourceMapResolvesImmediately(t *testing.T) {
 func TestAsyncComputedMapLazyDefersThenResolves(t *testing.T) {
 	fam := NewAsyncComputedMap[uint32, uint32]()
 	factory := func(k uint32) uint32 { return k * 10 }
-	if fam.EntryKind() != EntryKindSlot {
+	if fam.EntryKind() != EntryKindComputed {
 		t.Fatalf("kind = %v, want slot", fam.EntryKind())
 	}
 	if got := fam.PresentCount(); got != 0 {

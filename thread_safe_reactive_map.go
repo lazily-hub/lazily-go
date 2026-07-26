@@ -36,11 +36,11 @@ type ThreadSafeMapHandle interface{ mapEntryKind() EntryKind }
 
 type threadSafeCellHandle struct{}
 
-func (threadSafeCellHandle) mapEntryKind() EntryKind { return EntryKindCell }
+func (threadSafeCellHandle) mapEntryKind() EntryKind { return EntryKindSource }
 
 type threadSafeSlotHandle struct{}
 
-func (threadSafeSlotHandle) mapEntryKind() EntryKind { return EntryKindSlot }
+func (threadSafeSlotHandle) mapEntryKind() EntryKind { return EntryKindComputed }
 
 // ThreadSafeReactiveMap is the thread-safe keyed reactive map (#reactivemap)
 // generic over the entry handle kind H, with all present-set mutation serialized

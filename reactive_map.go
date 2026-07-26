@@ -35,19 +35,35 @@ package lazily
 type EntryKind int
 
 const (
-	// EntryKindCell is an input cell (*Cell[V]) — always materialized on read.
-	EntryKindCell EntryKind = iota
-	// EntryKindSlot is a derived slot (*Slot[V]) — materialized eagerly (pre-mint)
-	// or lazily on first read.
-	EntryKindSlot
+	// EntryKindSource is an input cell (*Source[V]) — always materialized on read.
+	EntryKindSource EntryKind = iota
+	// EntryKindComputed is a derived slot (*Computed[V]) — materialized eagerly
+	// (pre-mint) or lazily on first read.
+	EntryKindComputed
 )
 
-// String renders the entry kind for diagnostics.
+// EntryKindCell is the pre-v2-kernel name for EntryKindSource, kept as an alias
+// so existing callers keep compiling. The v2 kernel renamed the node kinds to
+// Source and Computed; the entry kinds follow. The underlying value and its
+// wire string ("cell") are unchanged.
+//
+// Deprecated: renamed to EntryKindSource.
+const EntryKindCell = EntryKindSource
+
+// EntryKindSlot is the pre-v2-kernel name for EntryKindComputed. The underlying
+// value and its wire string ("slot") are unchanged.
+//
+// Deprecated: renamed to EntryKindComputed.
+const EntryKindSlot = EntryKindComputed
+
+// String renders the entry kind for diagnostics. The rendered strings are the
+// wire spelling shared with the conformance fixtures and the other bindings;
+// the Go identifier rename does not change them.
 func (k EntryKind) String() string {
 	switch k {
-	case EntryKindCell:
+	case EntryKindSource:
 		return "cell"
-	case EntryKindSlot:
+	case EntryKindComputed:
 		return "slot"
 	default:
 		return "unknown"
@@ -332,8 +348,8 @@ func (m *ReactiveMap[K, V, H]) ContainsKey(key K) bool {
 // anything.
 func (m *ReactiveMap[K, V, H]) LenUntracked() int { return len(m.order) }
 
-// EntryKind returns this map's entry kind (EntryKindCell for a SourceMap,
-// EntryKindSlot for a ComputedMap).
+// EntryKind returns this map's entry kind (EntryKindSource for a SourceMap,
+// EntryKindComputed for a ComputedMap).
 func (m *ReactiveMap[K, V, H]) EntryKind() EntryKind { return m.kind }
 
 // ComputedMap is the derived-slot specialization of ReactiveMap: every entry is
@@ -348,7 +364,7 @@ type ComputedMap[K comparable, V comparable] struct {
 func NewComputedMap[K comparable, V comparable](ctx *Context) *ComputedMap[K, V] {
 	rm := newReactiveMap[K, V, *Computed[V]](
 		ctx,
-		EntryKindSlot,
+		EntryKindComputed,
 		func(ctx *Context, compute func() V) *Computed[V] {
 			return NewSlot(ctx, func(c *Compute) V { return compute() })
 		},

@@ -13,6 +13,7 @@ package lazily
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"sort"
 	"strconv"
@@ -126,7 +127,7 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 	ctx := NewContext()
 	eager := NewComputedMap[string, int](ctx)
 	eager.MaterializeAll(keys, factory)
-	if eager.EntryKind() != EntryKindSlot {
+	if eager.EntryKind() != EntryKindComputed {
 		t.Fatalf("slot map mis-tagged: kind=%v", eager.EntryKind())
 	}
 	if eager.PresentCount() != len(keys) {
@@ -192,6 +193,52 @@ func TestMaterializationDeferralNotDeallocation(t *testing.T) {
 	}
 }
 
+// parseFixtureEntryKind maps a materialization fixture's `kind` string onto an
+// EntryKind. The v2 kernel renamed the node kinds to Source / Computed, so the
+// shared fixtures may carry either the pre-v2 spelling ("cell" / "slot") or the
+// v2 spelling ("source" / "computed"); both are accepted so this runner keeps
+// passing across the fixture flip. Any other value is an error — never a silent
+// default or skip.
+func parseFixtureEntryKind(kind string) (EntryKind, error) {
+	switch kind {
+	case "cell", "source":
+		return EntryKindSource, nil
+	case "slot", "computed":
+		return EntryKindComputed, nil
+	default:
+		return 0, fmt.Errorf("unknown entry kind %q (want %q/%q or %q/%q)",
+			kind, "cell", "source", "slot", "computed")
+	}
+}
+
+// TestFixtureEntryKindSpellingsAreForwardCompatible pins the parse contract
+// above: both the pre-v2 and v2 spellings resolve to the same EntryKind values,
+// and an unrecognized kind is a hard error rather than a default.
+func TestFixtureEntryKindSpellingsAreForwardCompatible(t *testing.T) {
+	for _, tc := range []struct {
+		kind string
+		want EntryKind
+	}{
+		{"cell", EntryKindSource},
+		{"source", EntryKindSource},
+		{"slot", EntryKindComputed},
+		{"computed", EntryKindComputed},
+	} {
+		got, err := parseFixtureEntryKind(tc.kind)
+		if err != nil {
+			t.Fatalf("parseFixtureEntryKind(%q) errored: %v", tc.kind, err)
+		}
+		if got != tc.want {
+			t.Fatalf("parseFixtureEntryKind(%q)=%v want %v", tc.kind, got, tc.want)
+		}
+	}
+	for _, bad := range []string{"", "Cell", "signal", "effect", "unknown"} {
+		if _, err := parseFixtureEntryKind(bad); err == nil {
+			t.Fatalf("parseFixtureEntryKind(%q) must be a hard error, got nil", bad)
+		}
+	}
+}
+
 // cell_entries_materialized_in_every_mode / slot_entries_deferred_under_lazy:
 // entry kind is orthogonal to strategy. A mixed-kind key space is modelled by a
 // SourceMap over the cell entries and a ComputedMap over the slot entries.
@@ -205,13 +252,15 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	vals := make(map[string]int)
 	for key, e := range f.Spec.Entries {
 		vals[key] = e.Val
-		switch e.Kind {
-		case "cell":
+		kind, err := parseFixtureEntryKind(e.Kind)
+		if err != nil {
+			t.Fatalf("%v", err)
+		}
+		switch kind {
+		case EntryKindSource:
 			cellKeys = append(cellKeys, key)
-		case "slot":
+		case EntryKindComputed:
 			slotKeys = append(slotKeys, key)
-		default:
-			t.Fatalf("unknown entry kind %q", e.Kind)
 		}
 	}
 	factory := func(k string) int { return vals[k] }
@@ -225,7 +274,7 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	}
 	eagerSlots := NewComputedMap[string, int](ctx)
 	eagerSlots.MaterializeAll(slotKeys, factory)
-	if eagerCells.EntryKind() != EntryKindCell || eagerSlots.EntryKind() != EntryKindSlot {
+	if eagerCells.EntryKind() != EntryKindSource || eagerSlots.EntryKind() != EntryKindComputed {
 		t.Fatalf("entry kinds mis-tagged")
 	}
 	eagerPresent := append(eagerCells.PresentKeys(), eagerSlots.PresentKeys()...)
@@ -357,7 +406,7 @@ func TestSourceMapSetIsCellOnly(t *testing.T) {
 	if got, _ := m.Read(7); got != 100 {
 		t.Fatalf("Read(7)=%d want 100 after Set", got)
 	}
-	if m.EntryKind() != EntryKindCell {
+	if m.EntryKind() != EntryKindSource {
 		t.Fatalf("SourceMap kind = %v, want cell", m.EntryKind())
 	}
 }
@@ -376,7 +425,7 @@ func TestDeprecatedMapNameAliases(t *testing.T) {
 	if got, _ := src.Get("a"); got != 1 {
 		t.Fatalf("CellMap alias: Get(a)=%d want 1", got)
 	}
-	if src.EntryKind() != EntryKindCell || cell.EntryKind() != EntryKindCell {
+	if src.EntryKind() != EntryKindSource || cell.EntryKind() != EntryKindSource {
 		t.Fatalf("CellMap alias: entry kind drifted")
 	}
 
@@ -387,7 +436,7 @@ func TestDeprecatedMapNameAliases(t *testing.T) {
 	if got, _ := cmp.Observe("a"); got != 7 {
 		t.Fatalf("SlotMap alias: Observe(a)=%d want 7", got)
 	}
-	if cmp.EntryKind() != EntryKindSlot || slot.EntryKind() != EntryKindSlot {
+	if cmp.EntryKind() != EntryKindComputed || slot.EntryKind() != EntryKindComputed {
 		t.Fatalf("SlotMap alias: entry kind drifted")
 	}
 
@@ -402,7 +451,7 @@ func TestDeprecatedMapNameAliases(t *testing.T) {
 	if got, ok := tsCmp.Observe("a"); !ok || got != 7 {
 		t.Fatalf("ThreadSafeSlotMap alias: Observe(a)=(%d,%v) want (7,true)", got, ok)
 	}
-	if tsSrc.EntryKind() != EntryKindCell || tsSlot.EntryKind() != EntryKindSlot {
+	if tsSrc.EntryKind() != EntryKindSource || tsSlot.EntryKind() != EntryKindComputed {
 		t.Fatalf("ThreadSafe alias: entry kind drifted")
 	}
 
@@ -450,6 +499,39 @@ func TestDeprecatedCellTreeNameAlias(t *testing.T) {
 	}
 	if cellTree.NodeID() != "root" {
 		t.Fatalf("CellTree alias: NodeID()=%q want root", cellTree.NodeID())
+	}
+}
+
+// TestDeprecatedEntryKindNameAliases pins the entry-kind rename: EntryKindCell /
+// EntryKindSlot stay usable as deprecated aliases, and — critically — the rename
+// is identifier-only. The ordinal values and the String() wire spellings are
+// shared with the conformance fixtures and the other bindings, so they must not
+// move.
+func TestDeprecatedEntryKindNameAliases(t *testing.T) {
+	if EntryKindCell != EntryKindSource {
+		t.Fatalf("EntryKindCell must alias EntryKindSource")
+	}
+	if EntryKindSlot != EntryKindComputed {
+		t.Fatalf("EntryKindSlot must alias EntryKindComputed")
+	}
+	// Wire representation is frozen: ordinals and strings are unchanged.
+	if int(EntryKindSource) != 0 || int(EntryKindComputed) != 1 {
+		t.Fatalf("entry kind ordinals moved: source=%d computed=%d want 0/1",
+			int(EntryKindSource), int(EntryKindComputed))
+	}
+	if EntryKindSource.String() != "cell" {
+		t.Fatalf("EntryKindSource.String()=%q want %q", EntryKindSource.String(), "cell")
+	}
+	if EntryKindComputed.String() != "slot" {
+		t.Fatalf("EntryKindComputed.String()=%q want %q", EntryKindComputed.String(), "slot")
+	}
+
+	ctx := NewContext()
+	if NewSourceMap[string, int](ctx).EntryKind() != EntryKindCell {
+		t.Fatalf("SourceMap entry kind must still match the deprecated EntryKindCell")
+	}
+	if NewComputedMap[string, int](ctx).EntryKind() != EntryKindSlot {
+		t.Fatalf("ComputedMap entry kind must still match the deprecated EntryKindSlot")
 	}
 }
 

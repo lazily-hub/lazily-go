@@ -15,7 +15,7 @@ func doubleU32(k uint32) uint32 { return k * 2 }
 
 func TestTSSourceMapEntryKindAndSet(t *testing.T) {
 	fam := NewThreadSafeSourceMap[uint32, bool]()
-	if fam.EntryKind() != EntryKindCell {
+	if fam.EntryKind() != EntryKindSource {
 		t.Fatalf("kind = %v, want cell", fam.EntryKind())
 	}
 	for _, k := range []uint32{1, 2, 3} {
@@ -35,7 +35,7 @@ func TestTSSourceMapEntryKindAndSet(t *testing.T) {
 func TestTSComputedMapEagerMaterializesAllAtBuild(t *testing.T) {
 	fam := NewThreadSafeComputedMap[uint32, uint32]()
 	fam.MaterializeAll([]uint32{1, 2, 3}, doubleU32)
-	if fam.EntryKind() != EntryKindSlot {
+	if fam.EntryKind() != EntryKindComputed {
 		t.Fatalf("kind = %v, want slot", fam.EntryKind())
 	}
 	if got := fam.PresentCount(); got != 3 {

@@ -49,7 +49,7 @@ type SourceMap[K comparable, V comparable] struct {
 func NewSourceMap[K comparable, V comparable](ctx *Context) *SourceMap[K, V] {
 	rm := newReactiveMap[K, V, *Source[V]](
 		ctx,
-		EntryKindCell,
+		EntryKindSource,
 		func(ctx *Context, compute func() V) *Source[V] { return NewSource(ctx, compute()) },
 		func(h *Source[V]) V { return h.Get() },
 		// Invalidate the orphaned cell's dependents on remove (mirrors lazily-rs
