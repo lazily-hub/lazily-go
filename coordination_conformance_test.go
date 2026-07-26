@@ -59,7 +59,7 @@ type coordFixture struct {
 func loadCoordFixture(t *testing.T, name string) (coordFixture, bool) {
 	t.Helper()
 	path := filepath.Join(coordSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return coordFixture{}, false
 	}

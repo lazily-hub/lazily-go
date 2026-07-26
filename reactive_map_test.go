@@ -14,7 +14,6 @@ package lazily
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"sort"
 	"strconv"
 	"testing"
@@ -52,7 +51,7 @@ func loadMatFixture(t *testing.T, name string) matFixture {
 	if p == "" {
 		t.Skipf("materialization fixture %q not found (lazily-spec checkout absent)", name)
 	}
-	raw, err := os.ReadFile(p)
+	raw, err := specReadFile(p)
 	if err != nil {
 		t.Fatalf("reading %s: %v", p, err)
 	}

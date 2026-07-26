@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -43,7 +42,7 @@ type resilienceFixture struct {
 func loadResilienceFixture(t *testing.T, name string) (resilienceFixture, bool) {
 	t.Helper()
 	path := filepath.Join(resilienceSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return resilienceFixture{}, false
 	}

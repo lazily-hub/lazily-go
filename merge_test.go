@@ -8,7 +8,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -162,7 +161,7 @@ func TestMergeCellAlgebraFixture(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join("..", "lazily-spec", "conformance", "collections", "mergecell_algebra.json"),
 	} {
-		if b, err := os.ReadFile(path); err == nil {
+		if b, err := specReadFile(path); err == nil {
 			data = b
 			break
 		}

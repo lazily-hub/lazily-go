@@ -1323,7 +1323,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 					continue
 				}
 				t.Run(name, func(t *testing.T) {
-					raw, err := os.ReadFile(filepath.Join(reactiveGraphSpecDir, name))
+					raw, err := specReadFile(filepath.Join(reactiveGraphSpecDir, name))
 					if err != nil {
 						t.Fatalf("reading fixture %s: %v", name, err)
 					}

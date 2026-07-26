@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -53,7 +52,7 @@ type temporalFixture struct {
 func loadTemporalFixture(t *testing.T, name string) (temporalFixture, bool) {
 	t.Helper()
 	path := filepath.Join(temporalSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return temporalFixture{}, false
 	}

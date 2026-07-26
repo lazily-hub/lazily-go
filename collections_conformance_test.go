@@ -16,7 +16,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -32,7 +31,7 @@ func loadCollectionFixture(t *testing.T, name string) (map[string]any, bool) {
 		filepath.Join("testdata", "conformance", "collections", name),
 	}
 	for _, path := range candidates {
-		data, err := os.ReadFile(path)
+		data, err := specReadFile(path)
 		if err != nil {
 			continue
 		}

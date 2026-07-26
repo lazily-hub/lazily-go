@@ -60,7 +60,7 @@ func packageSources(t *testing.T) string {
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		data, err := os.ReadFile(name)
+		data, err := specReadFile(name)
 		if err != nil {
 			continue
 		}
@@ -136,7 +136,7 @@ func TestQueueLedgerShippedFlavorReplaysCorpus(t *testing.T) {
 
 	fixturesRead, stepsSeen, matricesSeen := 0, 0, 0
 	for _, name := range queueFixtures {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		data, err := specReadFile(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("%s: declared queue fixture is missing: %v", name, err)
 		}

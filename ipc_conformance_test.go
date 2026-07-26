@@ -68,7 +68,7 @@ func loadFixture(t *testing.T, name string) conformanceFixture {
 	if p == "" {
 		t.Skipf("conformance fixture %q not found (lazily-spec checkout absent)", name)
 	}
-	raw, err := os.ReadFile(p)
+	raw, err := specReadFile(p)
 	if err != nil {
 		t.Fatalf("reading fixture %s: %v", p, err)
 	}
@@ -421,7 +421,7 @@ func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
 		filepath.Join("..", "lazily-spec", "schemas"),
 	} {
 		p := filepath.Join(dir, "agent-doc-state.json")
-		raw, err := os.ReadFile(p)
+		raw, err := specReadFile(p)
 		if err != nil {
 			continue
 		}

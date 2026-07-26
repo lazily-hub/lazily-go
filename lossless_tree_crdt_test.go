@@ -19,7 +19,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -44,7 +43,7 @@ func loadLosslessTreeFixture(t *testing.T, name string) []byte {
 		)
 	}
 	for _, path := range candidates {
-		if b, err := os.ReadFile(path); err == nil {
+		if b, err := specReadFile(path); err == nil {
 			return b
 		}
 	}

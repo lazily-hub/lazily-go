@@ -8,7 +8,10 @@ package lazily
 // Cross-language pin with lazily-rs / lazily-kt / lazily-js; correctness backstop
 // lazily-formal ReliableSync.lean. Fixtures resolve via loadConformanceFixture
 // (sibling ../lazily-spec/conformance/reliable-sync/ or the local committed copy
-// test/conformance/reliable-sync/).
+// ../lazily-spec/conformance/reliable-sync/). The vendored copy under
+// test/conformance/ is no longer read by any test — see the note in
+// conformance_manifest_test.go about why reading a vendored copy is invisible to
+// a source-grep coverage guard.
 
 import (
 	"encoding/json"
@@ -318,7 +321,7 @@ func newFileOutbox(t *testing.T, path string) *fileOutbox {
 
 func (o *fileOutbox) readAll(t *testing.T) []OutboxEntry {
 	t.Helper()
-	data, err := os.ReadFile(o.path)
+	data, err := specReadFile(o.path)
 	if err != nil {
 		t.Fatalf("read outbox: %v", err)
 	}

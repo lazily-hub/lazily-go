@@ -7,8 +7,12 @@ all: check
 build:
 	go build ./...
 
+# The manifest path is ABSOLUTE: `go test ./...` runs one binary per package
+# from that package's directory, so a relative path would scatter partial
+# manifests instead of accumulating one union.
 test:
-	go test ./...
+	@mkdir -p build && : > build/conformance-fixtures-loaded.txt
+	LAZILY_CONFORMANCE_MANIFEST=$(CURDIR)/build/conformance-fixtures-loaded.txt go test ./...
 
 # CRDT/concurrency correctness under the race detector (cgo required).
 race:

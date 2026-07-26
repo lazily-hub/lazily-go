@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"testing"
 )
@@ -65,7 +64,7 @@ type rateshapeFixture struct {
 func loadRateshapeFixture(t *testing.T, name string) (rateshapeFixture, bool) {
 	t.Helper()
 	path := filepath.Join(rateshapeSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return rateshapeFixture{}, false
 	}

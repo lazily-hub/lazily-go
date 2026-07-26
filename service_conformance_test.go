@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -54,7 +53,7 @@ type serviceFixture struct {
 func loadServiceFixture(t *testing.T, name string) (serviceFixture, bool) {
 	t.Helper()
 	path := filepath.Join(serviceSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return serviceFixture{}, false
 	}

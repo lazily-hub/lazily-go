@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -36,7 +35,7 @@ func signalingSpecDir() string {
 func loadSignalingFixture(t *testing.T, name string, v any) bool {
 	t.Helper()
 	path := filepath.Join(signalingSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return false
 	}

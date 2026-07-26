@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -49,7 +48,7 @@ type presenceFixture struct {
 
 func loadPresenceFixture(t *testing.T, name string) (presenceFixture, bool) {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(presenceSpecDir(), name))
+	data, err := specReadFile(filepath.Join(presenceSpecDir(), name))
 	if err != nil {
 		return presenceFixture{}, false
 	}

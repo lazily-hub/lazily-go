@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -50,7 +49,7 @@ type windowingFixture struct {
 // fails (mirrors the rs `present()` guard and the statechart loader).
 func loadWindowingFixture(t *testing.T, name string) (windowingFixture, bool) {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(windowingSpecDir(), name))
+	data, err := specReadFile(filepath.Join(windowingSpecDir(), name))
 	if err != nil {
 		return windowingFixture{}, false
 	}

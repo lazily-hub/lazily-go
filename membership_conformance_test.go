@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -50,7 +49,7 @@ type membershipFixture struct {
 func loadMembershipFixture(t *testing.T, name string) (membershipFixture, bool) {
 	t.Helper()
 	path := filepath.Join(membershipSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return membershipFixture{}, false
 	}

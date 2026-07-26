@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -68,7 +67,7 @@ func activeExpected(t *testing.T, raw json.RawMessage) []string {
 func loadStatechartFixture(t *testing.T, name string) (statechartFixture, bool) {
 	t.Helper()
 	path := filepath.Join(statechartSpecDir(), name)
-	data, err := os.ReadFile(path)
+	data, err := specReadFile(path)
 	if err != nil {
 		return statechartFixture{}, false
 	}
