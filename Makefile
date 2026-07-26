@@ -1,6 +1,6 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test vet fmt fmt-check race cover conformance bench check tidy
+.PHONY: all build test vet fmt fmt-check race cover conformance bench check tidy conformance-coverage
 
 all: check
 
@@ -45,5 +45,11 @@ tidy:
 	go mod tidy
 
 # Full local gate — run before committing.
-check: fmt-check vet build test
+check: fmt-check vet build test conformance-coverage
 	@echo "lazily-go: check OK"
+
+# Conformance-coverage guard (#portconformancecoverage). Static: fails when the
+# canonical corpus grows a fixture no test in this repo even names. Naming is not
+# replaying — see the script header for what this does and does not prove.
+conformance-coverage:
+	./scripts/check-conformance-coverage.sh
