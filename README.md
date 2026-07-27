@@ -79,7 +79,7 @@ To react to a `Cell` from outside the graph (the hook for UI bridges), declare a
 dependency edge with an `Effect` — a `Cell` has no callback registry:
 
 ```go
-count := lazily.NewCell(ctx, 0)
+count := lazily.NewSource(ctx, 0)
 effect := lazily.NewEffect(ctx, func(*lazily.Context) func() {
 	fmt.Println("now", count.Get()) // the Get is what subscribes
 	return nil
@@ -208,8 +208,8 @@ and order**. Go generics can't add methods to a type alias, so its two
 specializations are thin distinct structs embedding `*ReactiveMap` with the
 handle kind fixed:
 
-- **`SourceMap[K, V]`** — input-cell entries. Adds the cell-only `Set` and eager
-  value-minting (`Entry` / `EntryWith`). Every entry is a writable `*Cell[V]`.
+- **`SourceMap[K, V]`** — input-cell entries. Adds the source-only `Set` and eager
+  value-minting (`Entry` / `EntryWith`). Every entry is a writable `*Source[V]`.
 - **`ComputedMap[K, V]`** — derived-slot entries. `GetOrInsertWith` mints a slot
   on first access (**lazy materialization**); `MaterializeAll` pre-mints the
   keyset (**eager**). A slot's value is derived, so `ComputedMap` has **no
