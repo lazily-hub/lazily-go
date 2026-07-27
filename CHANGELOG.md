@@ -4,7 +4,7 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
-## Unreleased
+## v0.24.0
 
 ### Added
 
@@ -17,17 +17,24 @@ All notable changes to lazily-go are documented here. This project adheres to
   `AsyncComputeContext` surface and coalesce changed roots with
   `AsyncContext.Batch`.
 - The shared 11-fixture queue-family corpus now replays against every shipped
-  flavor (31 QueueCell steps, 29 TopicCell steps, and 18 WorkQueueCell steps per
-  flavor). The runner enforces the 3x3 capability ledger, reads
-  `steps[].expected.invalidates`, requires positive replay counts, and includes
-  atomicity, concurrency, exclusive-claim, and deterministic multi-expiry
-  mutation probes.
+flavor (31 QueueCell steps, 29 TopicCell steps, and 18 WorkQueueCell steps per
+flavor). The runner enforces the 3x3 capability ledger, reads
+`steps[].expected.invalidates`, requires positive replay counts, and includes
+atomicity, concurrency, exclusive-claim, and deterministic multi-expiry
+mutation probes.
+- A production interop peer adapter supports capability-negotiated
+cross-binding network-suite tests.
+- Async handles, constructors, maps, queues, and state projection now use the
+canonical `AsyncSource` / `AsyncComputed` / `AsyncComputedState` vocabulary,
+with deprecated aliases forwarding to the canonical implementation.
 
 ### Fixed
 
 - A first `TopicCell.Subscribe` now invalidates a stable-id reader that was
-  observed before the subscription existed; its value changes from
-  `Exists=false` to `Exists=true` even when the unread suffix is empty.
+observed before the subscription existed; its value changes from
+`Exists=false` to `Exists=true` even when the unread suffix is empty.
+- Signaling rejects malformed frames and conformance coverage rejects corrupt
+runtime-manifest fixture ids.
 
 ## v0.23.2
 
