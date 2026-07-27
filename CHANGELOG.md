@@ -4,6 +4,31 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## Unreleased
+
+### Added
+
+- **The full queue family now ships on all three execution flavors
+  (`#lzqfports`).** `ThreadSafeQueueCell` / `AsyncQueueCell`,
+  `ThreadSafeTopicCell` / `AsyncTopicCell`, and
+  `ThreadSafeWorkQueueCell` / `AsyncWorkQueueCell` bind the same FIFO, cursor,
+  lease, and reader-kind laws to their owning graphs. Thread-safe operations
+  serialize through `ThreadSafeContext`; async reader derives use the explicit
+  `AsyncComputeContext` surface and coalesce changed roots with
+  `AsyncContext.Batch`.
+- The shared 11-fixture queue-family corpus now replays against every shipped
+  flavor (31 QueueCell steps, 29 TopicCell steps, and 18 WorkQueueCell steps per
+  flavor). The runner enforces the 3x3 capability ledger, reads
+  `steps[].expected.invalidates`, requires positive replay counts, and includes
+  atomicity, concurrency, exclusive-claim, and deterministic multi-expiry
+  mutation probes.
+
+### Fixed
+
+- A first `TopicCell.Subscribe` now invalidates a stable-id reader that was
+  observed before the subscription existed; its value changes from
+  `Exists=false` to `Exists=true` even when the unread suffix is empty.
+
 ## v0.23.2
 
 ### Fixed

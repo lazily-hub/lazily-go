@@ -629,6 +629,12 @@ func (t *TopicCell[T]) Subscribe(id string, durability TopicDurability) TopicSub
 		cursor: t.TailOffset(), durability: durability, connected: true,
 	}
 	t.ensureReader(id)
+	// A caller may have primed the stable-id reader before the subscription
+	// existed. Creating the cursor changes that reader from Exists=false to
+	// Exists=true even when its unread suffix is empty, so first subscribe is a
+	// real reader-kind invalidation (the canonical ephemeral/offline fixtures
+	// assert this explicitly).
+	t.invalidate([]string{id})
 	return TopicSubscribed
 }
 
