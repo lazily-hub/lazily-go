@@ -10,26 +10,26 @@ import (
 //
 // A slot invalidated *as a dependent* must itself invalidate its own
 // dependents. The pull chain cannot compensate, because GetAsync short-circuits
-// on AsyncSlotResolved and never re-reads its dependencies. These tests build
+// on AsyncComputedResolved and never re-reads its dependencies. These tests build
 // explicit chains, prime the caches, write the root cell, and assert freshness
 // at every downstream level.
 
 // asyncChain builds cell -> slot1 -> slot2 -> ... -> slotN, where each slot
 // multiplies its upstream by 10, and returns the cell plus the terminal slot.
 // Each slot's compute increments its own counter so recomputes are observable.
-func asyncChain(ctx *AsyncContext, depth int, counters []*int64) (*AsyncCellHandle[int], *AsyncSlotHandle[int]) {
-	cell := NewAsyncCell(ctx, 1)
-	head := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+func asyncChain(ctx *AsyncContext, depth int, counters []*int64) (*AsyncSource[int], *AsyncComputed[int]) {
+	cell := NewAsyncSource(ctx, 1)
+	head := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		atomic.AddInt64(counters[0], 1)
-		return TrackCell(cc, cell) * 10, nil
+		return TrackSource(cc, cell) * 10, nil
 	})
 	prev := head
 	for i := 1; i < depth; i++ {
 		upstream := prev
 		n := i
-		prev = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+		prev = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 			atomic.AddInt64(counters[n], 1)
-			v, err := TrackAsync(cc, upstream)
+			v, err := TrackComputed(cc, upstream)
 			if err != nil {
 				return 0, err
 			}
@@ -121,25 +121,25 @@ func TestAsyncCascadeDiamond(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
 	var dRuns int64
-	cell := NewAsyncCell(ctx, 1)
-	a := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return TrackCell(cc, cell), nil
+	cell := NewAsyncSource(ctx, 1)
+	a := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		return TrackSource(cc, cell), nil
 	})
-	b := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		v, err := TrackAsync(cc, a)
+	b := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		v, err := TrackComputed(cc, a)
 		return v * 2, err
 	})
-	cc3 := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		v, err := TrackAsync(cc, a)
+	cc3 := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		v, err := TrackComputed(cc, a)
 		return v * 3, err
 	})
-	d := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	d := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		atomic.AddInt64(&dRuns, 1)
-		x, err := TrackAsync(cc, b)
+		x, err := TrackComputed(cc, b)
 		if err != nil {
 			return 0, err
 		}
-		y, err := TrackAsync(cc, cc3)
+		y, err := TrackComputed(cc, cc3)
 		if err != nil {
 			return 0, err
 		}
@@ -163,12 +163,12 @@ func TestAsyncCascadeDiamond(t *testing.T) {
 func TestAsyncEffectRerunsAcrossTwoWrites(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	cell := NewAsyncCell(ctx, 1)
+	cell := NewAsyncSource(ctx, 1)
 	var runs int64
 	var last atomic.Int64
 	eff := ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
 		atomic.AddInt64(&runs, 1)
-		last.Store(int64(TrackCell(cc, cell)))
+		last.Store(int64(TrackSource(cc, cell)))
 		return nil
 	})
 	defer eff.DisposeAsync()
@@ -187,15 +187,15 @@ func TestAsyncEffectRerunsAcrossTwoWrites(t *testing.T) {
 func TestAsyncEffectDownstreamOfSlotCascade(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	cell := NewAsyncCell(ctx, 1)
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return TrackCell(cc, cell) * 10, nil
+	cell := NewAsyncSource(ctx, 1)
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		return TrackSource(cc, cell) * 10, nil
 	})
 	var runs int64
 	var last atomic.Int64
 	eff := ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
 		atomic.AddInt64(&runs, 1)
-		v, err := TrackAsync(cc, slot)
+		v, err := TrackComputed(cc, slot)
 		if err == nil {
 			last.Store(int64(v))
 		}
@@ -215,13 +215,13 @@ func TestAsyncEffectDownstreamOfSlotCascade(t *testing.T) {
 func TestAsyncCascadeCycleTerminates(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	cell := NewAsyncCell(ctx, 1)
-	var a, b *AsyncSlotHandle[int]
-	a = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return TrackCell(cc, cell), nil
+	cell := NewAsyncSource(ctx, 1)
+	var a, b *AsyncComputed[int]
+	a = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		return TrackSource(cc, cell), nil
 	})
-	b = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		v, err := TrackAsync(cc, a)
+	b = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		v, err := TrackComputed(cc, a)
 		return v + 1, err
 	})
 	// Manually close the cycle at the edge level: register a as a dependent of

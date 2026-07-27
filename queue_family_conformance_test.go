@@ -155,7 +155,7 @@ func (r qfTSReader) drive() int {
 }
 
 type qfAsyncReader struct {
-	slot  *AsyncSlotHandle[int]
+	slot  *AsyncComputed[int]
 	count *atomic.Int64
 }
 
@@ -189,7 +189,7 @@ func newQFTSReader(ts *ThreadSafeContext, body func(*Compute) int) qfReader {
 
 func newQFAsyncReader(ctx *AsyncContext, body func(*AsyncComputeContext) int) qfReader {
 	count := &atomic.Int64{}
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		count.Add(1)
 		return body(cc), nil
 	})

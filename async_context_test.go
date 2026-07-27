@@ -27,22 +27,62 @@ func waitFor(t *testing.T, cond func() bool) {
 	t.Fatal("condition not met before deadline")
 }
 
+func TestAsyncV2CompatibilityAliasesShareCanonicalTypes(t *testing.T) {
+	ctx := NewAsyncContext()
+	defer ctx.Close()
+
+	var source *AsyncSource[int] = NewAsyncCell(ctx, 2)
+	var legacySource *AsyncCellHandle[int] = source
+	var computed *AsyncComputed[int] = NewAsyncSlot(
+		ctx,
+		func(cc *AsyncComputeContext) (int, error) {
+			return TrackCell(cc, legacySource) * 3, nil
+		},
+	)
+	var legacyComputed *AsyncSlotHandle[int] = computed
+	outer := NewAsyncSlot(
+		ctx,
+		func(cc *AsyncComputeContext) (int, error) {
+			return TrackAsync(cc, legacyComputed)
+		},
+	)
+	if got, err := outer.GetAsync(context.Background()); err != nil || got != 6 {
+		t.Fatalf("legacy computed = (%d, %v), want (6, nil)", got, err)
+	}
+
+	memo := NewAsyncMemo(
+		ctx,
+		func(cc *AsyncComputeContext) (int, error) { return 7, nil },
+		func(left, right int) bool { return left == right },
+	)
+	var canonicalMemo *AsyncComputed[int] = memo
+	if got, err := canonicalMemo.GetAsync(context.Background()); err != nil || got != 7 {
+		t.Fatalf("legacy memo = (%d, %v), want (7, nil)", got, err)
+	}
+
+	var legacyState AsyncSlotState = AsyncSlotResolved
+	var canonicalState AsyncComputedState = legacyState
+	if canonicalState != AsyncComputedResolved {
+		t.Fatalf("state alias = %q, want %q", canonicalState, AsyncComputedResolved)
+	}
+}
+
 func TestAsyncEmptyComputingResolved(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	a := NewAsyncCell(ctx, 2)
-	b := NewAsyncCell(ctx, 3)
-	sum := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return TrackCell(cc, a) + TrackCell(cc, b), nil
+	a := NewAsyncSource(ctx, 2)
+	b := NewAsyncSource(ctx, 3)
+	sum := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		return TrackSource(cc, a) + TrackSource(cc, b), nil
 	})
-	if got := sum.State(); got != AsyncSlotEmpty {
+	if got := sum.State(); got != AsyncComputedEmpty {
 		t.Fatalf("initial state = %q, want empty", got)
 	}
 	v, err := sum.GetAsync(context.Background())
 	if err != nil || v != 5 {
 		t.Fatalf("GetAsync = (%d, %v), want (5, nil)", v, err)
 	}
-	if got := sum.State(); got != AsyncSlotResolved {
+	if got := sum.State(); got != AsyncComputedResolved {
 		t.Fatalf("state after resolve = %q, want resolved", got)
 	}
 }
@@ -50,9 +90,9 @@ func TestAsyncEmptyComputingResolved(t *testing.T) {
 func TestAsyncResolvedComputingResolvedOnDepChange(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	a := NewAsyncCell(ctx, 1)
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return TrackCell(cc, a) * 10, nil
+	a := NewAsyncSource(ctx, 1)
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		return TrackSource(cc, a) * 10, nil
 	})
 	if v, err := slot.GetAsync(context.Background()); err != nil || v != 10 {
 		t.Fatalf("first GetAsync = (%d, %v), want (10, nil)", v, err)
@@ -72,7 +112,7 @@ func TestAsyncComputingErrorAndRetry(t *testing.T) {
 	defer ctx.Close()
 	boom := errors.New("boom")
 	var calls int32
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		if atomic.AddInt32(&calls, 1) == 1 {
 			return 0, boom
 		}
@@ -81,7 +121,7 @@ func TestAsyncComputingErrorAndRetry(t *testing.T) {
 	if _, err := slot.GetAsync(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("GetAsync err = %v, want boom", err)
 	}
-	if got := slot.State(); got != AsyncSlotError {
+	if got := slot.State(); got != AsyncComputedError {
 		t.Fatalf("state = %q, want error", got)
 	}
 	// Error -> Computing: a slot in Error holds no cached result, so the next
@@ -95,11 +135,11 @@ func TestAsyncComputingErrorAndRetry(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("compute calls = %d, want 2 (the retry must re-run the body)", got)
 	}
-	if got := slot.State(); got != AsyncSlotResolved {
+	if got := slot.State(); got != AsyncComputedResolved {
 		t.Fatalf("state after retry = %q, want resolved", got)
 	}
 	// The runtime keeps running after a failing slot: a fresh slot resolves.
-	ok := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) { return 42, nil })
+	ok := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) { return 42, nil })
 	if v, err := ok.GetAsync(context.Background()); err != nil || v != 42 {
 		t.Fatalf("fresh slot GetAsync = (%d, %v), want (42, nil)", v, err)
 	}
@@ -114,7 +154,7 @@ func TestAsyncErrorRetriesEveryRead(t *testing.T) {
 	defer ctx.Close()
 	boom := errors.New("boom")
 	var calls int32
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		atomic.AddInt32(&calls, 1)
 		return 0, boom
 	})
@@ -131,11 +171,11 @@ func TestAsyncErrorRetriesEveryRead(t *testing.T) {
 func TestAsyncStaleCompletionDiscarded(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	step := NewAsyncCell(ctx, 0)
+	step := NewAsyncSource(ctx, 0)
 	var calls int32
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		n := atomic.AddInt32(&calls, 1)
-		s := TrackCell(cc, step)
+		s := TrackSource(cc, step)
 		if n == 1 {
 			// Block the first run until it is superseded (its context is
 			// cancelled by the dependency change below), then finish stale.
@@ -170,16 +210,16 @@ func TestAsyncStaleCompletionDiscarded(t *testing.T) {
 func TestAsyncInFlightDeduplication(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	a := NewAsyncCell(ctx, 1)
+	a := NewAsyncSource(ctx, 1)
 	var calls int32
 	gate := make(chan struct{})
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		atomic.AddInt32(&calls, 1)
 		select {
 		case <-gate:
 		case <-cc.Context().Done():
 		}
-		return TrackCell(cc, a), nil
+		return TrackSource(cc, a), nil
 	})
 
 	var wg sync.WaitGroup
@@ -211,11 +251,11 @@ func TestAsyncInFlightDeduplication(t *testing.T) {
 func TestAsyncMemoEqualRecomputeSuppresses(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	trigger := NewAsyncCell(ctx, 0)
+	trigger := NewAsyncSource(ctx, 0)
 	var calls int32
-	slot := NewAsyncMemo(ctx, func(cc *AsyncComputeContext) (string, error) {
+	slot := NewAsyncComputedWithEquals(ctx, func(cc *AsyncComputeContext) (string, error) {
 		atomic.AddInt32(&calls, 1)
-		_ = TrackCell(cc, trigger)
+		_ = TrackSource(cc, trigger)
 		return "constant", nil
 	}, func(a, b string) bool { return a == b })
 
@@ -237,14 +277,14 @@ func TestAsyncMemoEqualRecomputeSuppresses(t *testing.T) {
 func TestAsyncEffectCleanupBeforeBody(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	trigger := NewAsyncCell(ctx, 1)
+	trigger := NewAsyncSource(ctx, 1)
 	var mu sync.Mutex
 	var log []string
 	appendLog := func(s string) { mu.Lock(); log = append(log, s); mu.Unlock() }
 	snapshot := func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), log...) }
 
 	effect := ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
-		v := TrackCell(cc, trigger)
+		v := TrackSource(cc, trigger)
 		appendLog("body")
 		_ = v
 		return func() { appendLog("cleanup") }
@@ -278,12 +318,12 @@ func TestAsyncEffectCleanupBeforeBody(t *testing.T) {
 func TestAsyncBatchCoalesces(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	a := NewAsyncCell(ctx, 1)
-	b := NewAsyncCell(ctx, 2)
+	a := NewAsyncSource(ctx, 1)
+	b := NewAsyncSource(ctx, 2)
 	var calls int32
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		atomic.AddInt32(&calls, 1)
-		return TrackCell(cc, a) + TrackCell(cc, b), nil
+		return TrackSource(cc, a) + TrackSource(cc, b), nil
 	})
 	if v, err := slot.GetAsync(context.Background()); err != nil || v != 3 {
 		t.Fatalf("first GetAsync = (%d, %v), want (3, nil)", v, err)
@@ -303,9 +343,9 @@ func TestAsyncBatchCoalesces(t *testing.T) {
 
 func TestAsyncDisposalWritesAreNoOps(t *testing.T) {
 	ctx := NewAsyncContext()
-	a := NewAsyncCell(ctx, 1)
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return TrackCell(cc, a), nil
+	a := NewAsyncSource(ctx, 1)
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		return TrackSource(cc, a), nil
 	})
 	if v, err := slot.GetAsync(context.Background()); err != nil || v != 1 {
 		t.Fatalf("GetAsync = (%d, %v), want (1, nil)", v, err)
@@ -328,16 +368,16 @@ func TestAsyncDisposalWritesAreNoOps(t *testing.T) {
 func TestAsyncWaiterCancellationDropsOnlyThatWaiter(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	a := NewAsyncCell(ctx, 7)
+	a := NewAsyncSource(ctx, 7)
 	var calls int32
 	gate := make(chan struct{})
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		atomic.AddInt32(&calls, 1)
 		select {
 		case <-gate:
 		case <-cc.Context().Done():
 		}
-		return TrackCell(cc, a), nil
+		return TrackSource(cc, a), nil
 	})
 
 	cancelCtx, cancel := context.WithCancel(context.Background())
@@ -374,12 +414,12 @@ func TestAsyncWaiterCancellationDropsOnlyThatWaiter(t *testing.T) {
 // with the disposed error and does not leak the compute goroutine.
 func TestAsyncCloseUnblocksPendingWaiter(t *testing.T) {
 	ctx := NewAsyncContext()
-	a := NewAsyncCell(ctx, 1)
+	a := NewAsyncSource(ctx, 1)
 	started := make(chan struct{})
-	slot := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		close(started)
 		<-cc.Context().Done() // block until disposed cancels us
-		return TrackCell(cc, a), nil
+		return TrackSource(cc, a), nil
 	})
 	errCh := make(chan error, 1)
 	go func() {

@@ -457,12 +457,12 @@ func TestDeprecatedMapNameAliases(t *testing.T) {
 		t.Fatalf("ThreadSafe alias: entry kind drifted")
 	}
 
-	var asSrc *AsyncSourceMap[string, int] = NewAsyncCellMap[string, int](actx)
-	var asCell *AsyncCellMap[string, int] = NewAsyncSourceMap[string, int](actx)
+	var asSrc *AsyncSourceMap[string, int] = NewAsyncSourceMap[string, int](actx)
+	var asCell *AsyncCellMap[string, int] = NewAsyncCellMap[string, int](actx)
 	asSrc.Set("a", 1)
 	asCell.Set("a", 1)
-	var asCmp *AsyncComputedMap[string, int] = NewAsyncSlotMap[string, int](actx)
-	var asSlot *AsyncSlotMap[string, int] = NewAsyncComputedMap[string, int](actx)
+	var asCmp *AsyncComputedMap[string, int] = NewAsyncComputedMap[string, int](actx)
+	var asSlot *AsyncSlotMap[string, int] = NewAsyncSlotMap[string, int](actx)
 	asCmp.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
 	asSlot.MaterializeAll([]string{"a"}, func(k string) int { return 7 })
 	if got := asCmp.Drive("a", func(k string) int { return 7 }); got != 7 {

@@ -8,7 +8,7 @@ import (
 // resolveAsyncReader drives a synchronous-value reader kind living on the
 // async graph. A nil compute surface is an untracked top-level read; a non-nil
 // surface registers the caller on the derived reader before returning.
-func resolveAsyncReader[T any](cc *AsyncComputeContext, reader *AsyncSlotHandle[T]) T {
+func resolveAsyncReader[T any](cc *AsyncComputeContext, reader *AsyncComputed[T]) T {
 	var (
 		value T
 		err   error
@@ -16,7 +16,7 @@ func resolveAsyncReader[T any](cc *AsyncComputeContext, reader *AsyncSlotHandle[
 	if cc == nil {
 		value, err = reader.GetAsync(context.Background())
 	} else {
-		value, err = TrackAsync(cc, reader)
+		value, err = TrackComputed(cc, reader)
 	}
 	if err != nil {
 		panic(err)
@@ -27,11 +27,11 @@ func resolveAsyncReader[T any](cc *AsyncComputeContext, reader *AsyncSlotHandle[
 // AsyncQueueReaderHandles exposes the five queue reader kinds on the async
 // graph. The content readers are memoized derives; Closed is a direct input.
 type AsyncQueueReaderHandles[T comparable] struct {
-	Head     *AsyncSlotHandle[queueHead[T]]
-	Len      *AsyncSlotHandle[int]
-	IsEmpty  *AsyncSlotHandle[bool]
-	IsFull   *AsyncSlotHandle[bool]
-	IsClosed *AsyncCellHandle[bool]
+	Head     *AsyncComputed[queueHead[T]]
+	Len      *AsyncComputed[int]
+	IsEmpty  *AsyncComputed[bool]
+	IsFull   *AsyncComputed[bool]
+	IsClosed *AsyncSource[bool]
 }
 
 // AsyncQueueCell is the AsyncContext FIFO flavor. Storage is serialized by mu;
@@ -45,10 +45,10 @@ type AsyncQueueCell[T comparable, S QueueStorage[T]] struct {
 	capacity int
 	peek     func() (T, bool)
 
-	headVersion  *AsyncCellHandle[uint64]
-	lenVersion   *AsyncCellHandle[uint64]
-	emptyVersion *AsyncCellHandle[uint64]
-	fullVersion  *AsyncCellHandle[uint64]
+	headVersion  *AsyncSource[uint64]
+	lenVersion   *AsyncSource[uint64]
+	emptyVersion *AsyncSource[uint64]
+	fullVersion  *AsyncSource[uint64]
 	versions     [4]uint64
 
 	readers AsyncQueueReaderHandles[T]
@@ -79,12 +79,12 @@ func NewAsyncQueueCellWithStorage[T comparable, S QueueStorage[T]](
 	if peekable, ok := any(storage).(PeekableStorage[T]); ok {
 		q.peek = peekable.Peek
 	}
-	q.headVersion = NewAsyncCell(ctx, uint64(0))
-	q.lenVersion = NewAsyncCell(ctx, uint64(0))
-	q.emptyVersion = NewAsyncCell(ctx, uint64(0))
-	q.fullVersion = NewAsyncCell(ctx, uint64(0))
-	q.readers.Head = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (queueHead[T], error) {
-		TrackCell(cc, q.headVersion)
+	q.headVersion = NewAsyncSource(ctx, uint64(0))
+	q.lenVersion = NewAsyncSource(ctx, uint64(0))
+	q.emptyVersion = NewAsyncSource(ctx, uint64(0))
+	q.fullVersion = NewAsyncSource(ctx, uint64(0))
+	q.readers.Head = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (queueHead[T], error) {
+		TrackSource(cc, q.headVersion)
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		if q.peek == nil {
@@ -93,25 +93,25 @@ func NewAsyncQueueCellWithStorage[T comparable, S QueueStorage[T]](
 		value, ok := q.peek()
 		return queueHead[T]{value: value, ok: ok}, nil
 	})
-	q.readers.Len = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		TrackCell(cc, q.lenVersion)
+	q.readers.Len = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		TrackSource(cc, q.lenVersion)
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		return q.storage.Len(), nil
 	})
-	q.readers.IsEmpty = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (bool, error) {
-		TrackCell(cc, q.emptyVersion)
+	q.readers.IsEmpty = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (bool, error) {
+		TrackSource(cc, q.emptyVersion)
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		return q.storage.Len() == 0, nil
 	})
-	q.readers.IsFull = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (bool, error) {
-		TrackCell(cc, q.fullVersion)
+	q.readers.IsFull = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (bool, error) {
+		TrackSource(cc, q.fullVersion)
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		return q.bounded && q.storage.Len() >= q.capacity, nil
 	})
-	q.readers.IsClosed = NewAsyncCell(ctx, storage.IsClosed())
+	q.readers.IsClosed = NewAsyncSource(ctx, storage.IsClosed())
 	return q
 }
 
@@ -199,7 +199,7 @@ func (q *AsyncQueueCell[T, S]) IsFull(cc *AsyncComputeContext) bool {
 
 func (q *AsyncQueueCell[T, S]) IsClosed(cc *AsyncComputeContext) bool {
 	if cc != nil {
-		return TrackCell(cc, q.readers.IsClosed)
+		return TrackSource(cc, q.readers.IsClosed)
 	}
 	return q.readers.IsClosed.Peek()
 }
@@ -223,8 +223,8 @@ func (q *AsyncQueueCell[T, S]) ReaderHandles() AsyncQueueReaderHandles[T] {
 
 type asyncTopicReader[T any] struct {
 	versionValue uint64
-	version      *AsyncCellHandle[uint64]
-	slot         *AsyncSlotHandle[TopicRead[T]]
+	version      *AsyncSource[uint64]
+	slot         *AsyncComputed[TopicRead[T]]
 }
 
 // AsyncTopicCell is the AsyncContext broadcast-log flavor.
@@ -262,9 +262,9 @@ func (t *AsyncTopicCell[T]) ensureReaderLocked(id string) *asyncTopicReader[T] {
 	if reader := t.readers[id]; reader != nil {
 		return reader
 	}
-	reader := &asyncTopicReader[T]{version: NewAsyncCell(t.ctx, uint64(0))}
-	reader.slot = NewAsyncSlot(t.ctx, func(cc *AsyncComputeContext) (TopicRead[T], error) {
-		TrackCell(cc, reader.version)
+	reader := &asyncTopicReader[T]{version: NewAsyncSource(t.ctx, uint64(0))}
+	reader.slot = NewAsyncComputed(t.ctx, func(cc *AsyncComputeContext) (TopicRead[T], error) {
+		TrackSource(cc, reader.version)
 		t.mu.Lock()
 		defer t.mu.Unlock()
 		return t.inner.readUntracked(id), nil
@@ -392,7 +392,7 @@ func (t *AsyncTopicCell[T]) Subscription(id string) (TopicSubscriptionSnapshot, 
 	return t.inner.Subscription(id)
 }
 
-func (t *AsyncTopicCell[T]) ReaderHandle(id string) *AsyncSlotHandle[TopicRead[T]] {
+func (t *AsyncTopicCell[T]) ReaderHandle(id string) *AsyncComputed[TopicRead[T]] {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.ensureReaderLocked(id).slot
@@ -412,10 +412,10 @@ func (t *AsyncTopicCell[T]) Restart() {
 
 // AsyncWorkQueueReaderHandles exposes the four lifecycle derives.
 type AsyncWorkQueueReaderHandles struct {
-	PendingLen    *AsyncSlotHandle[int]
-	IsEmpty       *AsyncSlotHandle[bool]
-	InFlightLen   *AsyncSlotHandle[int]
-	DeadLetterLen *AsyncSlotHandle[int]
+	PendingLen    *AsyncComputed[int]
+	IsEmpty       *AsyncComputed[bool]
+	InFlightLen   *AsyncComputed[int]
+	DeadLetterLen *AsyncComputed[int]
 }
 
 // AsyncWorkQueueCell is the AsyncContext competing-consumer flavor.
@@ -425,7 +425,7 @@ type AsyncWorkQueueCell[T any] struct {
 	inner *WorkQueueCell[T]
 
 	versionValues [4]uint64
-	versions      [4]*AsyncCellHandle[uint64]
+	versions      [4]*AsyncSource[uint64]
 	readers       AsyncWorkQueueReaderHandles
 }
 
@@ -441,28 +441,28 @@ func NewAsyncWorkQueueCell[T any](
 		),
 	}
 	for i := range q.versions {
-		q.versions[i] = NewAsyncCell(ctx, uint64(0))
+		q.versions[i] = NewAsyncSource(ctx, uint64(0))
 	}
-	q.readers.PendingLen = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		TrackCell(cc, q.versions[0])
+	q.readers.PendingLen = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		TrackSource(cc, q.versions[0])
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		return len(q.inner.pending), nil
 	})
-	q.readers.IsEmpty = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (bool, error) {
-		TrackCell(cc, q.versions[1])
+	q.readers.IsEmpty = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (bool, error) {
+		TrackSource(cc, q.versions[1])
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		return len(q.inner.pending) == 0, nil
 	})
-	q.readers.InFlightLen = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		TrackCell(cc, q.versions[2])
+	q.readers.InFlightLen = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		TrackSource(cc, q.versions[2])
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		return len(q.inner.inFlight), nil
 	})
-	q.readers.DeadLetterLen = NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
-		TrackCell(cc, q.versions[3])
+	q.readers.DeadLetterLen = NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
+		TrackSource(cc, q.versions[3])
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		return len(q.inner.deadLetters), nil

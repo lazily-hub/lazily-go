@@ -224,7 +224,7 @@ func (f *asyncFlavor) entryID(k string) (any, bool) {
 }
 
 type asyncReader struct {
-	slot  *AsyncSlotHandle[int]
+	slot  *AsyncComputed[int]
 	count *int
 }
 
@@ -235,7 +235,7 @@ func (r asyncReader) drive() int {
 
 func (f *asyncFlavor) reader(body func(cc *AsyncComputeContext) int) reader {
 	count := 0
-	slot := NewAsyncSlot(f.c, func(cc *AsyncComputeContext) (int, error) {
+	slot := NewAsyncComputed(f.c, func(cc *AsyncComputeContext) (int, error) {
 		count++
 		return body(cc), nil
 	})

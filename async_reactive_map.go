@@ -37,15 +37,15 @@ type AsyncMapHandle interface {
 	resolvedOnMint() bool
 }
 
-type asyncCellHandle struct{}
+type asyncSourceNodeHandle struct{}
 
-func (asyncCellHandle) mapEntryKind() EntryKind { return EntryKindSource }
-func (asyncCellHandle) resolvedOnMint() bool    { return true }
+func (asyncSourceNodeHandle) mapEntryKind() EntryKind { return EntryKindSource }
+func (asyncSourceNodeHandle) resolvedOnMint() bool    { return true }
 
-type asyncSlotHandle struct{}
+type asyncComputedNodeHandle struct{}
 
-func (asyncSlotHandle) mapEntryKind() EntryKind { return EntryKindComputed }
-func (asyncSlotHandle) resolvedOnMint() bool    { return false }
+func (asyncComputedNodeHandle) mapEntryKind() EntryKind { return EntryKindComputed }
+func (asyncComputedNodeHandle) resolvedOnMint() bool    { return false }
 
 // asyncMapEntry is one allocated (present) entry: resolved tracks the async
 // resolution axis, value caches the canonical value once resolved. A pending
@@ -68,7 +68,7 @@ type asyncMapEntry[V comparable] struct {
 	// invalidated nobody — the map was a value cache wearing the reactive
 	// family's name. The resolution axis is orthogonal: `resolved` still tracks
 	// pending-vs-resolved, while the cell carries the value and its dependents.
-	cell *AsyncCellHandle[V]
+	cell *AsyncSource[V]
 }
 
 // value reads the entry's canonical value without registering an edge.
@@ -99,8 +99,8 @@ type AsyncReactiveMap[K comparable, V comparable, H AsyncMapHandle] struct {
 	// graph, not the synchronous one. Ordering is not async-coloured (a move
 	// awaits nothing), so the async map carries the same Core surface as the
 	// other two flavors.
-	membership  *AsyncCellHandle[int]
-	orderSignal *AsyncCellHandle[int]
+	membership  *AsyncSource[int]
+	orderSignal *AsyncSource[int]
 
 	membershipVersion int
 	orderVersion      int
@@ -111,8 +111,8 @@ func newAsyncReactiveMap[K comparable, V comparable, H AsyncMapHandle](c *AsyncC
 	return &AsyncReactiveMap[K, V, H]{
 		actx:        c,
 		keyed:       newKeyedOrder[K, asyncMapEntry[V]](),
-		membership:  NewAsyncCell(c, 0),
-		orderSignal: NewAsyncCell(c, 0),
+		membership:  NewAsyncSource(c, 0),
+		orderSignal: NewAsyncSource(c, 0),
 	}
 }
 
@@ -121,7 +121,7 @@ func newAsyncReactiveMap[K comparable, V comparable, H AsyncMapHandle](c *AsyncC
 // zero-argument call could never subscribe from inside a derived node.
 func (m *AsyncReactiveMap[K, V, H]) trackOrder(cc *AsyncComputeContext) {
 	if cc != nil {
-		TrackCell(cc, m.orderSignal)
+		TrackSource(cc, m.orderSignal)
 		return
 	}
 	m.orderSignal.Peek()
@@ -129,7 +129,7 @@ func (m *AsyncReactiveMap[K, V, H]) trackOrder(cc *AsyncComputeContext) {
 
 func (m *AsyncReactiveMap[K, V, H]) trackMembership(cc *AsyncComputeContext) {
 	if cc != nil {
-		TrackCell(cc, m.membership)
+		TrackSource(cc, m.membership)
 		return
 	}
 	m.membership.Peek()
@@ -184,7 +184,7 @@ func (m *AsyncReactiveMap[K, V, H]) materialize(key K, factory func(K) V) (async
 	// drive a dependent recompute that re-enters this map.
 	var h H
 	var zero V
-	e := asyncMapEntry[V]{cell: NewAsyncCell(m.actx, zero)}
+	e := asyncMapEntry[V]{cell: NewAsyncSource(m.actx, zero)}
 	if h.resolvedOnMint() {
 		e.resolved = true
 		e.cell.Set(factory(key))
@@ -278,8 +278,8 @@ func (m *AsyncReactiveMap[K, V, H]) PresentCount() int {
 // -- Core surface: ordering, atomic move, and reactive membership --
 
 // Entry returns key's node on the async graph, or nil. Reading it through
-// TrackCell inside an async compute registers a per-entry dependency edge.
-func (m *AsyncReactiveMap[K, V, H]) Entry(key K) *AsyncCellHandle[V] {
+// TrackSource inside an async compute registers a per-entry dependency edge.
+func (m *AsyncReactiveMap[K, V, H]) Entry(key K) *AsyncSource[V] {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	e, ok := m.keyed.get(key)
@@ -301,7 +301,7 @@ func (m *AsyncReactiveMap[K, V, H]) ObserveTracked(cc *AsyncComputeContext, key 
 		return zero, false
 	}
 	if cc != nil {
-		return TrackCell(cc, e.cell), true
+		return TrackSource(cc, e.cell), true
 	}
 	return e.value(), true
 }
@@ -397,12 +397,12 @@ func (m *AsyncReactiveMap[K, V, H]) EntryKind() EntryKind {
 // AsyncSourceMap is the input-cell specialization of AsyncReactiveMap: every entry
 // is an always-resolved input cell. Adds the cell-only Set.
 type AsyncSourceMap[K comparable, V comparable] struct {
-	*AsyncReactiveMap[K, V, asyncCellHandle]
+	*AsyncReactiveMap[K, V, asyncSourceNodeHandle]
 }
 
 // NewAsyncSourceMap creates an empty async input-cell map.
 func NewAsyncSourceMap[K comparable, V comparable](c *AsyncContext) *AsyncSourceMap[K, V] {
-	return &AsyncSourceMap[K, V]{newAsyncReactiveMap[K, V, asyncCellHandle](c)}
+	return &AsyncSourceMap[K, V]{newAsyncReactiveMap[K, V, asyncSourceNodeHandle](c)}
 }
 
 // AsyncCellMap is the pre-v2-kernel name for AsyncSourceMap, kept as an alias so
@@ -411,7 +411,7 @@ func NewAsyncSourceMap[K comparable, V comparable](c *AsyncContext) *AsyncSource
 // Deprecated: renamed to AsyncSourceMap.
 type AsyncCellMap[K comparable, V comparable] = AsyncSourceMap[K, V]
 
-// NewAsyncCellMap creates an empty async input-cell map.
+// NewAsyncCellMap creates an empty async input-cell map through the v1 name.
 //
 // Deprecated: renamed to NewAsyncSourceMap.
 func NewAsyncCellMap[K comparable, V comparable](c *AsyncContext) *AsyncSourceMap[K, V] {
@@ -446,12 +446,12 @@ func (m *AsyncSourceMap[K, V]) Set(key K, value V) {
 // are minted pending and driven to resolution via Drive; MaterializeAll pre-mints
 // the keyset (still pending until driven). No Set.
 type AsyncComputedMap[K comparable, V comparable] struct {
-	*AsyncReactiveMap[K, V, asyncSlotHandle]
+	*AsyncReactiveMap[K, V, asyncComputedNodeHandle]
 }
 
 // NewAsyncComputedMap creates an empty async derived-slot map.
 func NewAsyncComputedMap[K comparable, V comparable](c *AsyncContext) *AsyncComputedMap[K, V] {
-	return &AsyncComputedMap[K, V]{newAsyncReactiveMap[K, V, asyncSlotHandle](c)}
+	return &AsyncComputedMap[K, V]{newAsyncReactiveMap[K, V, asyncComputedNodeHandle](c)}
 }
 
 // AsyncSlotMap is the pre-v2-kernel name for AsyncComputedMap, kept as an alias
@@ -460,7 +460,7 @@ func NewAsyncComputedMap[K comparable, V comparable](c *AsyncContext) *AsyncComp
 // Deprecated: renamed to AsyncComputedMap.
 type AsyncSlotMap[K comparable, V comparable] = AsyncComputedMap[K, V]
 
-// NewAsyncSlotMap creates an empty async derived-slot map.
+// NewAsyncSlotMap creates an empty async derived-slot map through the v1 name.
 //
 // Deprecated: renamed to NewAsyncComputedMap.
 func NewAsyncSlotMap[K comparable, V comparable](c *AsyncContext) *AsyncComputedMap[K, V] {

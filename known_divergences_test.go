@@ -89,15 +89,15 @@ func TestKnownDivergenceAsyncMemoGuardSuppressesValueNotDownstream(t *testing.T)
 	ctx := NewAsyncContext()
 	defer func() { _ = ctx.Close() }()
 
-	src := NewAsyncCell(ctx, 2)
-	m := NewAsyncMemo(ctx, func(cc *AsyncComputeContext) (int, error) {
-		return TrackCell(cc, src) % 2, nil // 0 for every even input
+	src := NewAsyncSource(ctx, 2)
+	m := NewAsyncComputedWithEquals(ctx, func(cc *AsyncComputeContext) (int, error) {
+		return TrackSource(cc, src) % 2, nil // 0 for every even input
 	}, func(a, b int) bool { return a == b })
 
 	downstreamFires := 0
-	downstream := NewAsyncSlot(ctx, func(cc *AsyncComputeContext) (int, error) {
+	downstream := NewAsyncComputed(ctx, func(cc *AsyncComputeContext) (int, error) {
 		downstreamFires++
-		v, err := TrackAsync(cc, m)
+		v, err := TrackComputed(cc, m)
 		return v + 10, err
 	})
 	if v, err := downstream.GetAsync(context.Background()); err != nil || v != 10 {

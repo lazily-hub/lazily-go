@@ -166,7 +166,7 @@ func BenchmarkPhase2AsyncValueEqual(b *testing.B) {
 func BenchmarkPhase2AsyncCellStringSet(b *testing.B) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
-	c := NewAsyncCell(ctx, "")
+	c := NewAsyncSource(ctx, "")
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

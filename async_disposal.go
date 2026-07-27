@@ -6,7 +6,7 @@
 //
 //  1. Disposal dirties the surviving dependent cone. The async graph makes this
 //     even sharper than the sync one: GetAsync short-circuits on
-//     AsyncSlotResolved, so a downstream slot left Resolved serves its cached
+//     AsyncComputedResolved, so a downstream slot left Resolved serves its cached
 //     value forever and no later pull can rescue it. This is the same shape as
 //     the cascade defect fixed in bdfdbce, reached by a different route.
 //     Teardown reuses AsyncContext.propagate — the very walk that fix
@@ -22,8 +22,8 @@
 // assumes.
 package lazily
 
-// AsyncGraphNode is any node in an AsyncContext's graph: *AsyncCellHandle,
-// *AsyncSlotHandle, or *AsyncEffectHandle.
+// AsyncGraphNode is any node in an AsyncContext's graph: *AsyncSource,
+// *AsyncComputed, or *AsyncEffectHandle.
 //
 // Sealed by an unexported method, and — like the synchronous GraphNode — it
 // exposes counts only, never the edge sets.
@@ -33,13 +33,13 @@ type AsyncGraphNode interface {
 	asyncDisposed() bool
 }
 
-func (h *AsyncCellHandle[T]) asyncNodeKey() any             { return h.node }
-func (h *AsyncCellHandle[T]) asyncDepSet() map[any]struct{} { return nil } // pure source
-func (h *AsyncCellHandle[T]) asyncDisposed() bool           { return h.node.disposed }
+func (h *AsyncSource[T]) asyncNodeKey() any             { return h.node }
+func (h *AsyncSource[T]) asyncDepSet() map[any]struct{} { return nil } // pure source
+func (h *AsyncSource[T]) asyncDisposed() bool           { return h.node.disposed }
 
-func (s *AsyncSlotHandle[T]) asyncNodeKey() any             { return s.node }
-func (s *AsyncSlotHandle[T]) asyncDepSet() map[any]struct{} { return s.node.deps }
-func (s *AsyncSlotHandle[T]) asyncDisposed() bool           { return s.node.disposed }
+func (s *AsyncComputed[T]) asyncNodeKey() any             { return s.node }
+func (s *AsyncComputed[T]) asyncDepSet() map[any]struct{} { return s.node.deps }
+func (s *AsyncComputed[T]) asyncDisposed() bool           { return s.node.disposed }
 
 func (e *AsyncEffectHandle) asyncNodeKey() any { return e }
 
@@ -51,9 +51,9 @@ func (e *AsyncEffectHandle) asyncDisposed() bool           { return e.disposed }
 // isDisposedNode reports whether a graph key names a torn-down node.
 func (c *AsyncContext) isDisposedNode(key any) bool {
 	switch n := key.(type) {
-	case *asyncCell:
+	case *asyncSourceNode:
 		return n.disposed
-	case *asyncSlot:
+	case *asyncComputedNode:
 		return n.disposed
 	case *AsyncEffectHandle:
 		return n.disposed
@@ -114,25 +114,25 @@ func (e *AsyncEffectHandle) IsActive() bool {
 //
 // Blocked waiters and any later reader receive a *DisposedError — the same
 // "errors on next recompute" contract as the synchronous Slot.Dispose.
-func (s *AsyncSlotHandle[T]) DisposeAsync() {
+func (s *AsyncComputed[T]) DisposeAsync() {
 	s.c.do(func() { s.c.disposeAsyncSlot(s.node) })
 }
 
 // Dispose is an alias for DisposeAsync.
-func (s *AsyncSlotHandle[T]) Dispose() { s.DisposeAsync() }
+func (s *AsyncComputed[T]) Dispose() { s.DisposeAsync() }
 
 // DisposeAsync tears down this async cell: it detaches its dependents and
 // dirties the surviving cone. Cells are pure sources, so only downstream edges
 // need detaching. Idempotent.
-func (h *AsyncCellHandle[T]) DisposeAsync() {
+func (h *AsyncSource[T]) DisposeAsync() {
 	h.c.do(func() { h.c.disposeAsyncCell(h.node) })
 }
 
 // Dispose is an alias for DisposeAsync.
-func (h *AsyncCellHandle[T]) Dispose() { h.DisposeAsync() }
+func (h *AsyncSource[T]) Dispose() { h.DisposeAsync() }
 
 // disposeAsyncSlot runs inside the owner goroutine.
-func (c *AsyncContext) disposeAsyncSlot(s *asyncSlot) {
+func (c *AsyncContext) disposeAsyncSlot(s *asyncComputedNode) {
 	if s.disposed {
 		return
 	}
@@ -151,7 +151,7 @@ func (c *AsyncContext) disposeAsyncSlot(s *asyncSlot) {
 	for _, w := range ws {
 		w <- asyncResult{err: &DisposedError{Kind: "slot"}}
 	}
-	s.state = AsyncSlotEmpty
+	s.state = AsyncComputedEmpty
 	s.value = nil
 	s.hasValue = false
 
@@ -164,7 +164,7 @@ func (c *AsyncContext) disposeAsyncSlot(s *asyncSlot) {
 }
 
 // disposeAsyncCell runs inside the owner goroutine.
-func (c *AsyncContext) disposeAsyncCell(n *asyncCell) {
+func (c *AsyncContext) disposeAsyncCell(n *asyncSourceNode) {
 	if n.disposed {
 		return
 	}

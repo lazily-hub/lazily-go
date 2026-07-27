@@ -519,11 +519,11 @@ func (m *asyncModel) settle() {
 }
 
 func (m *asyncModel) cell(id string, value int) nodeRef {
-	return nodeRef{kind: kindCell, id: id, h: NewAsyncCell(m.ctx, value)}
+	return nodeRef{kind: kindCell, id: id, h: NewAsyncSource(m.ctx, value)}
 }
 
 // trackRead is the read used inside an async compute or effect body. A disposed
-// cell panics (TrackCell returns a bare T and has no error channel); a disposed
+// cell panics (TrackSource returns a bare T and has no error channel); a disposed
 // slot returns an error. Both surface here as an error.
 func (m *asyncModel) trackRead(cc *AsyncComputeContext, r nodeRef) (v int, err error) {
 	defer func() {
@@ -537,16 +537,16 @@ func (m *asyncModel) trackRead(cc *AsyncComputeContext, r nodeRef) (v int, err e
 	}()
 	switch r.kind {
 	case kindCell:
-		return TrackCell(cc, r.h.(*AsyncCellHandle[int])), nil
+		return TrackSource(cc, r.h.(*AsyncSource[int])), nil
 	case kindSlot:
-		return TrackAsync(cc, r.h.(*AsyncSlotHandle[int]))
+		return TrackComputed(cc, r.h.(*AsyncComputed[int]))
 	}
 	return 0, fmt.Errorf("reactive-graph: cannot read effect %q", r.id)
 }
 
 func (m *asyncModel) computed(id string, reads []nodeRef, offset int) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
-	s := NewAsyncSlot(m.ctx, func(cc *AsyncComputeContext) (int, error) {
+	s := NewAsyncComputed(m.ctx, func(cc *AsyncComputeContext) (int, error) {
 		m.computes.tick(id)
 		if m.armed.take(id) {
 			return 0, errComputeFailed
@@ -603,21 +603,21 @@ func (m *asyncModel) effect(id string, reads []nodeRef) nodeRef {
 func (m *asyncModel) read(r nodeRef) (int, error) {
 	switch r.kind {
 	case kindCell:
-		return r.h.(*AsyncCellHandle[int]).TryGet()
+		return r.h.(*AsyncSource[int]).TryGet()
 	case kindSlot:
-		return r.h.(*AsyncSlotHandle[int]).GetAsync(context.Background())
+		return r.h.(*AsyncComputed[int]).GetAsync(context.Background())
 	}
 	return 0, fmt.Errorf("reactive-graph: cannot read effect %q", r.id)
 }
 
-func (m *asyncModel) setCell(r nodeRef, value int) { r.h.(*AsyncCellHandle[int]).Set(value) }
+func (m *asyncModel) setCell(r nodeRef, value int) { r.h.(*AsyncSource[int]).Set(value) }
 
 func (m *asyncModel) dispose(r nodeRef) {
 	switch r.kind {
 	case kindCell:
-		r.h.(*AsyncCellHandle[int]).DisposeAsync()
+		r.h.(*AsyncSource[int]).DisposeAsync()
 	case kindSlot:
-		r.h.(*AsyncSlotHandle[int]).DisposeAsync()
+		r.h.(*AsyncComputed[int]).DisposeAsync()
 	case kindEffect:
 		r.h.(*AsyncEffectHandle).DisposeAsync()
 	}
@@ -626,9 +626,9 @@ func (m *asyncModel) dispose(r nodeRef) {
 func (m *asyncModel) graphNode(r nodeRef) AsyncGraphNode {
 	switch r.kind {
 	case kindCell:
-		return r.h.(*AsyncCellHandle[int])
+		return r.h.(*AsyncSource[int])
 	case kindSlot:
-		return r.h.(*AsyncSlotHandle[int])
+		return r.h.(*AsyncComputed[int])
 	}
 	return r.h.(*AsyncEffectHandle)
 }
@@ -645,13 +645,13 @@ type asyncScope struct {
 
 func (sc *asyncScope) cell(id string, value int) nodeRef {
 	r := sc.m.cell(id, value)
-	OwnAsync(sc.s, r.h.(*AsyncCellHandle[int]))
+	OwnAsync(sc.s, r.h.(*AsyncSource[int]))
 	return r
 }
 
 func (sc *asyncScope) computed(id string, reads []nodeRef, offset int) nodeRef {
 	r := sc.m.computed(id, reads, offset)
-	OwnAsync(sc.s, r.h.(*AsyncSlotHandle[int]))
+	OwnAsync(sc.s, r.h.(*AsyncComputed[int]))
 	return r
 }
 

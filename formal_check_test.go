@@ -5,7 +5,7 @@ package lazily
 // The Go state-chart / reactive / collection / CRDT code mirrors universal
 // theorems in the sibling lazily-formal submodule (LazilyFormal.StateChart /
 // StateMachine / Reactive / Collection / Tree / Reconciliation /
-// AsyncSlotState). Those theorems are only trustworthy if the model compiles,
+// AsyncComputedState). Those theorems are only trustworthy if the model compiles,
 // so this test runs `lake build` when the sibling checkout + Lean toolchain are
 // present (full repo checkout / CI) and SKIPs gracefully otherwise (module
 // consumer via `go get`, shallow clone, no Lean toolchain) so the Go-only tests

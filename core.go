@@ -347,7 +347,7 @@ func (c *Context) Clear() {
 // that take a ComputeOps — Get(c, handle) for tracked reads, and the New*C
 // constructors for building nodes. This interface carries only the non-generic
 // operations plus the tracking identity itself; it mirrors the same split the
-// async surface already uses (AsyncComputeContext + free TrackCell/TrackAsync).
+// async surface already uses (AsyncComputeContext + free TrackSource/TrackComputed).
 //
 // There is deliberately no GetRc: Rc handles are a rust ownership device with no
 // Go analogue (the runtime is garbage-collected), exactly as on the async side.

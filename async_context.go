@@ -23,7 +23,7 @@
 // block), mirroring how Dart's futures run "concurrently" on the event loop
 // while all synchronous state transitions happen on the single thread between
 // await points. A compute reads its dependencies through an AsyncComputeContext
-// whose TrackCell / TrackAsync helpers register dependency edges (via the loop)
+// whose TrackSource / TrackComputed helpers register dependency edges (via the loop)
 // before the awaited read.
 //
 // # Supersession (Dart's _Superseded) == context cancellation
@@ -31,7 +31,7 @@
 // When a slot's dependency changes, the in-flight compute is superseded: its
 // per-compute context.Context is cancelled and every current waiter is told to
 // re-resolve (asyncResult.superseded). The re-resolve loop in
-// AsyncSlotHandle.GetAsync observes that and starts over from the current slot
+// AsyncComputed.GetAsync observes that and starts over from the current slot
 // state, exactly like Dart's re-resolve loop catching _Superseded. The stale
 // compute goroutine may still finish, but its completion is discarded because
 // the slot's in-flight token no longer matches (identity gate in onComplete).
@@ -56,26 +56,43 @@ import (
 // AsyncContext has been disposed (Dart threw a StateError here).
 var ErrAsyncContextDisposed = errors.New("lazily: async context disposed")
 
-// AsyncSlotState is the finite-state-machine state of an async slot
-// (docs/async.md § Async slot state machine).
-type AsyncSlotState string
+// AsyncComputedState is the public projection of an async computed's
+// finite-state machine. The formal model retains the storage-oriented
+// AsyncSlotState theorem/module name.
+type AsyncComputedState string
 
 const (
-	// AsyncSlotEmpty: no cached value, no in-flight computation. Entered on
+	// AsyncComputedEmpty: no cached value, no in-flight computation. Entered on
 	// creation and after a hard clear.
-	AsyncSlotEmpty AsyncSlotState = "empty"
-	// AsyncSlotComputing: a compute is in flight for the current revision.
+	AsyncComputedEmpty AsyncComputedState = "empty"
+	// AsyncComputedComputing: a compute is in flight for the current revision.
 	// Concurrent GetAsync callers attach as waiters instead of spawning
 	// duplicate computations.
-	AsyncSlotComputing AsyncSlotState = "computing"
-	// AsyncSlotResolved: the cached value is fresh, until dependency
+	AsyncComputedComputing AsyncComputedState = "computing"
+	// AsyncComputedResolved: the cached value is fresh, until dependency
 	// invalidation transitions back to computing.
-	AsyncSlotResolved AsyncSlotState = "resolved"
-	// AsyncSlotError: the last computation failed. Waiters on that attempt
+	AsyncComputedResolved AsyncComputedState = "resolved"
+	// AsyncComputedError: the last computation failed. Waiters on that attempt
 	// receive its error; the error is not cached. The next GetAsync re-spawns
 	// (Error -> Computing), per docs/async.md § Async slot state machine and
 	// LazilyFormal.AsyncSlotState SlotEvent.retry.
-	AsyncSlotError AsyncSlotState = "error"
+	AsyncComputedError AsyncComputedState = "error"
+)
+
+// AsyncSlotState is the deprecated v1 name for AsyncComputedState.
+//
+// Deprecated: use AsyncComputedState.
+type AsyncSlotState = AsyncComputedState
+
+const (
+	// Deprecated: use AsyncComputedEmpty.
+	AsyncSlotEmpty = AsyncComputedEmpty
+	// Deprecated: use AsyncComputedComputing.
+	AsyncSlotComputing = AsyncComputedComputing
+	// Deprecated: use AsyncComputedResolved.
+	AsyncSlotResolved = AsyncComputedResolved
+	// Deprecated: use AsyncComputedError.
+	AsyncSlotError = AsyncComputedError
 )
 
 // Equals is an equality predicate for async memo guards (Dart typedef Equals).
@@ -109,19 +126,19 @@ type depOwner interface {
 	depSet() map[any]struct{}
 }
 
-// asyncCell is the loop-owned state of a mutable input cell.
-type asyncCell struct {
+// asyncSourceNode is the loop-owned state of a mutable input cell.
+type asyncSourceNode struct {
 	value    any
 	disposed bool
 }
 
-// asyncSlot is the loop-owned state of a computed async slot. All fields are
+// asyncComputedNode is the loop-owned state of a computed async slot. All fields are
 // touched only inside the owner goroutine.
-type asyncSlot struct {
+type asyncComputedNode struct {
 	c        *AsyncContext
 	compute  func(cc *AsyncComputeContext) (any, error)
 	eq       func(a, b any) bool
-	state    AsyncSlotState
+	state    AsyncComputedState
 	revision int
 	value    any
 	hasValue bool
@@ -131,10 +148,10 @@ type asyncSlot struct {
 	disposed bool
 }
 
-func (s *asyncSlot) onDepInvalidated(c *AsyncContext) { c.invalidateSlot(s) }
-func (s *asyncSlot) depSet() map[any]struct{}         { return s.deps }
+func (s *asyncComputedNode) onDepInvalidated(c *AsyncContext) { c.invalidateSlot(s) }
+func (s *asyncComputedNode) depSet() map[any]struct{}         { return s.deps }
 
-func (s *asyncSlot) removeWaiter(w chan asyncResult) {
+func (s *asyncComputedNode) removeWaiter(w chan asyncResult) {
 	for i, x := range s.waiters {
 		if x == w {
 			s.waiters = append(s.waiters[:i], s.waiters[i+1:]...)
@@ -143,22 +160,22 @@ func (s *asyncSlot) removeWaiter(w chan asyncResult) {
 	}
 }
 
-// AsyncCellHandle is a mutable input cell on the async graph. Reads registered
-// inside an async compute/effect (via TrackCell) create a dependency edge;
+// AsyncSource is a mutable input cell on the async graph. Reads registered
+// inside an async compute/effect (via TrackSource) create a dependency edge;
 // writes invalidate dependents.
-type AsyncCellHandle[T any] struct {
+type AsyncSource[T any] struct {
 	c    *AsyncContext
-	node *asyncCell
+	node *asyncSourceNode
 }
 
-// NewAsyncCell creates a mutable input cell bound to c (Dart AsyncContext.cell).
-func NewAsyncCell[T any](c *AsyncContext, value T) *AsyncCellHandle[T] {
-	return &AsyncCellHandle[T]{c: c, node: &asyncCell{value: value}}
+// NewAsyncSource creates a mutable input cell bound to c (Dart AsyncContext.cell).
+func NewAsyncSource[T any](c *AsyncContext, value T) *AsyncSource[T] {
+	return &AsyncSource[T]{c: c, node: &asyncSourceNode{value: value}}
 }
 
 // Peek returns the current value without registering a dependency
-// (non-reactive). Use TrackCell to read reactively inside an async compute.
-func (h *AsyncCellHandle[T]) Peek() T {
+// (non-reactive). Use TrackSource to read reactively inside an async compute.
+func (h *AsyncSource[T]) Peek() T {
 	v, err := h.TryGet()
 	if err != nil {
 		panic(err)
@@ -168,7 +185,7 @@ func (h *AsyncCellHandle[T]) Peek() T {
 
 // TryGet is the checked read: it returns a *DisposedError instead of panicking
 // when this cell has been disposed.
-func (h *AsyncCellHandle[T]) TryGet() (T, error) {
+func (h *AsyncSource[T]) TryGet() (T, error) {
 	var v T
 	var disposed bool
 	h.c.do(func() {
@@ -186,13 +203,13 @@ func (h *AsyncCellHandle[T]) TryGet() (T, error) {
 }
 
 // Get returns the current value. It does NOT register a dependency (there is no
-// ambient compute outside a goroutine in Go); use TrackCell inside an async
+// ambient compute outside a goroutine in Go); use TrackSource inside an async
 // compute for reactive reads. Kept for parity with the Dart surface.
-func (h *AsyncCellHandle[T]) Get() T { return h.Peek() }
+func (h *AsyncSource[T]) Get() T { return h.Peek() }
 
 // Set assigns a new value. If it differs from the current value, dependent
 // async slots/effects are invalidated (or queued when inside Batch).
-func (h *AsyncCellHandle[T]) Set(value T) {
+func (h *AsyncSource[T]) Set(value T) {
 	h.c.do(func() {
 		if h.c.disposed || h.node.disposed {
 			return
@@ -205,61 +222,100 @@ func (h *AsyncCellHandle[T]) Set(value T) {
 	})
 }
 
-// AsyncSlotHandle is a computed async slot: a blocking/future-returning
+// AsyncComputed is a computed async slot: a blocking/future-returning
 // computation that recomputes when its dependencies change.
-type AsyncSlotHandle[T any] struct {
+type AsyncComputed[T any] struct {
 	c    *AsyncContext
-	node *asyncSlot
+	node *asyncComputedNode
 }
 
-// NewAsyncSlot creates an async computed slot (Dart AsyncContext.computedAsync).
+// AsyncCellHandle is the deprecated v1 name for AsyncSource.
+//
+// Deprecated: use AsyncSource.
+type AsyncCellHandle[T any] = AsyncSource[T]
+
+// AsyncSlotHandle is the deprecated v1 name for AsyncComputed.
+//
+// Deprecated: use AsyncComputed.
+type AsyncSlotHandle[T any] = AsyncComputed[T]
+
+// NewAsyncComputed creates an async computed slot (Dart AsyncContext.computedAsync).
 // compute reads its dependencies through the AsyncComputeContext and returns a
 // value or an error.
-func NewAsyncSlot[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) (T, error)) *AsyncSlotHandle[T] {
-	node := &asyncSlot{
+func NewAsyncComputed[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) (T, error)) *AsyncComputed[T] {
+	node := &asyncComputedNode{
 		c:     c,
-		state: AsyncSlotEmpty,
+		state: AsyncComputedEmpty,
 		deps:  map[any]struct{}{},
 		compute: func(cc *AsyncComputeContext) (any, error) {
 			return compute(cc)
 		},
 	}
-	return &AsyncSlotHandle[T]{c: c, node: node}
+	return &AsyncComputed[T]{c: c, node: node}
 }
 
-// NewAsyncMemo is like NewAsyncSlot but with an equality memo guard: a recompute
+// NewAsyncComputedWithEquals is like NewAsyncComputed but with an equality memo guard: a recompute
 // that yields an equal value (per eq) keeps the cached value and suppresses the
 // dependency cascade (Dart AsyncContext.memoAsync).
-func NewAsyncMemo[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) (T, error), eq Equals[T]) *AsyncSlotHandle[T] {
-	h := NewAsyncSlot(c, compute)
+func NewAsyncComputedWithEquals[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) (T, error), eq Equals[T]) *AsyncComputed[T] {
+	h := NewAsyncComputed(c, compute)
 	h.node.eq = func(a, b any) bool { return eq(a.(T), b.(T)) }
 	return h
+}
+
+// NewAsyncCell is the deprecated v1 source constructor.
+//
+// Deprecated: use NewAsyncSource.
+func NewAsyncCell[T any](c *AsyncContext, value T) *AsyncSource[T] {
+	return NewAsyncSource(c, value)
+}
+
+// NewAsyncSlot is the deprecated v1 computed constructor.
+//
+// Deprecated: use NewAsyncComputed.
+func NewAsyncSlot[T any](
+	c *AsyncContext,
+	compute func(cc *AsyncComputeContext) (T, error),
+) *AsyncComputed[T] {
+	return NewAsyncComputed(c, compute)
+}
+
+// NewAsyncMemo is the deprecated guarded-computed constructor. Memo is not a
+// separate node kind.
+//
+// Deprecated: use NewAsyncComputedWithEquals.
+func NewAsyncMemo[T any](
+	c *AsyncContext,
+	compute func(cc *AsyncComputeContext) (T, error),
+	eq Equals[T],
+) *AsyncComputed[T] {
+	return NewAsyncComputedWithEquals(c, compute, eq)
 }
 
 // NewAsyncComputedRippleWhen is the async mirror of NewComputedRippleWhen
 // (#lzcellkernel): a guarded async computed whose downstream propagation is gated
 // by an explicit, PURE predicate changed(old, next) — true propagates the
 // recompute to dependents, false suppresses it. It installs the engine's equality
-// guard as its negation (equal => suppress), so NewAsyncMemo(f, eq) and
+// guard as its negation (equal => suppress), so NewAsyncComputedWithEquals(f, eq) and
 // NewAsyncComputedRippleWhen(f, func(o, n) bool { return !eq(o, n) }) are the same.
 // changed MUST be pure in (old, next); value-carried state is fine, external
 // mutable state is not.
-func NewAsyncComputedRippleWhen[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) (T, error), changed func(old, next T) bool) *AsyncSlotHandle[T] {
-	h := NewAsyncSlot(c, compute)
+func NewAsyncComputedRippleWhen[T any](c *AsyncContext, compute func(cc *AsyncComputeContext) (T, error), changed func(old, next T) bool) *AsyncComputed[T] {
+	h := NewAsyncComputed(c, compute)
 	h.node.eq = func(a, b any) bool { return !changed(a.(T), b.(T)) }
 	return h
 }
 
 // State reports the current state-machine state.
-func (s *AsyncSlotHandle[T]) State() AsyncSlotState {
-	var st AsyncSlotState
+func (s *AsyncComputed[T]) State() AsyncComputedState {
+	var st AsyncComputedState
 	s.c.do(func() { st = s.node.state })
 	return st
 }
 
 // Revision reports the current revision (incremented on each invalidation; a
 // completion whose revision is stale is discarded).
-func (s *AsyncSlotHandle[T]) Revision() int {
+func (s *AsyncComputed[T]) Revision() int {
 	var r int
 	s.c.do(func() { r = s.node.revision })
 	return r
@@ -267,11 +323,11 @@ func (s *AsyncSlotHandle[T]) Revision() int {
 
 // Get is the synchronous cached read (Dart get()): it returns (value, true)
 // when the slot is resolved, else (zero, false). It does not spawn a compute.
-func (s *AsyncSlotHandle[T]) Get() (T, bool) {
+func (s *AsyncComputed[T]) Get() (T, bool) {
 	var v T
 	var ok bool
 	s.c.do(func() {
-		if s.node.state == AsyncSlotResolved {
+		if s.node.state == AsyncComputedResolved {
 			v = s.node.value.(T)
 			ok = true
 		}
@@ -281,14 +337,14 @@ func (s *AsyncSlotHandle[T]) Get() (T, bool) {
 
 // Value returns the cached value when resolved, else (zero, false)
 // (Dart value getter).
-func (s *AsyncSlotHandle[T]) Value() (T, bool) { return s.Get() }
+func (s *AsyncComputed[T]) Value() (T, bool) { return s.Get() }
 
 // GetAsync awaits the slot's value. Resolved slots return immediately;
 // otherwise the caller attaches to the in-flight compute (spawning one if none
 // is running — in-flight deduplication). ctx cancels this waiter only: dropping
 // one waiter never cancels a shared in-flight compute (cancellation contract
 // point 1). Supersession causes a transparent re-resolve.
-func (s *AsyncSlotHandle[T]) GetAsync(ctx context.Context) (T, error) {
+func (s *AsyncComputed[T]) GetAsync(ctx context.Context) (T, error) {
 	var zero T
 	for {
 		var (
@@ -310,7 +366,7 @@ func (s *AsyncSlotHandle[T]) GetAsync(ctx context.Context) (T, error) {
 				return
 			}
 			switch n.state {
-			case AsyncSlotResolved:
+			case AsyncComputedResolved:
 				outVal = n.value
 				done = true
 				return
@@ -355,7 +411,7 @@ func (s *AsyncSlotHandle[T]) GetAsync(ctx context.Context) (T, error) {
 }
 
 // AsyncComputeContext is handed to an async compute/effect body. Dependencies
-// are registered through TrackCell / TrackAsync (free functions, because Go
+// are registered through TrackSource / TrackComputed (free functions, because Go
 // methods cannot be generic) which record the edge before the awaited read.
 type AsyncComputeContext struct {
 	c     *AsyncContext
@@ -368,9 +424,9 @@ type AsyncComputeContext struct {
 // compute bodies should observe Context().Done().
 func (cc *AsyncComputeContext) Context() context.Context { return cc.goctx }
 
-// TrackCell reads a cell inside an async compute/effect, registering a
+// TrackSource reads a cell inside an async compute/effect, registering a
 // dependency edge before returning the value (Dart AsyncComputeContext.getCell).
-func TrackCell[T any](cc *AsyncComputeContext, cell *AsyncCellHandle[T]) T {
+func TrackSource[T any](cc *AsyncComputeContext, cell *AsyncSource[T]) T {
 	var v T
 	var disposed bool
 	cc.c.do(func() {
@@ -384,7 +440,7 @@ func TrackCell[T any](cc *AsyncComputeContext, cell *AsyncCellHandle[T]) T {
 		v = cell.node.value.(T)
 	})
 	if disposed {
-		// Panic, not a returned error: TrackCell returns a bare T so a compute
+		// Panic, not a returned error: TrackSource returns a bare T so a compute
 		// body has no error channel here. runComputeSafe / runBodySafe already
 		// recover panics into the compute's error, which is exactly the
 		// "errors on next recompute" contract. Mirrors the synchronous
@@ -394,17 +450,31 @@ func TrackCell[T any](cc *AsyncComputeContext, cell *AsyncCellHandle[T]) T {
 	return v
 }
 
-// TrackAsync awaits a slot inside an async compute/effect, registering a
+// TrackComputed awaits a computed inside an async compute/effect, registering a
 // dependency edge before the awaited read (Dart AsyncComputeContext.getAsync).
 // The nested await uses this compute's cancellation context, so supersession
 // unwinds nested reads too.
-func TrackAsync[T any](cc *AsyncComputeContext, slot *AsyncSlotHandle[T]) (T, error) {
+func TrackComputed[T any](cc *AsyncComputeContext, computed *AsyncComputed[T]) (T, error) {
 	cc.c.do(func() {
 		if cc.goctx.Err() == nil {
-			cc.c.trackDep(cc.owner, slot.node)
+			cc.c.trackDep(cc.owner, computed.node)
 		}
 	})
-	return slot.GetAsync(cc.goctx)
+	return computed.GetAsync(cc.goctx)
+}
+
+// TrackCell is the deprecated v1 source-read helper.
+//
+// Deprecated: use TrackSource.
+func TrackCell[T any](cc *AsyncComputeContext, source *AsyncSource[T]) T {
+	return TrackSource(cc, source)
+}
+
+// TrackAsync is the deprecated v1 computed-read helper.
+//
+// Deprecated: use TrackComputed.
+func TrackAsync[T any](cc *AsyncComputeContext, computed *AsyncComputed[T]) (T, error) {
+	return TrackComputed(cc, computed)
 }
 
 // AsyncEffectHandle is an async effect returned by AsyncContext.EffectAsync.
@@ -463,7 +533,7 @@ type AsyncContext struct {
 
 	// Loop-owned state — touched only inside the owner goroutine (loop).
 	dependents map[any]map[dependent]struct{}
-	computing  map[*asyncSlot]struct{}
+	computing  map[*asyncComputedNode]struct{}
 	effects    map[*AsyncEffectHandle]struct{}
 	disposed   bool
 	batchDepth int
@@ -478,7 +548,7 @@ func NewAsyncContext() *AsyncContext {
 		stopReq:    make(chan struct{}),
 		stopped:    make(chan struct{}),
 		dependents: map[any]map[dependent]struct{}{},
-		computing:  map[*asyncSlot]struct{}{},
+		computing:  map[*asyncComputedNode]struct{}{},
 		effects:    map[*AsyncEffectHandle]struct{}{},
 		batchQueue: map[any]struct{}{},
 	}
@@ -608,7 +678,7 @@ func (c *AsyncContext) invalidateDependents(dep any) {
 func (c *AsyncContext) propagate(dep any, schedule bool) {
 	// Walk the FULL transitive dependent cone, not just one level. A slot that
 	// depends on a slot must itself be invalidated: GetAsync short-circuits on
-	// AsyncSlotResolved, so a downstream slot left Resolved keeps serving its
+	// AsyncComputedResolved, so a downstream slot left Resolved keeps serving its
 	// cached value forever and the pull chain cannot rescue it. Stopping one
 	// level below the written cell is the defect this walk replaces — the sync
 	// side never had it (reactiveBase.invalidate in core.go cascades), only the
@@ -638,7 +708,7 @@ func (c *AsyncContext) propagate(dep any, schedule bool) {
 				// Frontier leaf: nothing can depend on an effect, so the walk
 				// does not continue through one.
 				effects = append(effects, n)
-			case *asyncSlot:
+			case *asyncComputedNode:
 				c.invalidateSlot(n)
 				// A slot registers its dependents under its own pointer
 				// (trackDep is called with slot.node), so the node is the key
@@ -670,8 +740,8 @@ func (c *AsyncContext) propagate(dep any, schedule bool) {
 
 // --- slot compute lifecycle (loop-only) ---
 
-func (c *AsyncContext) spawnCompute(s *asyncSlot) {
-	s.state = AsyncSlotComputing
+func (c *AsyncContext) spawnCompute(s *asyncComputedNode) {
+	s.state = AsyncComputedComputing
 	for dep := range s.deps {
 		c.removeDependent(dep, s)
 	}
@@ -688,16 +758,16 @@ func (c *AsyncContext) spawnCompute(s *asyncSlot) {
 	}()
 }
 
-func (c *AsyncContext) invalidateSlot(s *asyncSlot) {
+func (c *AsyncContext) invalidateSlot(s *asyncComputedNode) {
 	s.revision++
-	s.state = AsyncSlotComputing
+	s.state = AsyncComputedComputing
 	c.failInFlight(s)
 }
 
 // failInFlight cancels the in-flight compute (supersession) and tells current
 // waiters to re-resolve. The stale compute's completion is later discarded by
 // the identity gate in onComplete.
-func (c *AsyncContext) failInFlight(s *asyncSlot) {
+func (c *AsyncContext) failInFlight(s *asyncComputedNode) {
 	inf := s.inFlight
 	s.inFlight = nil
 	delete(c.computing, s)
@@ -711,7 +781,7 @@ func (c *AsyncContext) failInFlight(s *asyncSlot) {
 	}
 }
 
-func (c *AsyncContext) onComplete(s *asyncSlot, inf *inFlight, value any, err error) {
+func (c *AsyncContext) onComplete(s *asyncComputedNode, inf *inFlight, value any, err error) {
 	if s.inFlight != inf {
 		// Superseded or cancelled: this run's token was replaced. Discard;
 		// waiters were already told to re-resolve.
@@ -723,23 +793,23 @@ func (c *AsyncContext) onComplete(s *asyncSlot, inf *inFlight, value any, err er
 		// The error is delivered to this attempt's waiters and deliberately not
 		// stored: a slot in Error holds no cached result, so the next GetAsync
 		// re-spawns (Error -> Computing) instead of replaying a stale failure.
-		s.state = AsyncSlotError
+		s.state = AsyncComputedError
 		c.deliver(s, asyncResult{err: err})
 		return
 	}
 	if s.eq != nil && s.hasValue && s.eq(s.value, value) {
 		// Memo equality suppression: keep the cached value, no cascade.
-		s.state = AsyncSlotResolved
+		s.state = AsyncComputedResolved
 		c.deliver(s, asyncResult{value: s.value})
 		return
 	}
 	s.value = value
 	s.hasValue = true
-	s.state = AsyncSlotResolved
+	s.state = AsyncComputedResolved
 	c.deliver(s, asyncResult{value: value})
 }
 
-func (c *AsyncContext) deliver(s *asyncSlot, r asyncResult) {
+func (c *AsyncContext) deliver(s *asyncComputedNode, r asyncResult) {
 	ws := s.waiters
 	s.waiters = nil
 	for _, w := range ws {
@@ -855,7 +925,7 @@ func (c *AsyncContext) DisposeAsync() {
 				w <- asyncResult{err: ErrAsyncContextDisposed}
 			}
 		}
-		c.computing = map[*asyncSlot]struct{}{}
+		c.computing = map[*asyncComputedNode]struct{}{}
 		for e := range c.effects {
 			effects = append(effects, e)
 		}
