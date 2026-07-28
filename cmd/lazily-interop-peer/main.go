@@ -17,6 +17,8 @@ const protocolVersion = 1
 
 type request struct {
 	Cmd             string          `json:"cmd"`
+	Feature         string          `json:"feature"`
+	Step            json.RawMessage `json:"step"`
 	Peer            lazily.PeerId   `json:"peer"`
 	ProtocolVersion int             `json:"protocol_version"`
 	Node            lazily.NodeId   `json:"node"`
@@ -30,6 +32,7 @@ type peer struct {
 	peerID  lazily.PeerId
 	logical int64
 	runtime *lazily.CrdtPlaneRuntime
+	stdlib  map[string]*stdlibFeature
 }
 
 func (p *peer) close() {
@@ -49,6 +52,12 @@ func (p *peer) handle(req request) (any, error) {
 		return p.deliver(req)
 	case "snapshot":
 		return p.snapshot()
+	case "feature_reset":
+		return p.featureReset(req)
+	case "feature_step":
+		return p.featureStep(req)
+	case "feature_observe":
+		return p.featureObserve(req)
 	case "bye":
 		return map[string]any{"ok": true}, nil
 	case "link_open", "link_send", "link_recv", "link_close", "link_stats":
@@ -73,18 +82,248 @@ func (p *peer) hello(req request) any {
 	p.peerID = req.Peer
 	p.logical = 0
 	p.runtime = lazily.NewCrdtPlaneRuntime(req.Peer)
+	p.stdlib = make(map[string]*stdlibFeature)
 	return map[string]any{
 		"ok":               true,
 		"binding":          "lazily-go",
 		"version":          "0.23.2",
 		"protocol_version": protocolVersion,
-		"features":         []string{"distributed_crdt"},
+		"features": []string{
+			"distributed_crdt",
+			"stdlib_timer_v1",
+			"stdlib_timeout_v1",
+			"stdlib_revision_barrier_v1",
+		},
 		"codecs":           []string{"json"},
 		"channels":         []string{},
 		"channel_variants": map[string][]string{},
 		"platform_profile": "portable",
 		"carve_outs":       []string{"msgpack", "transport_links"},
 	}
+}
+
+type featureStep struct {
+	Op               string  `json:"op"`
+	Now              uint64  `json:"now"`
+	Duration         uint64  `json:"duration"`
+	Operation        string  `json:"operation"`
+	Value            string  `json:"value"`
+	Cancellation     string  `json:"cancellation"`
+	Revision         uint64  `json:"revision"`
+	RequiredRevision uint64  `json:"required_revision"`
+	ObservedRevision uint64  `json:"observed_revision"`
+	Deadline         *uint64 `json:"deadline"`
+	Predicate        bool    `json:"predicate"`
+	Key              string  `json:"key"`
+}
+
+type stdlibFeature struct {
+	name     string
+	timer    *lazily.Timer
+	timeout  *lazily.Timeout[string]
+	barrier  *lazily.RevisionBarrier
+	deadline uint64
+	last     map[string]any
+}
+
+func supportedFeature(feature string) bool {
+	switch feature {
+	case "stdlib_timer_v1", "stdlib_timeout_v1", "stdlib_revision_barrier_v1":
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *peer) featureReset(req request) (any, error) {
+	if !supportedFeature(req.Feature) {
+		return map[string]any{
+			"ok": false, "error": "unsupported feature " + req.Feature, "unsupported": true,
+		}, nil
+	}
+	if p.stdlib == nil {
+		p.stdlib = make(map[string]*stdlibFeature)
+	}
+	p.stdlib[req.Feature] = &stdlibFeature{name: req.Feature}
+	return map[string]any{"ok": true, "feature": req.Feature}, nil
+}
+
+func (p *peer) featureStep(req request) (any, error) {
+	feature := p.stdlib[req.Feature]
+	if feature == nil {
+		return nil, fmt.Errorf("feature %s must be reset before stepping", req.Feature)
+	}
+	var step featureStep
+	if err := json.Unmarshal(req.Step, &step); err != nil {
+		return nil, fmt.Errorf("invalid feature step: %w", err)
+	}
+	observation, err := feature.step(step)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"ok": true, "feature": req.Feature, "observation": observation,
+	}, nil
+}
+
+func (p *peer) featureObserve(req request) (any, error) {
+	feature := p.stdlib[req.Feature]
+	if feature == nil {
+		return nil, fmt.Errorf("feature %s must be reset before observation", req.Feature)
+	}
+	if feature.last == nil {
+		return nil, fmt.Errorf("feature %s has no observation", req.Feature)
+	}
+	return map[string]any{
+		"ok": true, "feature": req.Feature, "observation": feature.last,
+	}, nil
+}
+
+func (f *stdlibFeature) step(step featureStep) (map[string]any, error) {
+	var (
+		observation map[string]any
+		err         error
+	)
+	switch f.name {
+	case "stdlib_timer_v1":
+		observation, err = f.timerStep(step)
+	case "stdlib_timeout_v1":
+		observation, err = f.timeoutStep(step)
+	case "stdlib_revision_barrier_v1":
+		observation, err = f.barrierStep(step)
+	default:
+		err = fmt.Errorf("unsupported feature %s", f.name)
+	}
+	if err == nil {
+		f.last = observation
+	}
+	return observation, err
+}
+
+func (f *stdlibFeature) timerStep(step featureStep) (map[string]any, error) {
+	switch step.Op {
+	case "start":
+		timer, err := lazily.NewTimer(step.Now, step.Duration)
+		if err == lazily.TimerDeadlineOverflow {
+			f.timer = nil
+			return map[string]any{
+				"outcome": "unavailable", "reason": string(lazily.TimerDeadlineOverflow),
+			}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		f.timer = timer
+		f.deadline, _ = lazily.CheckedDeadline(step.Now, step.Duration)
+		return map[string]any{"outcome": "pending", "deadline": f.deadline}, nil
+	case "observe":
+		if f.timer == nil {
+			return nil, errors.New("timer feature is not started")
+		}
+		value, err := f.timer.Observe(step.Now)
+		if err != nil {
+			return map[string]any{
+				"outcome": "unavailable", "reason": err.Error(), "deadline": value.Deadline,
+			}, nil
+		}
+		if value.Outcome == "fired" {
+			return map[string]any{"outcome": "fired", "fired_at": value.FiredAt}, nil
+		}
+		return map[string]any{"outcome": "pending", "deadline": value.Deadline}, nil
+	default:
+		return nil, fmt.Errorf("unsupported timer feature step %s", step.Op)
+	}
+}
+
+func (f *stdlibFeature) timeoutStep(step featureStep) (map[string]any, error) {
+	switch step.Op {
+	case "start":
+		timeout, err := lazily.NewTimeout[string](step.Now, step.Duration)
+		if err != nil {
+			return nil, err
+		}
+		f.timeout = timeout
+		f.deadline, _ = lazily.CheckedDeadline(step.Now, step.Duration)
+		return map[string]any{"outcome": "pending", "deadline": f.deadline}, nil
+	case "poll":
+		if f.timeout == nil {
+			return nil, errors.New("timeout feature is not started")
+		}
+		operationCalls, cancellationCalls := 0, 0
+		value := f.timeout.Poll(step.Now, func() lazily.TimeoutOperation[string] {
+			operationCalls++
+			switch step.Operation {
+			case "pending":
+				return lazily.PendingOperation[string]()
+			case "completed":
+				return lazily.CompletedOperation(step.Value)
+			case "unavailable":
+				return lazily.UnavailableOperation[string]()
+			default:
+				return lazily.UnavailableOperation[string]()
+			}
+		}, func() lazily.TimeoutCancellation {
+			cancellationCalls++
+			return lazily.TimeoutCancellation(step.Cancellation)
+		})
+		observation := map[string]any{
+			"outcome":         value.Outcome,
+			"operation_calls": operationCalls, "cancellation_calls": cancellationCalls,
+		}
+		if value.Outcome == "pending" {
+			observation["deadline"] = value.Deadline
+		}
+		if value.Outcome == "completed" {
+			observation["value"] = value.Value
+		}
+		if value.Reason != "" {
+			observation["reason"] = value.Reason
+		}
+		return observation, nil
+	default:
+		return nil, fmt.Errorf("unsupported timeout feature step %s", step.Op)
+	}
+}
+
+func (f *stdlibFeature) barrierStep(step featureStep) (map[string]any, error) {
+	var (
+		value             lazily.RevisionBarrierObservation
+		cancellationCalls int
+	)
+	switch step.Op {
+	case "start":
+		f.barrier = lazily.NewRevisionBarrier(step.Revision, step.RequiredRevision, step.Deadline)
+		value = f.barrier.Receipt("")
+	case "observe":
+		if f.barrier == nil {
+			return nil, errors.New("barrier feature is not started")
+		}
+		value = f.barrier.Observe(step.Now, step.Predicate, func() lazily.TimeoutCancellation {
+			cancellationCalls++
+			return lazily.TimeoutCancellation(step.Cancellation)
+		})
+	case "register_recheck":
+		value = f.barrier.RegisterRecheck(step.Now, step.ObservedRevision, step.Predicate)
+	case "advance":
+		value = f.barrier.Advance(step.Revision, step.Predicate)
+	case "dispose":
+		value = f.barrier.Dispose()
+	case "receipt":
+		value = f.barrier.Receipt(step.Key)
+	default:
+		return nil, fmt.Errorf("unsupported revision barrier feature step %s", step.Op)
+	}
+	observation := map[string]any{
+		"outcome":  value.Outcome,
+		"revision": value.Revision, "generation": value.Generation,
+	}
+	if value.Reason != "" {
+		observation["reason"] = value.Reason
+	}
+	if step.Op == "observe" {
+		observation["cancellation_calls"] = cancellationCalls
+	}
+	return observation, nil
 }
 
 func (p *peer) localSet(req request) (any, error) {
@@ -214,6 +453,61 @@ func selfCheck() error {
 	duplicateBytes, _ := json.Marshal(duplicate)
 	if string(duplicateBytes) != `{"applied":0,"ok":true}` {
 		return fmt.Errorf("duplicate self-check failed: %s", duplicateBytes)
+	}
+	featureCases := []struct {
+		feature string
+		steps   []json.RawMessage
+		outcome string
+	}{
+		{
+			"stdlib_timer_v1",
+			[]json.RawMessage{
+				json.RawMessage(`{"op":"start","now":0,"duration":0}`),
+				json.RawMessage(`{"op":"observe","now":0}`),
+			},
+			"fired",
+		},
+		{
+			"stdlib_timeout_v1",
+			[]json.RawMessage{
+				json.RawMessage(`{"op":"start","now":0,"duration":1}`),
+				json.RawMessage(`{"op":"poll","now":0,"operation":"completed","value":"ok","cancellation":"pending"}`),
+			},
+			"completed",
+		},
+		{
+			"stdlib_revision_barrier_v1",
+			[]json.RawMessage{
+				json.RawMessage(`{"op":"start","revision":1,"required_revision":1,"deadline":null}`),
+				json.RawMessage(`{"op":"observe","now":0,"predicate":true,"cancellation":"pending"}`),
+			},
+			"satisfied",
+		},
+	}
+	for _, test := range featureCases {
+		if _, err := p.handle(request{Cmd: "feature_reset", Feature: test.feature}); err != nil {
+			return fmt.Errorf("%s reset self-check: %w", test.feature, err)
+		}
+		for _, step := range test.steps {
+			if _, err := p.handle(request{
+				Cmd: "feature_step", Feature: test.feature, Step: step,
+			}); err != nil {
+				return fmt.Errorf("%s step self-check: %w", test.feature, err)
+			}
+		}
+		observed, err := p.handle(request{Cmd: "feature_observe", Feature: test.feature})
+		if err != nil {
+			return fmt.Errorf("%s observe self-check: %w", test.feature, err)
+		}
+		raw, _ := json.Marshal(observed)
+		var response struct {
+			Observation struct {
+				Outcome string `json:"outcome"`
+			} `json:"observation"`
+		}
+		if err := json.Unmarshal(raw, &response); err != nil || response.Observation.Outcome != test.outcome {
+			return fmt.Errorf("%s observation self-check failed: %s", test.feature, raw)
+		}
 	}
 	return nil
 }
