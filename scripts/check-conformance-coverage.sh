@@ -42,6 +42,10 @@ KNOWN_UNCOVERED=(
   "reactive-graph/merge_per_settled_cone_not_per_write.json"
   "reliable-sync/coalesce_bounds_outbox.json"
   "reliable-sync/liveness_lease_eviction.json"
+  # Portable stdlib APIs and their production fixture runners are staged.
+  "stdlib/revision_barrier.json"
+  "stdlib/timeout.json"
+  "stdlib/timer.json"
 )
 
 MANIFEST="${LAZILY_CONFORMANCE_MANIFEST:-build/conformance-fixtures-loaded.txt}"
