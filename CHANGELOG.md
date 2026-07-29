@@ -4,6 +4,21 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.25.0
+
+### Added
+
+- Portable logical-clock `Timer`, caller-driven `Timeout[T]`, and
+  `RevisionBarrier` production APIs with deterministic caller-owned seams.
+- Canonical stdlib fixture replay and independently advertised interop peer
+  capabilities for all three portable features.
+
+### Fixed
+
+- Portable stdlib parity now rejects and latches regressing barrier clocks,
+  preserves terminal results across reentrant cancellation callbacks, and
+  retains exact uint64 deadline behavior.
+
 ## v0.24.0
 
 ### Added

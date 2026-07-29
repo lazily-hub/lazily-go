@@ -87,7 +87,7 @@ func (p *peer) hello(req request) any {
 	return map[string]any{
 		"ok":               true,
 		"binding":          "lazily-go",
-		"version":          "0.23.2",
+		"version":          "0.25.0",
 		"protocol_version": protocolVersion,
 		"features": []string{
 			"distributed_crdt",
