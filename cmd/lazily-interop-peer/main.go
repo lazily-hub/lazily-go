@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 
 	lazily "github.com/lazily-hub/lazily-go"
 )
@@ -102,19 +103,44 @@ func (p *peer) hello(req request) any {
 	}
 }
 
+type wireUint64 uint64
+
+func (value *wireUint64) UnmarshalJSON(data []byte) error {
+	text := string(data)
+	if len(data) > 0 && data[0] == '"' {
+		if err := json.Unmarshal(data, &text); err != nil {
+			return err
+		}
+	}
+	parsed, err := strconv.ParseUint(text, 10, 64)
+	if err != nil {
+		return fmt.Errorf("expected unsigned decimal integer: %w", err)
+	}
+	*value = wireUint64(parsed)
+	return nil
+}
+
 type featureStep struct {
-	Op               string  `json:"op"`
-	Now              uint64  `json:"now"`
-	Duration         uint64  `json:"duration"`
-	Operation        string  `json:"operation"`
-	Value            string  `json:"value"`
-	Cancellation     string  `json:"cancellation"`
-	Revision         uint64  `json:"revision"`
-	RequiredRevision uint64  `json:"required_revision"`
-	ObservedRevision uint64  `json:"observed_revision"`
-	Deadline         *uint64 `json:"deadline"`
-	Predicate        bool    `json:"predicate"`
-	Key              string  `json:"key"`
+	Op               string      `json:"op"`
+	Now              wireUint64  `json:"now"`
+	Duration         wireUint64  `json:"duration"`
+	Operation        string      `json:"operation"`
+	Value            string      `json:"value"`
+	Cancellation     string      `json:"cancellation"`
+	Revision         wireUint64  `json:"revision"`
+	RequiredRevision wireUint64  `json:"required_revision"`
+	ObservedRevision wireUint64  `json:"observed_revision"`
+	Deadline         *wireUint64 `json:"deadline"`
+	Predicate        bool        `json:"predicate"`
+	Key              string      `json:"key"`
+}
+
+func (step featureStep) deadlineValue() *uint64 {
+	if step.Deadline == nil {
+		return nil
+	}
+	value := uint64(*step.Deadline)
+	return &value
 }
 
 type stdlibFeature struct {
@@ -203,7 +229,7 @@ func (f *stdlibFeature) step(step featureStep) (map[string]any, error) {
 func (f *stdlibFeature) timerStep(step featureStep) (map[string]any, error) {
 	switch step.Op {
 	case "start":
-		timer, err := lazily.NewTimer(step.Now, step.Duration)
+		timer, err := lazily.NewTimer(uint64(step.Now), uint64(step.Duration))
 		if err == lazily.TimerDeadlineOverflow {
 			f.timer = nil
 			return map[string]any{
@@ -214,13 +240,13 @@ func (f *stdlibFeature) timerStep(step featureStep) (map[string]any, error) {
 			return nil, err
 		}
 		f.timer = timer
-		f.deadline, _ = lazily.CheckedDeadline(step.Now, step.Duration)
+		f.deadline, _ = lazily.CheckedDeadline(uint64(step.Now), uint64(step.Duration))
 		return map[string]any{"outcome": "pending", "deadline": f.deadline}, nil
 	case "observe":
 		if f.timer == nil {
 			return nil, errors.New("timer feature is not started")
 		}
-		value, err := f.timer.Observe(step.Now)
+		value, err := f.timer.Observe(uint64(step.Now))
 		if err != nil {
 			return map[string]any{
 				"outcome": "unavailable", "reason": err.Error(), "deadline": value.Deadline,
@@ -238,19 +264,19 @@ func (f *stdlibFeature) timerStep(step featureStep) (map[string]any, error) {
 func (f *stdlibFeature) timeoutStep(step featureStep) (map[string]any, error) {
 	switch step.Op {
 	case "start":
-		timeout, err := lazily.NewTimeout[string](step.Now, step.Duration)
+		timeout, err := lazily.NewTimeout[string](uint64(step.Now), uint64(step.Duration))
 		if err != nil {
 			return nil, err
 		}
 		f.timeout = timeout
-		f.deadline, _ = lazily.CheckedDeadline(step.Now, step.Duration)
+		f.deadline, _ = lazily.CheckedDeadline(uint64(step.Now), uint64(step.Duration))
 		return map[string]any{"outcome": "pending", "deadline": f.deadline}, nil
 	case "poll":
 		if f.timeout == nil {
 			return nil, errors.New("timeout feature is not started")
 		}
 		operationCalls, cancellationCalls := 0, 0
-		value := f.timeout.Poll(step.Now, func() lazily.TimeoutOperation[string] {
+		value := f.timeout.Poll(uint64(step.Now), func() lazily.TimeoutOperation[string] {
 			operationCalls++
 			switch step.Operation {
 			case "pending":
@@ -292,20 +318,28 @@ func (f *stdlibFeature) barrierStep(step featureStep) (map[string]any, error) {
 	)
 	switch step.Op {
 	case "start":
-		f.barrier = lazily.NewRevisionBarrier(step.Revision, step.RequiredRevision, step.Deadline)
+		f.barrier = lazily.NewRevisionBarrier(
+			uint64(step.Revision),
+			uint64(step.RequiredRevision),
+			step.deadlineValue(),
+		)
 		value = f.barrier.Receipt("")
 	case "observe":
 		if f.barrier == nil {
 			return nil, errors.New("barrier feature is not started")
 		}
-		value = f.barrier.Observe(step.Now, step.Predicate, func() lazily.TimeoutCancellation {
+		value = f.barrier.Observe(uint64(step.Now), step.Predicate, func() lazily.TimeoutCancellation {
 			cancellationCalls++
 			return lazily.TimeoutCancellation(step.Cancellation)
 		})
 	case "register_recheck":
-		value = f.barrier.RegisterRecheck(step.Now, step.ObservedRevision, step.Predicate)
+		value = f.barrier.RegisterRecheck(
+			uint64(step.Now),
+			uint64(step.ObservedRevision),
+			step.Predicate,
+		)
 	case "advance":
-		value = f.barrier.Advance(step.Revision, step.Predicate)
+		value = f.barrier.Advance(uint64(step.Revision), step.Predicate)
 	case "dispose":
 		value = f.barrier.Dispose()
 	case "receipt":

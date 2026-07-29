@@ -183,6 +183,8 @@ type RevisionBarrier struct {
 	requiredRevision uint64
 	generation       uint64
 	deadline         *uint64
+	lastNow          uint64
+	hasLastNow       bool
 	terminal         string
 	terminalReason   string
 }
@@ -199,17 +201,34 @@ func (b *RevisionBarrier) Observe(
 	cancellation func() TimeoutCancellation,
 ) RevisionBarrierObservation {
 	b.mu.Lock()
+	if b.terminal != "" {
+		observation := b.snapshot()
+		b.mu.Unlock()
+		return observation
+	}
+	if observation, rejected := b.acceptNow(now); rejected {
+		b.mu.Unlock()
+		return observation
+	}
+	if b.deadline != nil && now >= *b.deadline {
+		observation := b.latch("timed_out", "")
+		b.mu.Unlock()
+		return observation
+	}
+	if predicate && b.revision >= b.requiredRevision {
+		observation := b.latch("satisfied", "")
+		b.mu.Unlock()
+		return observation
+	}
+	b.mu.Unlock()
+
+	cancelled := cancellation()
+	b.mu.Lock()
 	defer b.mu.Unlock()
 	if b.terminal != "" {
 		return b.snapshot()
 	}
-	if b.deadline != nil && now >= *b.deadline {
-		return b.latch("timed_out", "")
-	}
-	if predicate && b.revision >= b.requiredRevision {
-		return b.latch("satisfied", "")
-	}
-	switch cancellation() {
+	switch cancelled {
 	case CancellationCancelled:
 		return b.latch("cancelled", "")
 	case CancellationUnavailable:
@@ -228,6 +247,9 @@ func (b *RevisionBarrier) RegisterRecheck(
 	defer b.mu.Unlock()
 	if b.terminal != "" {
 		return b.snapshot()
+	}
+	if observation, rejected := b.acceptNow(now); rejected {
+		return observation
 	}
 	if b.deadline != nil && now >= *b.deadline {
 		return b.latch("timed_out", "")
@@ -273,6 +295,15 @@ func (b *RevisionBarrier) acceptRevision(revision uint64) {
 		b.revision = revision
 		b.generation++
 	}
+}
+
+func (b *RevisionBarrier) acceptNow(now uint64) (RevisionBarrierObservation, bool) {
+	if b.hasLastNow && now < b.lastNow {
+		return b.latch("unavailable", string(TimerClockRegression)), true
+	}
+	b.lastNow = now
+	b.hasLastNow = true
+	return RevisionBarrierObservation{}, false
 }
 
 func (b *RevisionBarrier) latch(outcome, reason string) RevisionBarrierObservation {
