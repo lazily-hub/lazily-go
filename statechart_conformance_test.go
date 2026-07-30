@@ -33,6 +33,7 @@ func statechartSpecDir() string {
 }
 
 type statechartStep struct {
+	conformanceDoc
 	Event    string          `json:"event"`
 	Guards   map[string]bool `json:"guards"`
 	Accepted bool            `json:"accepted"`
@@ -42,6 +43,7 @@ type statechartStep struct {
 }
 
 type statechartFixture struct {
+	conformanceMeta
 	Chart          json.RawMessage  `json:"chart"`
 	InitialActive  json.RawMessage  `json:"initial_active"`
 	InitialActions []string         `json:"initial_actions"`
@@ -72,9 +74,7 @@ func loadStatechartFixture(t *testing.T, name string) (statechartFixture, bool) 
 		return statechartFixture{}, false
 	}
 	var fx statechartFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 

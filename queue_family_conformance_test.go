@@ -115,6 +115,8 @@ func loadQueueFamilyFixture(t *testing.T, name string) map[string]any {
 	if !ok {
 		t.Fatalf("canonical fixture %s was not found", name)
 	}
+	consumeFixtureKeys(t, name, fixture, "config", "initial", "invariants", "steps")
+	assertQueueInvariantsDocumented(t, name, jsMap(fixture["invariants"]))
 	for i, raw := range jsList(fixture["steps"]) {
 		step := jsMap(raw)
 		if _, bad := step["invalidates"]; bad {
@@ -127,6 +129,48 @@ func loadQueueFamilyFixture(t *testing.T, name string) map[string]any {
 		}
 	}
 	return fixture
+}
+
+// assertQueueInvariantsDocumented consumes the fixture's `invariants` block.
+//
+// Unlike every other assertion key in this corpus, its values are prose — one
+// sentence naming the behaviour the *steps* are constructed to exercise ("pop on
+// closed+empty returns Closed, not Empty"). There is no machine-checkable claim
+// here for the runner to evaluate beyond the step assertions that already
+// evaluate it, so this is a declared exception rather than an unimplemented
+// assertion: the block is consumed, and it is held to being real prose so an
+// empty or non-string entry cannot pass itself off as documentation.
+func assertQueueInvariantsDocumented(t *testing.T, name string, invariants map[string]any) {
+	t.Helper()
+	for key, value := range invariants {
+		text, ok := value.(string)
+		if !ok || strings.TrimSpace(text) == "" {
+			t.Fatalf("%s: invariant %q must be prose describing what the steps exercise, got %v",
+				name, key, value)
+		}
+	}
+}
+
+// queueFamilyConfig is the fixture's `config` block. Both fields used to be
+// hard-coded in the runner — the visibility timeout as a literal 10 and
+// max_deliveries as a per-filename switch — so a fixture that changed either
+// would have replayed under the old values and still passed.
+type queueFamilyConfig struct {
+	VisibilityTimeout int64
+	MaxDeliveries     uint64
+}
+
+func queueFamilyConfigOf(t *testing.T, name string, fixture map[string]any) queueFamilyConfig {
+	t.Helper()
+	cfg := consumeKeys(t, name+" config", jsMap(fixture["config"]),
+		"visibility_timeout", "max_deliveries")
+	if cfg == nil {
+		t.Fatalf("%s: config is required for the work-queue corpus", name)
+	}
+	return queueFamilyConfig{
+		VisibilityTimeout: int64(jsInt(cfg["visibility_timeout"])),
+		MaxDeliveries:     uint64(jsInt(cfg["max_deliveries"])),
+	}
 }
 
 type qfReader interface {
@@ -519,8 +563,11 @@ func replayQueueFixture(t *testing.T, name string, model queueFixtureModel) int 
 	for i, raw := range steps {
 		step := jsMap(raw)
 		op := jsMap(step["op"])
-		expected := jsMap(step["expected"])
-		invalidates := jsMap(expected["invalidates"])
+		qLabel := fmt.Sprintf("%s %s step %d", model.name(), name, i)
+		expected := consumeKeys(t, qLabel+" expected", jsMap(step["expected"]),
+			"invalidates", "elements", "head", "len", "is_empty", "is_full", "closed")
+		invalidates := consumeKeys(t, qLabel+" expected.invalidates", jsMap(expected["invalidates"]),
+			"value", "head", "len", "is_empty", "is_full", "closed")
 		before := map[string]int{}
 		for kind, reader := range readers {
 			before[kind] = reader.drive()
@@ -822,7 +869,11 @@ func replayTopicFixture(t *testing.T, name string, model topicFixtureModel) int 
 	for i, raw := range steps {
 		step := jsMap(raw)
 		op := jsMap(step["op"])
-		expected := jsMap(step["expected"])
+		expected := consumeKeys(t, fmt.Sprintf("%s %s step %d expected", model.name(), name, i),
+			jsMap(step["expected"]),
+			"invalidates", "base_offset", "elements", "subscriptions", "reads")
+		// TopicCell invalidation is keyed by subscriber id, so the readable set
+		// is the fixture's own subscriber vocabulary rather than a fixed list.
 		invalidates := jsMap(expected["invalidates"])
 		for id := range invalidates {
 			if readers[id] == nil {
@@ -1076,19 +1127,22 @@ func (m *asyncWorkQueueFixtureModel) readers() map[string]qfReader {
 }
 func (m *asyncWorkQueueFixtureModel) dispose() { m.ctx.DisposeAsync() }
 
-func newWorkQueueModels(maxDeliveries uint64) []workQueueFixtureModel {
+func newWorkQueueModels(cfg queueFamilyConfig) []workQueueFixtureModel {
 	syncCtx := NewContext()
 	ts := NewThreadSafeContext()
 	asyncCtx := NewAsyncContext()
 	return []workQueueFixtureModel{
 		&syncWorkQueueFixtureModel{
-			ctx: syncCtx, q: NewWorkQueueCell[string](syncCtx, 10, maxDeliveries),
+			ctx: syncCtx,
+			q:   NewWorkQueueCell[string](syncCtx, cfg.VisibilityTimeout, cfg.MaxDeliveries),
 		},
 		&tsWorkQueueFixtureModel{
-			ts: ts, q: NewThreadSafeWorkQueueCell[string](ts, 10, maxDeliveries),
+			ts: ts,
+			q:  NewThreadSafeWorkQueueCell[string](ts, cfg.VisibilityTimeout, cfg.MaxDeliveries),
 		},
 		&asyncWorkQueueFixtureModel{
-			ctx: asyncCtx, q: NewAsyncWorkQueueCell[string](asyncCtx, 10, maxDeliveries),
+			ctx: asyncCtx,
+			q:   NewAsyncWorkQueueCell[string](asyncCtx, cfg.VisibilityTimeout, cfg.MaxDeliveries),
 		},
 	}
 }
@@ -1179,8 +1233,11 @@ func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureMod
 	for i, raw := range steps {
 		step := jsMap(raw)
 		op := jsMap(step["op"])
-		expected := jsMap(step["expected"])
-		invalidates := jsMap(expected["invalidates"])
+		wLabel := fmt.Sprintf("%s %s step %d", model.name(), name, i)
+		expected := consumeKeys(t, wLabel+" expected", jsMap(step["expected"]),
+			"invalidates", "pending", "in_flight", "dead_letters", "reads")
+		invalidates := consumeKeys(t, wLabel+" expected.invalidates", jsMap(expected["invalidates"]),
+			"pending_len", "in_flight_len", "dead_letter_len", "is_empty")
 		before := map[string]int{}
 		for kind, reader := range readers {
 			before[kind] = reader.drive()
@@ -1244,12 +1301,9 @@ func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureMod
 func TestWorkQueueCellCorpusAllFlavors(t *testing.T) {
 	totals := map[string]int{}
 	for _, name := range workQueueFixtures {
-		loadQueueFamilyFixture(t, name)
-		maxDeliveries := uint64(3)
-		if name == "workqueue_lease_deadletter.json" {
-			maxDeliveries = 2
-		}
-		for _, model := range newWorkQueueModels(maxDeliveries) {
+		fixture := loadQueueFamilyFixture(t, name)
+		cfg := queueFamilyConfigOf(t, name, fixture)
+		for _, model := range newWorkQueueModels(cfg) {
 			totals[model.name()] += replayWorkQueueFixture(t, name, model)
 		}
 	}
@@ -1263,7 +1317,7 @@ func TestWorkQueueCellCorpusAllFlavors(t *testing.T) {
 // Mutation-discriminating regression: the corpus expires only one lease per
 // step, so reversing the required delivery-id sort would otherwise stay green.
 func TestWorkQueueMultiExpiryOrderAllFlavors(t *testing.T) {
-	for _, model := range newWorkQueueModels(3) {
+	for _, model := range newWorkQueueModels(queueFamilyConfig{VisibilityTimeout: 10, MaxDeliveries: 3}) {
 		model := model
 		t.Run(model.name(), func(t *testing.T) {
 			defer model.dispose()

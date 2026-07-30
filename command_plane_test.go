@@ -320,9 +320,7 @@ func firstCommandId(frames []mpFrame) string {
 func runMessagePassingFixture(t *testing.T, name string) {
 	raw := loadMessagePassingFixture(t, name)
 	var fixture mpFixture
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatalf("decode fixture %s: %v", name, err)
-	}
+	mustStrictJSON(t, name, raw, &fixture)
 	scenarios := fixture.Scenarios
 	if len(scenarios) == 0 {
 		// Bare frames+expect at the top level: wrap in a single scenario.

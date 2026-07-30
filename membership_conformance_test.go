@@ -1,7 +1,6 @@
 package lazily
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -37,12 +36,16 @@ type membershipStep struct {
 }
 
 type membershipFixture struct {
+	conformanceMeta
 	Config struct {
 		PhiThreshold   float64 `json:"phi_threshold"`
 		SuspectTimeout uint64  `json:"suspect_timeout"`
 		MaxSamples     int     `json:"max_samples"`
 		MinStd         float64 `json:"min_std"`
 	} `json:"config"`
+	Initial struct {
+		Peers []uint64 `json:"peers"`
+	} `json:"initial"`
 	Steps []membershipStep `json:"steps"`
 }
 
@@ -54,9 +57,7 @@ func loadMembershipFixture(t *testing.T, name string) (membershipFixture, bool) 
 		return membershipFixture{}, false
 	}
 	var fx membershipFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 
@@ -77,6 +78,22 @@ func TestMembershipConformance(t *testing.T) {
 
 		ctx := NewContext()
 		m := NewMembershipCell[uint64](ctx, config)
+
+		// `initial.peers` is the alive set the steps start from. It is empty in
+		// today's corpus, which is exactly why it has to be consumed rather than
+		// assumed: an unread seed key is indistinguishable from a satisfied one
+		// until the day the corpus fills it in.
+		for _, p := range fx.Initial.Peers {
+			m.Join(p, 0)
+		}
+		if got, want := m.PeerSet(), fx.Initial.Peers; len(got) != len(want) {
+			t.Fatalf("initial alive set: got %d peers, want %d", len(got), len(want))
+		}
+		for _, p := range fx.Initial.Peers {
+			if st, known := m.State(p); !known || st != Alive {
+				t.Fatalf("initial peer %d: got (%v,%v), want Alive", p, st, known)
+			}
+		}
 
 		// Observe the PeerSet reader (reads the version cell inside PeerSet).
 		observed := NewSlot(ctx, func(c *Compute) int {

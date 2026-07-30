@@ -1,7 +1,6 @@
 package lazily
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -57,6 +56,7 @@ type rateshapeInitial struct {
 }
 
 type rateshapeFixture struct {
+	conformanceMeta
 	Initial rateshapeInitial `json:"initial"`
 	Steps   []rateshapeStep  `json:"steps"`
 }
@@ -69,9 +69,7 @@ func loadRateshapeFixture(t *testing.T, name string) (rateshapeFixture, bool) {
 		return rateshapeFixture{}, false
 	}
 	var fx rateshapeFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 

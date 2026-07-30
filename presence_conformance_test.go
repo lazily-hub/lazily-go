@@ -1,7 +1,6 @@
 package lazily
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -40,6 +39,7 @@ type presenceStep struct {
 }
 
 type presenceFixture struct {
+	conformanceMeta
 	Config struct {
 		TTL uint64 `json:"ttl"`
 	} `json:"config"`
@@ -53,9 +53,7 @@ func loadPresenceFixture(t *testing.T, name string) (presenceFixture, bool) {
 		return presenceFixture{}, false
 	}
 	var fx presenceFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 

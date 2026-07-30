@@ -1,18 +1,25 @@
 package lazily
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"testing"
 )
 
 type outboxStoreFixture struct {
-	Scenarios []struct {
+	conformanceMeta
+	ProtocolVersion int `json:"protocol_version"`
+	Scenarios       []struct {
+		conformanceDoc
 		Name       string  `json:"name"`
 		PutEpochs  []Epoch `json:"put_epochs"`
 		ScanAfter  Epoch   `json:"scan_after"`
 		AckThrough []Epoch `json:"ack_through"`
-		SaveCursor []struct {
+		// `restart` and `open_handles` were the scenario's setup, hard-coded in
+		// the runner: it always reopened from disk and always opened exactly the
+		// two handles named "stale" and "current".
+		Restart     bool     `json:"restart"`
+		OpenHandles []string `json:"open_handles"`
+		SaveCursor  []struct {
 			Handle string `json:"handle"`
 			Epoch  Epoch  `json:"epoch"`
 		} `json:"save_cursor"`
@@ -34,18 +41,22 @@ func loadOutboxStoreFixture(t *testing.T) outboxStoreFixture {
 		t.Fatal(err)
 	}
 	var fixture outboxStoreFixture
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatal(err)
-	}
+	mustStrictJSON(t, "reliable-sync/outbox_store_protocol.json", raw, &fixture)
 	return fixture
 }
 
 func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) (out struct {
+	conformanceDoc
 	Name       string  `json:"name"`
 	PutEpochs  []Epoch `json:"put_epochs"`
 	ScanAfter  Epoch   `json:"scan_after"`
 	AckThrough []Epoch `json:"ack_through"`
-	SaveCursor []struct {
+	// `restart` and `open_handles` were the scenario's setup, hard-coded in
+	// the runner: it always reopened from disk and always opened exactly the
+	// two handles named "stale" and "current".
+	Restart     bool     `json:"restart"`
+	OpenHandles []string `json:"open_handles"`
+	SaveCursor  []struct {
 		Handle string `json:"handle"`
 		Epoch  Epoch  `json:"epoch"`
 	} `json:"save_cursor"`

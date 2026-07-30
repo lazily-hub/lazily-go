@@ -292,6 +292,12 @@ func sameOrder(a, b []string) bool {
 	return true
 }
 
+// mapOf narrows a decoded JSON value to an object, or nil.
+func mapOf(v any) map[string]any {
+	m, _ := v.(map[string]any)
+	return m
+}
+
 func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 	t.Helper()
 	fixture, ok := loadCollectionFixture(t, name)
@@ -302,6 +308,7 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		return fmt.Sprintf("%s %s step %d", flavor.name(), name, step)
 	}
 
+	consumeFixtureKeys(t, name, fixture, "initial", "steps")
 	initial, _ := fixture["initial"].(map[string]any)
 	if initial == nil {
 		t.Fatalf("%s: fixture has no initial state", flavor.name())
@@ -331,7 +338,10 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 	for i, rawStep := range steps {
 		step, _ := rawStep.(map[string]any)
 		op, _ := step["op"].(map[string]any)
-		expected, _ := step["expected"].(map[string]any)
+		expected := consumeKeys(t, where(i)+" expected", mapOf(step["expected"]),
+			"invalidates", "handle_stable", "order", "membership", "values")
+		consumeKeys(t, where(i)+" expected.invalidates", mapOf(expected["invalidates"]),
+			"value", "membership", "order")
 		if op == nil || expected == nil {
 			t.Fatalf("%s: missing op or expected", where(i))
 		}

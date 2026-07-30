@@ -684,6 +684,13 @@ type reactiveGraphOp struct {
 	Mode       string   `json:"mode"`
 	HandleOf   string   `json:"handle_of"`
 	HandleKind string   `json:"handle_kind"`
+	// ReadEach is the corpus's instruction to pull every generated subscriber
+	// once so its dependency edge is actually registered. This binding builds
+	// subscribers as effects, which register eagerly, so it was tempting to call
+	// the key satisfied by construction and never read it — which is precisely
+	// the vacuous pass the fixture's `why_read_each` note warns about. The read
+	// is performed, and the edge it is supposed to register is asserted.
+	ReadEach bool `json:"read_each"`
 	// Writes is the batch op's write list: an ordered sequence of cell writes
 	// applied inside one batch, so the corpus can pin coalescing.
 	Writes []reactiveGraphWrite `json:"writes"`
@@ -706,6 +713,7 @@ type reactiveGraphScenario struct {
 }
 
 type reactiveGraphFixture struct {
+	conformanceMeta
 	Shape     string                  `json:"shape"`
 	Steps     []reactiveGraphStep     `json:"steps"`
 	Scenarios []reactiveGraphScenario `json:"scenarios"`
@@ -764,6 +772,11 @@ type replayEngine struct {
 
 	step int
 	rep  replayReport
+
+	// readEachPending holds the subscribers a  op created this step,
+	// checked after settle because the async plane registers an effect's edges
+	// when it first runs rather than when it is constructed.
+	readEachPending []readEachClaim
 }
 
 func newReplayEngine(t *testing.T, m graphModel, fixture, label string) *replayEngine {
@@ -929,6 +942,7 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 		for i := 0; i < op.Count; i++ {
 			id := fmt.Sprintf("%s_%d", op.IDPrefix, i)
 			e.put(id, e.m.effect(id, base))
+			e.readEach(op, id, base)
 		}
 	case "dispose_fanout":
 		for i := 0; i < op.Count; i++ {
@@ -974,6 +988,68 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 	return nil, false
 }
 
+// readEach discharges the corpus's `read_each` instruction.
+//
+// The key says: pull every generated subscriber once so its dependency edge is
+// actually registered, because "a lazy binding that never pulls the slot
+// registers no dependency and would pass a weaker version of this fixture
+// vacuously". This binding builds subscribers as effects, which run — and so
+// register — at construction, and an effect is not readable through the model's
+// read seam. The instruction therefore cannot be discharged as a literal pull;
+// what it exists to establish can be, and is: the subscriber is subscribed. That
+// is asserted here rather than assumed, so the eager construction is checked
+// instead of being taken as a reason to skip the key.
+func (e *replayEngine) readEach(op reactiveGraphOp, id string, reads []nodeRef) {
+	if !op.ReadEach {
+		return
+	}
+	// Churn reuses a fixed set of ids across its cycles, so claims are deduped by
+	// id: 500 cycles over 8 live subscribers is 8 distinct claims, not 500
+	// repetitions of the same check.
+	for i, c := range e.readEachPending {
+		if c.id == id {
+			if len(reads) > c.deps {
+				e.readEachPending[i].deps = len(reads)
+			}
+			return
+		}
+	}
+	e.readEachPending = append(e.readEachPending, readEachClaim{id: id, deps: len(reads)})
+}
+
+// readEachClaim is one `read_each` subscriber awaiting its post-settle check.
+type readEachClaim struct {
+	id   string
+	deps int
+}
+
+// checkReadEach evaluates the pending `read_each` claims. It runs after settle
+// because the async plane registers an effect's edges when it first runs, not
+// when it is constructed.
+func (e *replayEngine) checkReadEach() {
+	pending := e.readEachPending
+	e.readEachPending = nil
+	for _, claim := range pending {
+		n, ok := e.nodes[claim.id]
+		if !ok {
+			e.t.Fatalf("%s#%d: read_each: no node %q", e.fixture, e.step, claim.id)
+		}
+		if n.kind != kindEffect {
+			if _, err := e.m.read(n); err != nil {
+				e.t.Fatalf("%s#%d: read_each: reading %q failed: %v", e.fixture, e.step, claim.id, err)
+			}
+		} else if !e.m.isEffectActive(n) {
+			e.t.Fatalf("%s#%d: read_each: subscriber %q is not active, so it pulled nothing",
+				e.fixture, e.step, claim.id)
+		}
+		if got := e.m.dependencyCount(n); got < claim.deps {
+			e.t.Fatalf("%s#%d: read_each: %q holds %d dependencies, want at least %d "+
+				"— a subscriber that pulls nothing subscribes to nothing",
+				e.fixture, e.step, claim.id, got, claim.deps)
+		}
+	}
+}
+
 func (e *replayEngine) runChurn(op reactiveGraphOp) {
 	source := e.node(op.Source)
 	switch op.Mode {
@@ -986,6 +1062,7 @@ func (e *replayEngine) runChurn(op reactiveGraphOp) {
 				e.m.dispose(n)
 			}
 			e.put(id, e.m.effect(id, []nodeRef{source}))
+			e.readEach(op, id, []nodeRef{source})
 		}
 	case "scope_per_cycle":
 		// One teardown scope per cycle; its subscriber is gone by the end of
@@ -1009,6 +1086,7 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 		opValue, opError := e.runOp(step.Op)
 		e.rep.ops++
 		e.m.settle()
+		e.checkReadEach()
 
 		observed := e.m.runLog()[runsBefore:]
 		// `cleanup_order` is cumulative, not per-step: the individual-disposal
@@ -1328,9 +1406,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 						t.Fatalf("reading fixture %s: %v", name, err)
 					}
 					var fx reactiveGraphFixture
-					if err := json.Unmarshal(raw, &fx); err != nil {
-						t.Fatalf("parsing fixture %s: %v", name, err)
-					}
+					mustStrictJSON(t, name, raw, &fx)
 
 					// Dispatch on the fixture's declared `shape`, never on its
 					// filename: a filename special case goes stale silently the

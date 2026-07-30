@@ -15,7 +15,7 @@ package lazily
 // helper; absent fixtures cause a t.Skip rather than a failure.
 
 import (
-	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -36,9 +36,7 @@ func loadCollectionFixture(t *testing.T, name string) (map[string]any, bool) {
 			continue
 		}
 		var fixture map[string]any
-		if err := json.Unmarshal(data, &fixture); err != nil {
-			t.Fatalf("%s: parse: %v", name, err)
-		}
+		mustStrictJSON(t, name, data, &fixture)
 		return fixture, true
 	}
 	t.Skipf("collections fixture not found: %s", name)
@@ -142,6 +140,7 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 	ctx := NewContext()
 	m := NewSourceMap[string, int](ctx)
 
+	consumeFixtureKeys(t, name, fixture, "initial", "steps")
 	initial := jsMap(fixture["initial"])
 	values := jsMap(initial["values"])
 	for _, k := range jsStrList(initial["order"]) {
@@ -151,8 +150,10 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 	for i, rawStep := range jsList(fixture["steps"]) {
 		step := jsMap(rawStep)
 		op := jsMap(step["op"])
-		expected := jsMap(step["expected"])
-		invalidates := jsMap(expected["invalidates"])
+		expected := consumeKeys(t, fmt.Sprintf("%s step %d expected", name, i), jsMap(step["expected"]),
+			"invalidates", "handle_stable", "order", "membership", "values")
+		invalidates := consumeKeys(t, fmt.Sprintf("%s step %d expected.invalidates", name, i),
+			jsMap(expected["invalidates"]), "value", "membership", "order")
 
 		// Prime readers against the CURRENT key set so each step's invalidation
 		// is measured in isolation (matches lazily-rs / lazily-dart).
@@ -258,8 +259,10 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 	if !ok {
 		return
 	}
+	consumeFixtureKeys(t, name, fixture, "reconcile", "expected")
 	reconcile := jsMap(fixture["reconcile"])
-	expected := jsMap(fixture["expected"])
+	expected := consumeKeys(t, name+" expected", jsMap(fixture["expected"]),
+		"ops", "result_order", "stable_keys_not_invalidated")
 
 	pairs := func(state map[string]any) []KeyValue[string, int] {
 		values := jsMap(state["values"])
@@ -417,9 +420,12 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 	if !ok {
 		return
 	}
+	consumeFixtureKeys(t, name, fixture, "scenarios")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+			consumeKeys(t, name+" scenario", scenario,
+				"name", "fold", "tree", "expect_initial", "expect_after", "edit", "remove_child")
 			ctx := NewContext()
 			fold := semFold(jsStr(scenario["fold"]))
 			tree := BuildSemTree(ctx, parseTreeNode(jsMap(scenario["tree"])), fold)
@@ -517,9 +523,14 @@ func TestCollectionsSeqCrdtConvergence(t *testing.T) {
 	if !ok {
 		return
 	}
+	consumeFixtureKeys(t, name, fixture, "scenarios")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+			consumeKeys(t, name+" scenario", scenario, "name", "replica", "seed", "steps", "expect")
+			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
+				"orders_equal", "order_on", "order", "len", "get", "get_on",
+				"contains_all", "not_contains_on")
 			replicas := map[string]*SeqCrdt[string, any]{}
 
 			seedPeer := int64(1)
@@ -667,9 +678,13 @@ func TestCollectionsTextCrdtConvergence(t *testing.T) {
 	if !ok {
 		return
 	}
+	consumeFixtureKeys(t, name, fixture, "scenarios")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+			consumeKeys(t, name+" scenario", scenario, "name", "replica", "seed", "steps", "expect")
+			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
+				"text", "len", "texts_equal", "a_starts_with", "a_ends_with", "tombstone_count")
 			replicas := map[string]*TextCrdt{}
 			replicas["a"] = seedTextCrdt(scenario)
 			for _, rawStep := range jsList(scenario["steps"]) {
@@ -789,9 +804,13 @@ func TestCollectionsTextCrdtDeltaSync(t *testing.T) {
 	if !ok {
 		return
 	}
+	consumeFixtureKeys(t, name, fixture, "scenarios")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+			consumeKeys(t, name+" scenario", scenario, "name", "seed", "steps", "expect")
+			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
+				"texts_equal", "text_on", "version_vector_on")
 			replicas := map[string]*TextCrdt{}
 			seed := jsMap(scenario["seed"])
 			replicas["a"] = TextCrdtFromStr(int64(jsInt(seed["peer"])), jsStr(seed["text"]))
@@ -912,10 +931,14 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 	if !ok {
 		return
 	}
+	consumeFixtureKeys(t, name, fixture, "scenarios")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
-			expect := jsMap(scenario["expect"])
+			consumeKeys(t, name+" scenario", scenario, "name", "blocks", "old", "new", "expect")
+			expect := consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
+				"key_equal", "key_not_equal", "matches", "removed", "similarity_min",
+				"new_key_equals_old_key")
 
 			if blocksField := jsList(scenario["blocks"]); blocksField != nil {
 				keys := make([]BlockKey, len(blocksField))

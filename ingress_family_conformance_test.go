@@ -40,7 +40,6 @@ package lazily
 // each one turned red.
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -111,9 +110,9 @@ func loadIngressFixture(t *testing.T, name string) map[string]any {
 	t.Helper()
 	data := loadConformanceFixture(t, "ingress", name)
 	var fixture map[string]any
-	if err := json.Unmarshal(data, &fixture); err != nil {
-		t.Fatalf("%s: parse: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fixture)
+	consumeFixtureKeys(t, name, fixture,
+		"policy", "merge", "transport", "poll_interval", "steps")
 	if got := fixture["model"]; got != "IngressCell" {
 		t.Fatalf("%s: fixture model=%v, want IngressCell", name, got)
 	}
@@ -273,7 +272,9 @@ func ingressReadinessOf(t *testing.T, text string) IngressReadiness {
 
 func ingressPolicyOf(t *testing.T, raw any) IngressPolicy {
 	t.Helper()
-	policy := jsMap(raw)
+	policy := consumeKeys(t, "ingress policy", jsMap(raw),
+		"reorder_window", "freshness_horizon", "high_water", "overflow",
+		"receipt_capacity", "retry_base", "retry_ceiling")
 	return IngressPolicy{
 		ReorderWindow:    jsInt(policy["reorder_window"]),
 		FreshnessHorizon: uint64(jsInt(policy["freshness_horizon"])),
@@ -299,7 +300,8 @@ func ingressMergeOf(t *testing.T, text string) MergePolicy[uint64] {
 
 func ingressExpectedAdmission(t *testing.T, raw any) IngressAdmission {
 	t.Helper()
-	want := jsMap(raw)
+	want := consumeKeys(t, "ingress returns", jsMap(raw),
+		"admission", "delivered_through", "gap_from", "from", "to", "reason")
 	switch kind := jsStr(want["admission"]); kind {
 	case "accepted":
 		return IngressAdmitted(uint64(jsInt(want["delivered_through"])))
@@ -851,8 +853,10 @@ func replayIngressFixture(
 	for i, raw := range jsList(fixture["steps"]) {
 		step := jsMap(raw)
 		op := jsMap(step["op"])
-		expected := jsMap(step["expected"])
 		label := fmt.Sprintf("%s %s step %d (%s)", model.flavor(), name, i, jsStr(op["type"]))
+		consumeKeys(t, label, step, "op", "returns", "expected")
+		expected := consumeKeys(t, label+" expected", jsMap(step["expected"]),
+			"invalidates", "scopes", "receipts")
 
 		beforeScope := map[string]map[string]int{}
 		for _, key := range keys {
@@ -926,13 +930,15 @@ func replayIngressFixture(
 
 		// `invalidates`, asserted per reader kind in BOTH directions. A step
 		// expecting false FAILS if the shell invalidated anyway.
-		invalidates := jsMap(expected["invalidates"])
+		invalidates := consumeKeys(t, label+" expected.invalidates",
+			jsMap(expected["invalidates"]), "scopes", "receipts")
 		scopeWants := jsMap(invalidates["scopes"])
 		if len(scopeWants) == 0 {
 			t.Fatalf("%s: expected.invalidates.scopes is empty", label)
 		}
 		for key, rawWant := range scopeWants {
-			want := jsMap(rawWant)
+			want := consumeKeys(t, label+" expected.invalidates.scopes."+key,
+				jsMap(rawWant), ingressScopeReaderKinds...)
 			if _, probed := beforeScope[key]; !probed {
 				t.Fatalf("%s: invalidates names unprobed scope %q", label, key)
 			}
@@ -946,7 +952,8 @@ func replayIngressFixture(
 					model.scopeProbe(key, kind), beforeScope[key][kind], flag == true)
 			}
 		}
-		receiptWants := jsMap(invalidates["receipts"])
+		receiptWants := consumeKeys(t, label+" expected.invalidates.receipts",
+			jsMap(invalidates["receipts"]), ingressReceiptChannels...)
 		for _, channel := range ingressReceiptChannels {
 			flag, ok := receiptWants[channel]
 			if !ok {
@@ -972,7 +979,13 @@ func assertIngressState(
 ) {
 	t.Helper()
 	for key, rawWant := range jsMap(expected["scopes"]) {
-		want := jsMap(rawWant)
+		want := consumeKeys(t, label+" expected.scopes."+key, jsMap(rawWant),
+			"lifecycle", "generation", "delivered_through", "buffered",
+			"consecutive_errors", "window", "readiness", "authority", "retry")
+		consumeKeys(t, label+" expected.scopes."+key+".authority", jsMap(want["authority"]),
+			"generation", "delivered_through", "stamped_at")
+		consumeKeys(t, label+" expected.scopes."+key+".retry", jsMap(want["retry"]),
+			"attempt", "backoff", "resume_from")
 		view, ok := model.view(key)
 		if !ok {
 			t.Fatalf("%s: scope %s absent", label, key)
@@ -1044,7 +1057,8 @@ func assertIngressState(
 		}
 	}
 
-	receipts := jsMap(expected["receipts"])
+	receipts := consumeKeys(t, label+" expected.receipts", jsMap(expected["receipts"]),
+		"accepted", "dropped", "error")
 	if got, expect := model.acceptedLen(), jsInt(receipts["accepted"]); got != expect {
 		t.Errorf("%s: accepted receipts=%d, want %d", label, got, expect)
 	}

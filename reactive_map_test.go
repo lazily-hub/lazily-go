@@ -12,7 +12,6 @@ package lazily
 // entry on mint (Entry / Set).
 
 import (
-	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -29,6 +28,7 @@ type matEntry struct {
 }
 
 type matFixture struct {
+	conformanceMeta
 	Model string `json:"model"`
 	Spec  struct {
 		Val     map[string]int      `json:"val"`
@@ -56,9 +56,7 @@ func loadMatFixture(t *testing.T, name string) matFixture {
 		t.Fatalf("reading %s: %v", p, err)
 	}
 	var f matFixture
-	if err := json.Unmarshal(raw, &f); err != nil {
-		t.Fatalf("decoding %s: %v", p, err)
-	}
+	mustStrictJSON(t, "materialization/"+name, raw, &f)
 	return f
 }
 

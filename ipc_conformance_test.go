@@ -73,9 +73,7 @@ func loadFixture(t *testing.T, name string) conformanceFixture {
 		t.Fatalf("reading fixture %s: %v", p, err)
 	}
 	var f conformanceFixture
-	if err := json.Unmarshal(raw, &f); err != nil {
-		t.Fatalf("decoding fixture %s: %v", p, err)
-	}
+	mustStrictJSON(t, name, raw, &f)
 	if f.ProtocolVersion != 1 {
 		t.Fatalf("%s: protocol_version = %d, want 1", name, f.ProtocolVersion)
 	}

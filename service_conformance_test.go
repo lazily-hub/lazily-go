@@ -1,7 +1,6 @@
 package lazily
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -47,6 +46,7 @@ type serviceStep struct {
 }
 
 type serviceFixture struct {
+	conformanceMeta
 	Steps []serviceStep `json:"steps"`
 }
 
@@ -58,9 +58,7 @@ func loadServiceFixture(t *testing.T, name string) (serviceFixture, bool) {
 		return serviceFixture{}, false
 	}
 	var fx serviceFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 

@@ -48,6 +48,7 @@ type coordStep struct {
 }
 
 type coordFixture struct {
+	conformanceMeta
 	Config struct {
 		Me       *uint64 `json:"me"`
 		Capacity *uint64 `json:"capacity"`
@@ -64,9 +65,7 @@ func loadCoordFixture(t *testing.T, name string) (coordFixture, bool) {
 		return coordFixture{}, false
 	}
 	var fx coordFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 

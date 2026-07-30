@@ -65,7 +65,9 @@ func TestReceiptsConformance(t *testing.T) {
 	raw := loadConformanceFixture(t, "receipts", "causal_receipts.json")
 
 	var fixture struct {
-		Assertions struct {
+		conformanceMeta
+		ProtocolVersion int `json:"protocol_version"`
+		Assertions      struct {
 			ReceiptCount        int      `json:"receipt_count"`
 			CurrentGeneration   int64    `json:"current_generation"`
 			CausationId         string   `json:"causation_id"`
@@ -77,9 +79,7 @@ func TestReceiptsConformance(t *testing.T) {
 			CausalReceipts json.RawMessage `json:"CausalReceipts"`
 		} `json:"wire"`
 	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatalf("decode receipts fixture: %v", err)
-	}
+	mustStrictJSON(t, "receipts/causal_receipts.json", raw, &fixture)
 
 	receipts, err := CausalReceiptsFromWire(fixture.Wire.CausalReceipts)
 	if err != nil {
@@ -162,7 +162,10 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 	raw := loadConformanceFixture(t, "distributed", "anti_entropy_converge.json")
 
 	var fixture struct {
-		Scenarios []struct {
+		conformanceMeta
+		ProtocolVersion int `json:"protocol_version"`
+		Scenarios       []struct {
+			conformanceDoc
 			Name                   string   `json:"name"`
 			Ops                    []CrdtOp `json:"ops"`
 			Redeliver              bool     `json:"redeliver"`
@@ -171,12 +174,18 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 				AppliedCount          int               `json:"applied_count"`
 				RedeliverAppliedCount int               `json:"redeliver_applied_count"`
 				Converged             []convergedExpect `json:"converged"`
+				// `resolution` names the conflict rule the winners must follow
+				// and `order_independent` states the convergence claim outright.
+				// Both fell through unread: the runner compared winners to a
+				// literal list, which is true of any rule that happens to produce
+				// that list, and ran the reverse-order replay without ever
+				// reporting it as the property the scenario asserts.
+				Resolution       string `json:"resolution"`
+				OrderIndependent *bool  `json:"order_independent"`
 			} `json:"expect"`
 		} `json:"scenarios"`
 	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatalf("decode anti_entropy fixture: %v", err)
-	}
+	mustStrictJSON(t, "distributed/anti_entropy_converge.json", raw, &fixture)
 	if len(fixture.Scenarios) == 0 {
 		t.Fatal("anti_entropy fixture has no scenarios")
 	}
@@ -197,6 +206,7 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 				}
 			}
 
+			orderIndependent := false
 			if scenario.ReverseOrderEquivalent {
 				reversed := make([]CrdtOp, len(scenario.Ops))
 				for i, op := range scenario.Ops {
@@ -205,10 +215,16 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 				other := NewCrdtPlaneRuntime(1)
 				defer other.Close()
 				other.IngestOps(reversed)
-				if !convergedEqual(t, other.Converged(), runtime.Converged()) {
+				orderIndependent = convergedEqual(t, other.Converged(), runtime.Converged())
+				if !orderIndependent {
 					t.Fatalf("order-dependent convergence: reverse order diverged")
 				}
 			}
+			if want := scenario.Expect.OrderIndependent; want != nil && orderIndependent != *want {
+				t.Fatalf("order_independent = %v, want %v (reverse_order_equivalent=%v)",
+					orderIndependent, *want, scenario.ReverseOrderEquivalent)
+			}
+			assertCrdtResolution(t, scenario.Expect.Resolution, scenario.Ops, runtime.Converged())
 
 			// Converged winners + values.
 			actual := runtime.Converged()
@@ -297,6 +313,59 @@ func sortPeers(peers []PeerId) {
 	}
 }
 
+// assertCrdtResolution checks the converged winners follow the conflict rule the
+// fixture names in `expect.resolution`, rather than merely happening to equal a
+// literal list. Under "max_stamp" the surviving state for every address must be
+// the state of the op with the greatest HLC stamp among the ops addressing it.
+func assertCrdtResolution(t *testing.T, rule string, ops []CrdtOp, converged []ConvergedEntry) {
+	t.Helper()
+	if rule == "" {
+		t.Fatal("expect.resolution is empty — the conflict rule must be stated")
+	}
+	if rule != "max_stamp" {
+		t.Fatalf("unknown conflict resolution rule %q", rule)
+	}
+
+	type addr struct {
+		node NodeId
+		key  string
+	}
+	winner := map[addr]CrdtOp{}
+	for _, op := range ops {
+		a := addr{node: op.Node}
+		if op.Key != nil {
+			a.key = op.Key.Path()
+		}
+		prev, seen := winner[a]
+		if !seen || HlcStampFromWire(prev.Stamp).Less(HlcStampFromWire(op.Stamp)) {
+			winner[a] = op
+		}
+	}
+
+	for _, entry := range converged {
+		a := addr{node: entry.Node}
+		if entry.Key != nil {
+			a.key = *entry.Key
+		}
+		want, ok := winner[a]
+		if !ok {
+			t.Fatalf("converged entry %v has no op in the fixture", a)
+		}
+		gotState, err := json.Marshal(entry.State)
+		if err != nil {
+			t.Fatalf("marshal converged state: %v", err)
+		}
+		wantState, err := json.Marshal(want.State)
+		if err != nil {
+			t.Fatalf("marshal winning op state: %v", err)
+		}
+		if !reflect.DeepEqual(normalizeJSON(t, gotState), normalizeJSON(t, wantState)) {
+			t.Fatalf("resolution=%s: node %d key %q converged to %s, but the max-stamp op %v carries %s",
+				rule, entry.Node, a.key, gotState, want.Stamp, wantState)
+		}
+	}
+}
+
 func convergedEqual(t *testing.T, a, b []ConvergedEntry) bool {
 	t.Helper()
 	aw, err := json.Marshal(a)
@@ -338,7 +407,10 @@ func TestDistributedCrdtSyncFramesConformance(t *testing.T) {
 	raw := loadConformanceFixture(t, "distributed", "crdt_sync_frames.json")
 
 	var fixture struct {
-		Frames []struct {
+		conformanceDoc
+		ProtocolVersion int    `json:"protocol_version"`
+		Kind            string `json:"kind"`
+		Frames          []struct {
 			Label      string `json:"label"`
 			Assertions struct {
 				FrontierLen     *int  `json:"frontier_len"`
@@ -350,9 +422,7 @@ func TestDistributedCrdtSyncFramesConformance(t *testing.T) {
 			Wire json.RawMessage `json:"wire"`
 		} `json:"frames"`
 	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatalf("decode crdt_sync_frames fixture: %v", err)
-	}
+	mustStrictJSON(t, "distributed/crdt_sync_frames.json", raw, &fixture)
 	if len(fixture.Frames) == 0 {
 		t.Fatal("crdt_sync_frames fixture has no frames")
 	}

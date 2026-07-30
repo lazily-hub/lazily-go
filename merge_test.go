@@ -7,7 +7,6 @@
 package lazily
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"testing"
 )
@@ -170,11 +169,10 @@ func TestMergeCellAlgebraFixture(t *testing.T) {
 		t.Skip("mergecell_algebra.json fixture not present as sibling")
 	}
 	var fixture struct {
+		conformanceMeta
 		Scenarios []mergeScenario `json:"scenarios"`
 	}
-	if err := json.Unmarshal(data, &fixture); err != nil {
-		t.Fatal(err)
-	}
+	mustStrictJSON(t, "collections/mergecell_algebra.json", data, &fixture)
 	policies := map[string]MergePolicy[int]{
 		"KeepLatest": KeepLatest[int](),
 		"Sum":        Sum[int](),

@@ -35,6 +35,7 @@ type resilienceStep struct {
 }
 
 type resilienceFixture struct {
+	conformanceMeta
 	Config json.RawMessage  `json:"config"`
 	Steps  []resilienceStep `json:"steps"`
 }
@@ -47,9 +48,7 @@ func loadResilienceFixture(t *testing.T, name string) (resilienceFixture, bool) 
 		return resilienceFixture{}, false
 	}
 	var fx resilienceFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 
@@ -82,9 +81,7 @@ func TestResilienceConformance(t *testing.T) {
 			FailureThreshold int    `json:"failure_threshold"`
 			ResetTimeout     uint64 `json:"reset_timeout"`
 		}
-		if err := json.Unmarshal(fx.Config, &cfg); err != nil {
-			t.Fatalf("config: %v", err)
-		}
+		mustStrictJSON(t, fx.Model+" config", fx.Config, &cfg)
 		ctx := NewContext()
 		cb := NewCircuitBreakerCell(ctx, cfg.Window, cfg.FailureThreshold, cfg.ResetTimeout)
 		sc := cb.StateCell()
@@ -123,9 +120,7 @@ func TestResilienceConformance(t *testing.T) {
 			Base uint64 `json:"base"`
 			Cap  uint64 `json:"cap"`
 		}
-		if err := json.Unmarshal(fx.Config, &cfg); err != nil {
-			t.Fatalf("config: %v", err)
-		}
+		mustStrictJSON(t, fx.Model+" config", fx.Config, &cfg)
 		ctx := NewContext()
 		r := NewRetryPolicyCell(ctx, cfg.Base, cfg.Cap)
 		dc := r.DelayCell()
@@ -159,9 +154,7 @@ func TestResilienceConformance(t *testing.T) {
 		var cfg struct {
 			Capacity uint64 `json:"capacity"`
 		}
-		if err := json.Unmarshal(fx.Config, &cfg); err != nil {
-			t.Fatalf("config: %v", err)
-		}
+		mustStrictJSON(t, fx.Model+" config", fx.Config, &cfg)
 		ctx := NewContext()
 		b := NewBulkheadCell(ctx, cfg.Capacity)
 		uc := b.PermitsInUseCell()

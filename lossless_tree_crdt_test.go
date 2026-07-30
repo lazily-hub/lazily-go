@@ -265,9 +265,7 @@ func (w *ltWorld) assertExpect(t *testing.T, expect ltExpect, label string) {
 func runLosslessTreeFixture(t *testing.T, name string) {
 	raw := loadLosslessTreeFixture(t, name)
 	var fixture ltFixture
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatalf("decode fixture %s: %v", name, err)
-	}
+	mustStrictJSON(t, name, raw, &fixture)
 	for i, scenario := range fixture.Scenarios {
 		label := name + "[" + scenario.Name + "]"
 		if scenario.Name == "" {

@@ -12,7 +12,6 @@ package lazily
 // and a derived aggregate over the family (count of `true` entries) converges.
 
 import (
-	"encoding/json"
 	"testing"
 )
 
@@ -88,9 +87,11 @@ func TestFamilySyncMaterializesRemoteKeysOnIngest(t *testing.T) {
 }
 
 type familyFixture struct {
+	conformanceMeta
 	Namespace string `json:"namespace"`
 	ValueType string `json:"value_type"`
 	Scenarios []struct {
+		conformanceDoc
 		Name       string `json:"name"`
 		OriginPeer PeerId `json:"origin_peer"`
 		TargetPeer PeerId `json:"target_peer"`
@@ -114,9 +115,7 @@ type familyFixture struct {
 func TestFamilySyncMaterializeOnIngestConformance(t *testing.T) {
 	raw := loadConformanceFixture(t, "familysync", "materialize_on_ingest.json")
 	var fx familyFixture
-	if err := json.Unmarshal(raw, &fx); err != nil {
-		t.Fatalf("decode fixture: %v", err)
-	}
+	mustStrictJSON(t, "familysync/materialize_on_ingest.json", raw, &fx)
 	if fx.ValueType != "bool" {
 		t.Fatalf("value_type = %q, want bool", fx.ValueType)
 	}

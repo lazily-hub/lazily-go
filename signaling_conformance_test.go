@@ -2,6 +2,7 @@ package lazily
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -39,9 +40,7 @@ func loadSignalingFixture(t *testing.T, name string, v any) bool {
 	if err != nil {
 		return false
 	}
-	if err := json.Unmarshal(data, v); err != nil {
-		t.Fatalf("decode fixture %s: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, v)
 	return true
 }
 
@@ -64,14 +63,17 @@ func jsonSemanticEqual(t *testing.T, a, b []byte) bool {
 // ---------------------------------------------------------------------------
 
 type framesFixture struct {
-	Kind    string        `json:"kind"`
-	Frames  []signalFrame `json:"frames"`
-	Rejects []rejectFrame `json:"rejects"`
+	conformanceDoc
+	ProtocolVersion int           `json:"protocol_version"`
+	Kind            string        `json:"kind"`
+	Frames          []signalFrame `json:"frames"`
+	Rejects         []rejectFrame `json:"rejects"`
 }
 
 type rejectFrame struct {
 	Label     string          `json:"label"`
 	Direction string          `json:"direction"`
+	Reason    string          `json:"reason"`
 	Wire      json.RawMessage `json:"wire"`
 	Input     *sessionInput   `json:"input"`
 }
@@ -92,6 +94,61 @@ type frameAssertions struct {
 	HasCapabilities *bool    `json:"has_capabilities"`
 	Capabilities    []string `json:"capabilities"`
 	Peers           *[]int64 `json:"peers"`
+	// The two anti-spoof discriminators. Both used to fall through unread: the
+	// welcome roster was compared to a literal list without ever asking whether
+	// it excluded the recipient, and the forwarded frames were never asked
+	// whether their route was server-stamped rather than client-supplied.
+	RosterExcludesSelf *bool `json:"roster_excludes_self"`
+	ServerStampedFrom  *bool `json:"server_stamped_from"`
+}
+
+// assertServerStampedFrom checks the wire shape a server-stamped route must
+// have: `from` present, `to` absent. A client-supplied route is a `to`, so a
+// forwarded frame carrying one would be exactly the spoof this asserts against.
+func assertServerStampedFrom(t *testing.T, fr signalFrame, from PeerId) {
+	t.Helper()
+	if fr.Assertions.ServerStampedFrom == nil {
+		return
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(fr.Wire, &obj); err != nil {
+		t.Fatalf("%s: decode wire: %v", fr.Label, err)
+	}
+	_, hasFrom := obj["from"]
+	_, hasTo := obj["to"]
+	stamped := hasFrom && !hasTo && from != 0
+	if stamped != *fr.Assertions.ServerStampedFrom {
+		t.Fatalf("%s: server_stamped_from = %v (from=%v to=%v id=%d), want %v",
+			fr.Label, stamped, hasFrom, hasTo, from, *fr.Assertions.ServerStampedFrom)
+	}
+}
+
+// assertRosterExcludesSelf checks a welcome roster omits its own recipient.
+func assertRosterExcludesSelf(t *testing.T, label string, want *bool, self PeerId, roster []PeerId) {
+	t.Helper()
+	if want == nil {
+		return
+	}
+	excludes := true
+	for _, p := range roster {
+		if p == self {
+			excludes = false
+			break
+		}
+	}
+	if excludes != *want {
+		t.Fatalf("%s: roster_excludes_self = %v (peer %d in %v), want %v", label, excludes, self, roster, *want)
+	}
+}
+
+// assertRosterSortedAscending checks a welcome roster is in ascending peer order.
+func assertRosterSortedAscending(t *testing.T, label string, roster []PeerId) {
+	t.Helper()
+	for i := 1; i < len(roster); i++ {
+		if roster[i-1] >= roster[i] {
+			t.Fatalf("%s: roster not ascending: %v", label, roster)
+		}
+	}
 }
 
 func TestSignalingFramesConformance(t *testing.T) {
@@ -213,6 +270,7 @@ func assertServerFrame(t *testing.T, fr signalFrame, msg ServerMessage) {
 				t.Fatalf("welcome peers = %v, want %v", got, want)
 			}
 		}
+		assertRosterExcludesSelf(t, fr.Label, a.RosterExcludesSelf, m.Peer, m.Peers)
 	case ServerPeerJoined:
 		if a.Peer != nil && m.Peer != PeerId(*a.Peer) {
 			t.Fatalf("peer-joined peer = %d, want %d", m.Peer, *a.Peer)
@@ -223,12 +281,16 @@ func assertServerFrame(t *testing.T, fr signalFrame, msg ServerMessage) {
 		}
 	case ServerOffer:
 		assertFrom(t, a, int64(m.From))
+		assertServerStampedFrom(t, fr, m.From)
 	case ServerAnswer:
 		assertFrom(t, a, int64(m.From))
+		assertServerStampedFrom(t, fr, m.From)
 	case ServerIce:
 		assertFrom(t, a, int64(m.From))
+		assertServerStampedFrom(t, fr, m.From)
 	case ServerRelay:
 		assertFrom(t, a, int64(m.From))
+		assertServerStampedFrom(t, fr, m.From)
 	case ServerError:
 		if a.Code != nil && m.Code != *a.Code {
 			t.Fatalf("error code = %q, want %q", m.Code, *a.Code)
@@ -264,10 +326,22 @@ func nonNilPeers(p []PeerId) []PeerId {
 // ---------------------------------------------------------------------------
 
 type sessionFixture struct {
-	Kind    string        `json:"kind"`
-	Mode    string        `json:"mode"`
-	Steps   []sessionStep `json:"steps"`
-	Rejects []rejectFrame `json:"rejects"`
+	conformanceDoc
+	ProtocolVersion int               `json:"protocol_version"`
+	Kind            string            `json:"kind"`
+	Mode            string            `json:"mode"`
+	Assertions      sessionAssertions `json:"assertions"`
+	Steps           []sessionStep     `json:"steps"`
+	Rejects         []rejectFrame     `json:"rejects"`
+}
+
+// sessionAssertions are the transcript-wide anti-spoof invariants. They are
+// stated once for the whole session rather than per frame, and until now the
+// runner replayed the transcript without ever asking any of them.
+type sessionAssertions struct {
+	RosterExcludesSelf              *bool `json:"roster_excludes_self"`
+	ForwardedFromIsServerRegistered *bool `json:"forwarded_from_is_server_registered"`
+	RosterSortedAscending           *bool `json:"roster_sorted_ascending"`
 }
 
 type sessionStep struct {
@@ -313,6 +387,12 @@ func TestSignalingAntiSpoofSession(t *testing.T) {
 		}
 	}
 
+	// conn label -> the peer id that connection joined with. The anti-spoof
+	// invariant is that a forwarded frame's `from` is this id and never the
+	// value the client put on the wire, so the transcript's own joins are the
+	// only admissible source of truth for it.
+	registered := map[string]PeerId{}
+
 	for i, step := range fx.Steps {
 		conn, ok := conns[step.Input.Conn]
 		if !ok {
@@ -321,6 +401,9 @@ func TestSignalingAntiSpoofSession(t *testing.T) {
 		msg, err := ParseClientMessage(step.Input.Recv)
 		if err != nil {
 			t.Fatalf("step %d: ParseClientMessage(%s): %v", i, step.Input.Recv, err)
+		}
+		if join, ok := msg.(ClientJoin); ok {
+			registered[step.Input.Conn] = join.Peer
 		}
 		select {
 		case conn.Inbound() <- msg:
@@ -345,6 +428,30 @@ func TestSignalingAntiSpoofSession(t *testing.T) {
 				t.Fatalf("step %d expect %d (to %q) mismatch\n got: %s\nwant: %s",
 					i, j, exp.To, gotBytes, exp.Frame)
 			}
+
+			// The transcript-wide assertions, evaluated against the frames the
+			// room actually produced. Comparing each frame to its literal
+			// `expect` says the bytes match; these say *why* they match, which is
+			// the property the fixture exists for.
+			label := fmt.Sprintf("step %d expect %d", i, j)
+			if w, ok := got.(ServerWelcome); ok {
+				assertRosterExcludesSelf(t, label, fx.Assertions.RosterExcludesSelf, w.Peer, w.Peers)
+				if fx.Assertions.RosterSortedAscending != nil && *fx.Assertions.RosterSortedAscending {
+					assertRosterSortedAscending(t, label, w.Peers)
+				}
+			}
+			if fx.Assertions.ForwardedFromIsServerRegistered != nil && *fx.Assertions.ForwardedFromIsServerRegistered {
+				if from, forwarded := forwardedFrom(got); forwarded {
+					want, joined := registered[step.Input.Conn]
+					if !joined {
+						t.Fatalf("%s: forwarded frame from a conn %q that never joined", label, step.Input.Conn)
+					}
+					if from != want {
+						t.Fatalf("%s: forwarded from = %d, want the sender's server-registered id %d",
+							label, from, want)
+					}
+				}
+			}
 		}
 	}
 	for _, reject := range fx.Rejects {
@@ -354,6 +461,23 @@ func TestSignalingAntiSpoofSession(t *testing.T) {
 		if _, err := ParseClientMessage(reject.Input.Recv); err == nil {
 			t.Errorf("%s: malformed client signaling frame was accepted", reject.Label)
 		}
+	}
+}
+
+// forwardedFrom returns the server-stamped `from` of a routed frame, and
+// whether the frame is one of the forwarded variants that carries one.
+func forwardedFrom(m ServerMessage) (PeerId, bool) {
+	switch v := m.(type) {
+	case ServerOffer:
+		return v.From, true
+	case ServerAnswer:
+		return v.From, true
+	case ServerIce:
+		return v.From, true
+	case ServerRelay:
+		return v.From, true
+	default:
+		return 0, false
 	}
 }
 

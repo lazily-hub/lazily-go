@@ -9,8 +9,17 @@ import (
 )
 
 type stdlibFixture struct {
-	Feature   string `json:"feature"`
-	Scenarios []struct {
+	Schema         string `json:"$schema"`
+	FixtureVersion int    `json:"fixture_version"`
+	Feature        string `json:"feature"`
+	// The three floors are the fixture's own "did you actually check anything"
+	// guards, and this runner used to drop all three on the floor: the fixture
+	// stated a minimum scenario, assertion, and mutation count, and the replay
+	// reported green without ever comparing itself against any of them.
+	ScenarioFloor  int `json:"scenario_floor"`
+	AssertionFloor int `json:"assertion_floor"`
+	MutationFloor  int `json:"mutation_floor"`
+	Scenarios      []struct {
 		ID    string       `json:"id"`
 		Steps []stdlibStep `json:"steps"`
 	} `json:"scenarios"`
@@ -19,6 +28,9 @@ type stdlibFixture struct {
 		MustFail []string `json:"must_fail"`
 	} `json:"mutations"`
 }
+
+// stdlibFixtureVersion is the fixture shape this runner understands.
+const stdlibFixtureVersion = 1
 
 type stdlibStep struct {
 	Op               string          `json:"op"`
@@ -44,8 +56,9 @@ func loadStdlibFixture(t *testing.T, name string) stdlibFixture {
 		t.Skipf("lazily-spec fixture absent: %s", path)
 	}
 	var fixture stdlibFixture
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatalf("%s: %v", name, err)
+	mustStrictJSON(t, name, raw, &fixture)
+	if fixture.FixtureVersion != stdlibFixtureVersion {
+		t.Fatalf("%s: fixture_version = %d, this runner replays %d", name, fixture.FixtureVersion, stdlibFixtureVersion)
 	}
 	return fixture
 }
@@ -56,11 +69,16 @@ func TestStdlibConformance(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fixture := loadStdlibFixture(t, name)
 			scenarios := make(map[string]bool, len(fixture.Scenarios))
+			assertions := 0
 			for _, scenario := range fixture.Scenarios {
+				if scenarios[scenario.ID] {
+					t.Fatalf("duplicate scenario id %q", scenario.ID)
+				}
 				scenarios[scenario.ID] = true
-				t.Run(scenario.ID, func(t *testing.T) {
-					replayStdlibScenario(t, fixture.Feature, scenario.Steps)
-				})
+				// The floor counts assertions this runner performed, so the
+				// replay has to happen inline rather than in a subtest whose
+				// tally the parent never sees.
+				assertions += replayStdlibScenario(t, scenario.ID, fixture.Feature, scenario.Steps)
 			}
 			for _, mutation := range fixture.Mutations {
 				if len(mutation.MustFail) == 0 {
@@ -72,25 +90,39 @@ func TestStdlibConformance(t *testing.T) {
 					}
 				}
 			}
+			if got := len(scenarios); got < fixture.ScenarioFloor {
+				t.Fatalf("replayed %d scenarios, below scenario_floor %d", got, fixture.ScenarioFloor)
+			}
+			if assertions < fixture.AssertionFloor {
+				t.Fatalf("performed %d assertions, below assertion_floor %d", assertions, fixture.AssertionFloor)
+			}
+			if got := len(fixture.Mutations); got < fixture.MutationFloor {
+				t.Fatalf("declared %d mutations, below mutation_floor %d", got, fixture.MutationFloor)
+			}
 		})
 	}
 }
 
-func replayStdlibScenario(t *testing.T, feature string, steps []stdlibStep) {
+// replayStdlibScenario returns the number of assertions it performed — one per
+// key compared in a step's `expect`, matching how the canonical lazily-spec
+// runner counts toward `assertion_floor`.
+func replayStdlibScenario(t *testing.T, id, feature string, steps []stdlibStep) int {
 	t.Helper()
 	switch feature {
 	case "stdlib_timer_v1":
-		replayStdlibTimer(t, steps)
+		return replayStdlibTimer(t, id, steps)
 	case "stdlib_timeout_v1":
-		replayStdlibTimeout(t, steps)
+		return replayStdlibTimeout(t, id, steps)
 	case "stdlib_revision_barrier_v1":
-		replayStdlibBarrier(t, steps)
+		return replayStdlibBarrier(t, id, steps)
 	default:
 		t.Fatalf("unsupported stdlib feature %q", feature)
+		return 0
 	}
 }
 
-func replayStdlibTimer(t *testing.T, steps []stdlibStep) {
+func replayStdlibTimer(t *testing.T, id string, steps []stdlibStep) int {
+	asserted := 0
 	var timer *Timer
 	for index, step := range steps {
 		var actual map[string]any
@@ -115,8 +147,9 @@ func replayStdlibTimer(t *testing.T, steps []stdlibStep) {
 		default:
 			t.Fatalf("step %d: unsupported timer op %q", index, step.Op)
 		}
-		assertStdlibExpectation(t, index, step.Expect, actual)
+		asserted += assertStdlibExpectation(t, id, index, step.Expect, actual)
 	}
+	return asserted
 }
 
 func timerJSON(observation TimerObservation, err error) map[string]any {
@@ -131,7 +164,8 @@ func timerJSON(observation TimerObservation, err error) map[string]any {
 	return map[string]any{"outcome": "pending", "deadline": observation.Deadline}
 }
 
-func replayStdlibTimeout(t *testing.T, steps []stdlibStep) {
+func replayStdlibTimeout(t *testing.T, id string, steps []stdlibStep) int {
+	asserted := 0
 	var timeout *Timeout[string]
 	for index, step := range steps {
 		var actual map[string]any
@@ -171,8 +205,9 @@ func replayStdlibTimeout(t *testing.T, steps []stdlibStep) {
 		default:
 			t.Fatalf("step %d: unsupported timeout op %q", index, step.Op)
 		}
-		assertStdlibExpectation(t, index, step.Expect, actual)
+		asserted += assertStdlibExpectation(t, id, index, step.Expect, actual)
 	}
+	return asserted
 }
 
 func timeoutJSON(
@@ -198,7 +233,8 @@ func timeoutJSON(
 	return actual
 }
 
-func replayStdlibBarrier(t *testing.T, steps []stdlibStep) {
+func replayStdlibBarrier(t *testing.T, id string, steps []stdlibStep) int {
+	asserted := 0
 	var barrier *RevisionBarrier
 	for index, step := range steps {
 		cancellationCalls := 0
@@ -230,8 +266,9 @@ func replayStdlibBarrier(t *testing.T, steps []stdlibStep) {
 		if step.Op == "observe" {
 			actual["cancellation_calls"] = cancellationCalls
 		}
-		assertStdlibExpectation(t, index, step.Expect, actual)
+		asserted += assertStdlibExpectation(t, id, index, step.Expect, actual)
 	}
+	return asserted
 }
 
 func barrierJSON(observation RevisionBarrierObservation) map[string]any {
@@ -245,8 +282,18 @@ func barrierJSON(observation RevisionBarrierObservation) map[string]any {
 	return actual
 }
 
-func assertStdlibExpectation(t *testing.T, step int, expectedRaw json.RawMessage, actual any) {
+// assertStdlibExpectation compares the whole `expect` object — an unmodelled key
+// in the fixture shows up as a DeepEqual mismatch, so this block already fails
+// closed — and returns how many keys it compared.
+func assertStdlibExpectation(t *testing.T, id string, step int, expectedRaw json.RawMessage, actual any) int {
 	t.Helper()
+	var expectedKeys map[string]json.RawMessage
+	if err := json.Unmarshal(expectedRaw, &expectedKeys); err != nil {
+		t.Fatalf("%s step %d: expect must be an object: %v", id, step, err)
+	}
+	if len(expectedKeys) == 0 {
+		t.Fatalf("%s step %d: expect is empty — the step asserts nothing", id, step)
+	}
 	var expected any
 	decoder := json.NewDecoder(bytes.NewReader(expectedRaw))
 	decoder.UseNumber()
@@ -264,6 +311,7 @@ func assertStdlibExpectation(t *testing.T, step int, expectedRaw json.RawMessage
 		t.Fatalf("step %d: decode actual: %v", step, err)
 	}
 	if !reflect.DeepEqual(normalized, expected) {
-		t.Fatalf("step %d:\n  got  %s\n  want %s", step, actualRaw, expectedRaw)
+		t.Fatalf("%s step %d:\n  got  %s\n  want %s", id, step, actualRaw, expectedRaw)
 	}
+	return len(expectedKeys)
 }

@@ -44,7 +44,7 @@ type temporalStep struct {
 }
 
 type temporalFixture struct {
-	Model   string          `json:"model"`
+	conformanceMeta
 	Initial json.RawMessage `json:"initial"`
 	Steps   []temporalStep  `json:"steps"`
 }
@@ -57,9 +57,7 @@ func loadTemporalFixture(t *testing.T, name string) (temporalFixture, bool) {
 		return temporalFixture{}, false
 	}
 	var fx temporalFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 
@@ -115,9 +113,7 @@ func replayTimer(t *testing.T, fx temporalFixture) {
 	var initial struct {
 		FireAt uint64 `json:"fire_at"`
 	}
-	if err := json.Unmarshal(fx.Initial, &initial); err != nil {
-		t.Fatalf("initial: %v", err)
-	}
+	mustStrictJSON(t, fx.Model+" initial", fx.Initial, &initial)
 	ctx := NewContext()
 	timer := NewTimerCell(ctx, initial.FireAt)
 	fired := timer.FiredCell()
@@ -154,9 +150,7 @@ func replayInterval(t *testing.T, fx temporalFixture) {
 	var initial struct {
 		Period uint64 `json:"period"`
 	}
-	if err := json.Unmarshal(fx.Initial, &initial); err != nil {
-		t.Fatalf("initial: %v", err)
-	}
+	mustStrictJSON(t, fx.Model+" initial", fx.Initial, &initial)
 	ctx := NewContext()
 	iv := NewIntervalCell(ctx, initial.Period)
 	count := iv.CountCell()
@@ -187,9 +181,7 @@ func replayCron(t *testing.T, fx temporalFixture) {
 		Cycle   uint64   `json:"cycle"`
 		Offsets []uint64 `json:"offsets"`
 	}
-	if err := json.Unmarshal(fx.Initial, &initial); err != nil {
-		t.Fatalf("initial: %v", err)
-	}
+	mustStrictJSON(t, fx.Model+" initial", fx.Initial, &initial)
 	ctx := NewContext()
 	cron := NewCronCell(ctx, initial.Cycle, initial.Offsets)
 	count := cron.CountCell()
@@ -220,9 +212,7 @@ func replayDeadline(t *testing.T, fx temporalFixture) {
 		Value    string `json:"value"`
 		Deadline uint64 `json:"deadline"`
 	}
-	if err := json.Unmarshal(fx.Initial, &initial); err != nil {
-		t.Fatalf("initial: %v", err)
-	}
+	mustStrictJSON(t, fx.Model+" initial", fx.Initial, &initial)
 	ctx := NewContext()
 	d := NewDeadlineCell(ctx, initial.Value, initial.Deadline)
 	expired := d.ExpiredCell()

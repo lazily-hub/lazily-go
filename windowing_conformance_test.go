@@ -1,7 +1,6 @@
 package lazily
 
 import (
-	"encoding/json"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -34,14 +33,47 @@ type windowingStep struct {
 }
 
 type windowingFixture struct {
+	conformanceMeta
 	Config struct {
-		N      *uint64 `json:"n"`
-		Period *uint64 `json:"period"`
-		Size   *uint64 `json:"size"`
-		Slide  *uint64 `json:"slide"`
-		Gap    *uint64 `json:"gap"`
+		// `mode` and `aggregate` used to be the silent half of this fixture: the
+		// runner hard-coded a Sum fold and picked the window family from the
+		// filename, so a fixture asking for Max — or for a time window under a
+		// count-mode name — would have replayed as Sum and passed.
+		Mode      string  `json:"mode"`
+		Aggregate string  `json:"aggregate"`
+		N         *uint64 `json:"n"`
+		Period    *uint64 `json:"period"`
+		Size      *uint64 `json:"size"`
+		Slide     *uint64 `json:"slide"`
+		Gap       *uint64 `json:"gap"`
 	} `json:"config"`
 	Steps []windowingStep `json:"steps"`
+}
+
+// windowingPolicy resolves `config.aggregate` to the fold the window must use.
+func windowingPolicy(t *testing.T, fx windowingFixture) MergePolicy[uint64] {
+	t.Helper()
+	switch fx.Config.Aggregate {
+	case "Sum":
+		return Sum[uint64]()
+	case "Max":
+		return Max[uint64]()
+	case "KeepLatest":
+		return KeepLatest[uint64]()
+	default:
+		t.Fatalf("unknown windowing aggregate %q", fx.Config.Aggregate)
+		return MergePolicy[uint64]{}
+	}
+}
+
+// windowingRequireMode asserts `config.mode` names the window family the runner
+// is about to construct. Fixtures that omit it (the shape is already pinned by
+// `size`/`slide` or `gap`) pass want=""...
+func windowingRequireMode(t *testing.T, fx windowingFixture, want string) {
+	t.Helper()
+	if fx.Config.Mode != want {
+		t.Fatalf("config.mode = %q, want %q", fx.Config.Mode, want)
+	}
 }
 
 // loadWindowingFixture returns (fixture, true) when the sibling spec file is
@@ -54,9 +86,7 @@ func loadWindowingFixture(t *testing.T, name string) (windowingFixture, bool) {
 		return windowingFixture{}, false
 	}
 	var fx windowingFixture
-	if err := json.Unmarshal(data, &fx); err != nil {
-		t.Fatalf("%s: unmarshal fixture: %v", name, err)
-	}
+	mustStrictJSON(t, name, data, &fx)
 	return fx, true
 }
 
@@ -108,7 +138,8 @@ func TestWindowingConformance(t *testing.T) {
 			t.Skip("lazily-spec conformance/windowing not reachable")
 		}
 		ctx := NewContext()
-		w := TumblingCount(ctx, *fx.Config.N, Sum[uint64]())
+		windowingRequireMode(t, fx, "count")
+		w := TumblingCount(ctx, *fx.Config.N, windowingPolicy(t, fx))
 		oc := w.OutputCell()
 		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get() // prime
@@ -124,7 +155,8 @@ func TestWindowingConformance(t *testing.T) {
 			t.Skip("lazily-spec conformance/windowing not reachable")
 		}
 		ctx := NewContext()
-		w := TumblingTime(ctx, *fx.Config.Period, Sum[uint64]())
+		windowingRequireMode(t, fx, "time")
+		w := TumblingTime(ctx, *fx.Config.Period, windowingPolicy(t, fx))
 		oc := w.OutputCell()
 		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get()
@@ -145,7 +177,8 @@ func TestWindowingConformance(t *testing.T) {
 			t.Skip("lazily-spec conformance/windowing not reachable")
 		}
 		ctx := NewContext()
-		w := Sliding(ctx, int(*fx.Config.Size), *fx.Config.Slide, Sum[uint64]())
+		windowingRequireMode(t, fx, "")
+		w := Sliding(ctx, int(*fx.Config.Size), *fx.Config.Slide, windowingPolicy(t, fx))
 		oc := w.OutputCell()
 		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get()
@@ -161,7 +194,8 @@ func TestWindowingConformance(t *testing.T) {
 			t.Skip("lazily-spec conformance/windowing not reachable")
 		}
 		ctx := NewContext()
-		w := Session(ctx, *fx.Config.Gap, Sum[uint64]())
+		windowingRequireMode(t, fx, "")
+		w := Session(ctx, *fx.Config.Gap, windowingPolicy(t, fx))
 		oc := w.OutputCell()
 		observed := NewSlot(ctx, func(c *Compute) Opt[uint64] { return Get(c, oc) })
 		observed.Get()

@@ -32,17 +32,129 @@ import (
 // rsFixture is the reliable-sync fixture envelope (scenarios kept raw so each
 // scenario can decode into its own shape).
 type rsFixture struct {
-	Kind      string            `json:"kind"`
-	Scenarios []json.RawMessage `json:"scenarios"`
+	conformanceMeta
+	ProtocolVersion int    `json:"protocol_version"`
+	Kind            string `json:"kind"`
+	// Wire is the canonical frame the fixture's `assertions` describe. Both were
+	// undeclared, so multi_epoch_delta.json's five root assertions — the span
+	// arithmetic the whole file is named for — decoded into nothing.
+	Wire       json.RawMessage            `json:"wire"`
+	Assertions map[string]json.RawMessage `json:"assertions"`
+	Scenarios  []json.RawMessage          `json:"scenarios"`
+}
+
+// assertRootDelta cross-checks the fixture's root `assertions` against the
+// decoded root `wire` Delta, failing on any key it cannot evaluate.
+func (fx rsFixture) assertRootDelta(t *testing.T, name string) {
+	t.Helper()
+	if len(fx.Assertions) == 0 {
+		return
+	}
+	var wire struct {
+		Delta *struct {
+			BaseEpoch Epoch             `json:"base_epoch"`
+			Epoch     Epoch             `json:"epoch"`
+			Ops       []json.RawMessage `json:"ops"`
+		} `json:"Delta"`
+		OutboxAck     json.RawMessage `json:"OutboxAck"`
+		ResyncRequest json.RawMessage `json:"ResyncRequest"`
+	}
+	mustStrictJSON(t, name+" wire", fx.Wire, &wire)
+	if wire.Delta == nil {
+		t.Fatalf("%s: root assertions require a root Delta wire frame", name)
+	}
+	d := Delta{BaseEpoch: wire.Delta.BaseEpoch, Epoch: wire.Delta.Epoch}
+	for key, raw := range fx.Assertions {
+		var actual any
+		switch key {
+		case "base_epoch":
+			actual = d.BaseEpoch
+		case "epoch":
+			actual = d.Epoch
+		case "span":
+			actual = d.Span()
+		case "is_multi_epoch":
+			actual = d.Span() > 1
+		case "op_count":
+			actual = len(wire.Delta.Ops)
+		default:
+			t.Fatalf("%s: unknown root assertion key %q", name, key)
+		}
+		assertValueEqualsRaw(t, actual, raw, name+":"+key)
+	}
+}
+
+// rsWireDelta is a fixture-shaped delta: the epoch pair plus the raw op list,
+// kept raw so ops can be compared structurally without re-deriving the wire
+// encoding.
+type rsWireDelta struct {
+	BaseEpoch Epoch             `json:"base_epoch"`
+	Epoch     Epoch             `json:"epoch"`
+	Ops       []json.RawMessage `json:"ops"`
+}
+
+// assertUnitFoldEquivalent checks a span delta against the unit fold the fixture
+// declares equivalent to it: same op sequence, a contiguous epoch chain over the
+// same range, and a receiver that ends in the same place either way.
+func assertUnitFoldEquivalent(t *testing.T, from Epoch, span rsWireDelta, fold []rsWireDelta) {
+	t.Helper()
+	if len(fold) == 0 {
+		t.Fatal("fold_equivalent asserted with no equivalent_unit_fold to compare against")
+	}
+
+	var folded []json.RawMessage
+	prev := span.BaseEpoch
+	for i, unit := range fold {
+		if unit.BaseEpoch != prev {
+			t.Fatalf("unit fold %d starts at base_epoch %d, want %d (not contiguous)", i, unit.BaseEpoch, prev)
+		}
+		if unit.Epoch != unit.BaseEpoch+1 {
+			t.Fatalf("unit fold %d spans %d..%d, want a unit step", i, unit.BaseEpoch, unit.Epoch)
+		}
+		prev = unit.Epoch
+		folded = append(folded, unit.Ops...)
+	}
+	if prev != span.Epoch {
+		t.Fatalf("unit fold ends at epoch %d, want the span end %d", prev, span.Epoch)
+	}
+
+	if len(folded) != len(span.Ops) {
+		t.Fatalf("unit fold carries %d ops, span carries %d", len(folded), len(span.Ops))
+	}
+	for i := range folded {
+		if !jsonSemanticEqual(t, folded[i], span.Ops[i]) {
+			t.Fatalf("unit fold op %d differs from the span op:\n fold: %s\n span: %s",
+				i, folded[i], span.Ops[i])
+		}
+	}
+
+	// Replaying the fold one unit at a time must land the receiver where the
+	// single span landed it.
+	unitCoord := NewResyncCoordinatorWithEpoch(from)
+	for i, unit := range fold {
+		act, _ := unitCoord.IngestDelta(Delta{BaseEpoch: unit.BaseEpoch, Epoch: unit.Epoch})
+		if act != ResyncActionApply {
+			t.Fatalf("unit fold %d ingest = %v, want Apply", i, act)
+		}
+	}
+	if unitCoord.LastEpoch() != span.Epoch {
+		t.Fatalf("unit fold left last_epoch at %d, want %d", unitCoord.LastEpoch(), span.Epoch)
+	}
+}
+
+// rsScenarioHead is the prose/identity preamble every reliable-sync scenario
+// carries. Declaring it once keeps each scenario's own struct to the keys it
+// actually asserts.
+type rsScenarioHead struct {
+	conformanceDoc
+	Name string `json:"name"`
 }
 
 func loadReliableSyncFixture(t *testing.T, name string) rsFixture {
 	t.Helper()
 	raw := loadConformanceFixture(t, "reliable-sync", name)
 	var fx rsFixture
-	if err := json.Unmarshal(raw, &fx); err != nil {
-		t.Fatalf("decode fixture %s: %v", name, err)
-	}
+	mustStrictJSON(t, name, raw, &fx)
 	return fx
 }
 
@@ -132,19 +244,26 @@ func TestReliableSyncMultiEpochDelta(t *testing.T) {
 		t.Fatalf("kind = %q, want ReliableSync", fx.Kind)
 	}
 
+	// The whole point of this scenario is `fold_equivalent`: one span-3 delta
+	// must land the receiver where three unit deltas carrying the same ops land
+	// it. The runner used to decode `receiver_last_epoch_after` and nothing else,
+	// so `delta.ops`, `equivalent_unit_fold`, `action`, `applied`,
+	// `atomic_advance` and `fold_equivalent` all went unread — the epoch arithmetic
+	// was checked and the equivalence the fixture exists for never was.
 	var span struct {
-		ReceiverLastEpoch Epoch `json:"receiver_last_epoch"`
-		Delta             struct {
-			BaseEpoch Epoch `json:"base_epoch"`
-			Epoch     Epoch `json:"epoch"`
-		} `json:"delta"`
-		Expect struct {
-			ReceiverLastEpochAfter Epoch `json:"receiver_last_epoch_after"`
+		rsScenarioHead
+		ReceiverLastEpoch  Epoch         `json:"receiver_last_epoch"`
+		Delta              rsWireDelta   `json:"delta"`
+		EquivalentUnitFold []rsWireDelta `json:"equivalent_unit_fold"`
+		Expect             struct {
+			Action                 string `json:"action"`
+			Applied                bool   `json:"applied"`
+			ReceiverLastEpochAfter Epoch  `json:"receiver_last_epoch_after"`
+			AtomicAdvance          bool   `json:"atomic_advance"`
+			FoldEquivalent         bool   `json:"fold_equivalent"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "span_3_applies_equal_to_unit_fold"), &span); err != nil {
-		t.Fatalf("decode span scenario: %v", err)
-	}
+	mustStrictJSON(t, "reliable-sync scenario span_3_applies_equal_to_unit_fold", fx.scenario(t, "span_3_applies_equal_to_unit_fold"), &span)
 	if !(span.Delta.Epoch > span.Delta.BaseEpoch+1) {
 		t.Fatalf("fixture must pin a multi-epoch span")
 	}
@@ -153,34 +272,65 @@ func TestReliableSyncMultiEpochDelta(t *testing.T) {
 		t.Fatalf("span = %d, want %d", got, want)
 	}
 	coord := NewResyncCoordinatorWithEpoch(span.ReceiverLastEpoch)
-	if action, _ := coord.IngestDelta(delta); action != ResyncActionApply {
-		t.Fatalf("action = %v, want Apply", action)
+	action, _ := coord.IngestDelta(delta)
+	if got := action.String(); got != span.Expect.Action {
+		t.Fatalf("action = %q, want %q", got, span.Expect.Action)
+	}
+	if applied := action == ResyncActionApply; applied != span.Expect.Applied {
+		t.Fatalf("applied = %v, want %v", applied, span.Expect.Applied)
 	}
 	if coord.LastEpoch() != span.Expect.ReceiverLastEpochAfter {
 		t.Fatalf("last_epoch = %d, want %d", coord.LastEpoch(), span.Expect.ReceiverLastEpochAfter)
 	}
 
+	// atomic_advance: one ingest moves the receiver from the span's base straight
+	// to its end. No epoch between the two is ever the receiver's last_epoch.
+	if span.Expect.AtomicAdvance {
+		if span.ReceiverLastEpoch != span.Delta.BaseEpoch {
+			t.Fatalf("atomic_advance: receiver starts at %d, not at the span base %d",
+				span.ReceiverLastEpoch, span.Delta.BaseEpoch)
+		}
+		if coord.LastEpoch() != span.Delta.Epoch {
+			t.Fatalf("atomic_advance: one ingest left last_epoch at %d, want %d",
+				coord.LastEpoch(), span.Delta.Epoch)
+		}
+	}
+
+	// fold_equivalent: the unit fold chains contiguously across the same range
+	// and carries the same ops in the same order, and replaying it leaves an
+	// identical receiver.
+	if span.Expect.FoldEquivalent {
+		assertUnitFoldEquivalent(t, span.ReceiverLastEpoch, span.Delta, span.EquivalentUnitFold)
+	}
+
 	var gap struct {
-		ReceiverLastEpoch Epoch `json:"receiver_last_epoch"`
-		Delta             struct {
-			BaseEpoch Epoch `json:"base_epoch"`
-			Epoch     Epoch `json:"epoch"`
-		} `json:"delta"`
-		Expect struct {
-			RequestFrom Epoch `json:"request_from"`
+		rsScenarioHead
+		ReceiverLastEpoch Epoch       `json:"receiver_last_epoch"`
+		Delta             rsWireDelta `json:"delta"`
+		Expect            struct {
+			Action                 string `json:"action"`
+			RequestFrom            Epoch  `json:"request_from"`
+			Applied                bool   `json:"applied"`
+			ReceiverLastEpochAfter Epoch  `json:"receiver_last_epoch_after"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "gap_rule_unchanged_under_span"), &gap); err != nil {
-		t.Fatalf("decode gap scenario: %v", err)
-	}
+	mustStrictJSON(t, "reliable-sync scenario gap_rule_unchanged_under_span", fx.scenario(t, "gap_rule_unchanged_under_span"), &gap)
 	gc := NewResyncCoordinatorWithEpoch(gap.ReceiverLastEpoch)
-	action, from := gc.IngestDelta(Delta{BaseEpoch: gap.Delta.BaseEpoch, Epoch: gap.Delta.Epoch})
-	if action != ResyncActionRequestSnapshot || from != gap.Expect.RequestFrom {
-		t.Fatalf("gap ingest = (%v, %d), want (RequestSnapshot, %d)", action, from, gap.Expect.RequestFrom)
+	gapAction, from := gc.IngestDelta(Delta{BaseEpoch: gap.Delta.BaseEpoch, Epoch: gap.Delta.Epoch})
+	if got := gapAction.String(); got != gap.Expect.Action {
+		t.Fatalf("gap action = %q, want %q", got, gap.Expect.Action)
 	}
-	if gc.LastEpoch() != gap.ReceiverLastEpoch {
-		t.Fatalf("gap last_epoch = %d, want %d (unchanged)", gc.LastEpoch(), gap.ReceiverLastEpoch)
+	if from != gap.Expect.RequestFrom {
+		t.Fatalf("gap request_from = %d, want %d", from, gap.Expect.RequestFrom)
 	}
+	if applied := gapAction == ResyncActionApply; applied != gap.Expect.Applied {
+		t.Fatalf("gap applied = %v, want %v", applied, gap.Expect.Applied)
+	}
+	if gc.LastEpoch() != gap.Expect.ReceiverLastEpochAfter {
+		t.Fatalf("gap last_epoch = %d, want %d", gc.LastEpoch(), gap.Expect.ReceiverLastEpochAfter)
+	}
+
+	fx.assertRootDelta(t, "multi_epoch_delta.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -188,34 +338,98 @@ func TestReliableSyncMultiEpochDelta(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 type rsInbound struct {
+	conformanceDoc
 	Dropped        bool            `json:"dropped"`
+	Reason         string          `json:"reason"`
 	Frame          json.RawMessage `json:"frame"`
 	ExpectAction   string          `json:"expect_action"`
 	RequestFrom    Epoch           `json:"request_from"`
 	LastEpochAfter Epoch           `json:"last_epoch_after"`
 }
 
+// rsApplyToGraph folds an inbound frame into a node -> payload-bytes map: the
+// smallest receiver state that can answer `converged_nodes` and
+// `equals_no_drop_receiver`.
+func rsApplyToGraph(t *testing.T, graph map[NodeId][]byte, msg IpcMessage) {
+	t.Helper()
+	switch m := msg.(type) {
+	case IpcMessageSnapshot:
+		for _, n := range m.Value.Nodes {
+			p, ok := n.State.(NodeStatePayload)
+			if !ok {
+				t.Fatalf("snapshot node %d carries %T, want a Payload", n.Node, n.State)
+			}
+			graph[n.Node] = p.Bytes
+		}
+	case IpcMessageDelta:
+		for _, op := range m.Value.Ops {
+			switch o := op.(type) {
+			case DeltaOpCellSet:
+				graph[o.Node] = rsInlineBytes(t, o.Payload)
+			case DeltaOpSlotValue:
+				graph[o.Node] = rsInlineBytes(t, o.Payload)
+			}
+		}
+	default:
+		t.Fatalf("cannot fold %T into a receiver graph", msg)
+	}
+}
+
+func rsInlineBytes(t *testing.T, v IpcValue) []byte {
+	t.Helper()
+	inline, ok := v.(IpcValueInline)
+	if !ok {
+		t.Fatalf("payload %T is not Inline", v)
+	}
+	return inline.Bytes
+}
+
+func mustParseNodeId(t *testing.T, s string) uint64 {
+	t.Helper()
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		t.Fatalf("node id %q: %v", s, err)
+	}
+	return n
+}
+
 func TestReliableSyncResyncGapConverge(t *testing.T) {
 	fx := loadReliableSyncFixture(t, "resync_gap_converge.json")
 
 	var sc struct {
+		rsScenarioHead
 		StartLastEpoch Epoch       `json:"start_last_epoch"`
 		Inbound        []rsInbound `json:"inbound"`
 		Expect         struct {
 			FinalLastEpoch        Epoch `json:"final_last_epoch"`
 			ResyncRequestsEmitted int   `json:"resync_requests_emitted"`
+			// The two keys the fixture is actually named for. Counting resync
+			// requests says the gap was noticed; only these say the receiver
+			// ended up holding the right graph.
+			ConvergedNodes       map[string][]byte `json:"converged_nodes"`
+			EqualsNoDropReceiver *bool             `json:"equals_no_drop_receiver"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "drop_suffix_then_resync_converges"), &sc); err != nil {
-		t.Fatalf("decode scenario: %v", err)
-	}
+	mustStrictJSON(t, "reliable-sync scenario drop_suffix_then_resync_converges", fx.scenario(t, "drop_suffix_then_resync_converges"), &sc)
 	coord := NewResyncCoordinatorWithEpoch(sc.StartLastEpoch)
 	requests := 0
+	// receiver A's graph, and the authoritative graph a receiver that dropped
+	// nothing would hold (the sender's latest snapshot).
+	graph := map[NodeId][]byte{}
+	authoritative := map[NodeId][]byte{}
 	for _, frame := range sc.Inbound {
 		if frame.Dropped {
 			continue
 		}
-		action, from := coord.Ingest(mustMessage(t, frame.Frame))
+		msg := mustMessage(t, frame.Frame)
+		action, from := coord.Ingest(msg)
+		if action == ResyncActionApply {
+			rsApplyToGraph(t, graph, msg)
+		}
+		if snap, ok := msg.(IpcMessageSnapshot); ok {
+			authoritative = map[NodeId][]byte{}
+			rsApplyToGraph(t, authoritative, snap)
+		}
 		switch frame.ExpectAction {
 		case "Apply":
 			if action != ResyncActionApply {
@@ -243,26 +457,55 @@ func TestReliableSyncResyncGapConverge(t *testing.T) {
 	if requests != sc.Expect.ResyncRequestsEmitted {
 		t.Fatalf("requests = %d, want %d", requests, sc.Expect.ResyncRequestsEmitted)
 	}
+	for id, want := range sc.Expect.ConvergedNodes {
+		node := NodeId(mustParseNodeId(t, id))
+		got, ok := graph[node]
+		if !ok {
+			t.Fatalf("converged_nodes: node %s absent from the receiver graph", id)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("converged_nodes: node %s = %v, want %v", id, got, want)
+		}
+	}
+	if want := sc.Expect.EqualsNoDropReceiver; want != nil {
+		equal := reflect.DeepEqual(graph, authoritative)
+		if equal != *want {
+			t.Fatalf("equals_no_drop_receiver = %v (%v vs %v), want %v",
+				equal, graph, authoritative, *want)
+		}
+	}
 
 	var single struct {
+		rsScenarioHead
 		StartLastEpoch Epoch       `json:"start_last_epoch"`
 		Inbound        []rsInbound `json:"inbound"`
 		Expect         struct {
-			ResyncRequestsEmitted int `json:"resync_requests_emitted"`
+			FinalLastEpoch        Epoch `json:"final_last_epoch"`
+			ResyncRequestsEmitted int   `json:"resync_requests_emitted"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "single_request_per_gap"), &single); err != nil {
-		t.Fatalf("decode single scenario: %v", err)
-	}
+	mustStrictJSON(t, "reliable-sync scenario single_request_per_gap", fx.scenario(t, "single_request_per_gap"), &single)
 	c2 := NewResyncCoordinatorWithEpoch(single.StartLastEpoch)
 	req2 := 0
-	for _, frame := range single.Inbound {
-		if action, _ := c2.Ingest(mustMessage(t, frame.Frame)); action == ResyncActionRequestSnapshot {
+	for i, frame := range single.Inbound {
+		action, _ := c2.Ingest(mustMessage(t, frame.Frame))
+		if action == ResyncActionRequestSnapshot {
 			req2++
+		}
+		// Per-frame `expect_action` / `last_epoch_after` were declared on
+		// rsInbound and then read by only the first scenario in this file.
+		if got := action.String(); got != frame.ExpectAction {
+			t.Fatalf("single-gap frame %d action = %q, want %q", i, got, frame.ExpectAction)
+		}
+		if c2.LastEpoch() != frame.LastEpochAfter {
+			t.Fatalf("single-gap frame %d last_epoch = %d, want %d", i, c2.LastEpoch(), frame.LastEpochAfter)
 		}
 	}
 	if req2 != single.Expect.ResyncRequestsEmitted {
 		t.Fatalf("single-gap requests = %d, want %d", req2, single.Expect.ResyncRequestsEmitted)
+	}
+	if c2.LastEpoch() != single.Expect.FinalLastEpoch {
+		t.Fatalf("single-gap final last_epoch = %d, want %d", c2.LastEpoch(), single.Expect.FinalLastEpoch)
 	}
 }
 
@@ -274,19 +517,38 @@ func TestReliableSyncIdempotentRedelivery(t *testing.T) {
 	fx := loadReliableSyncFixture(t, "idempotent_redelivery.json")
 	for _, name := range []string{"replayed_delta_is_ignored", "duplicate_current_head_is_ignored"} {
 		var sc struct {
-			StartLastEpoch Epoch       `json:"start_last_epoch"`
-			Inbound        []rsInbound `json:"inbound"`
+			rsScenarioHead
+			StartLastEpoch Epoch             `json:"start_last_epoch"`
+			StateBefore    map[string][]byte `json:"state_before"`
+			Inbound        []rsInbound       `json:"inbound"`
 			Expect         struct {
 				FinalLastEpoch Epoch `json:"final_last_epoch"`
+				// The redelivery claim itself: the ignored frame left the graph
+				// exactly as it was. The runner checked epochs only, which an
+				// implementation that ignored the frame *and* corrupted state
+				// would have passed.
+				StateAfter         map[string][]byte `json:"state_after"`
+				NetEffectUnchanged *bool             `json:"net_effect_unchanged"`
 			} `json:"expect"`
 		}
-		if err := json.Unmarshal(fx.scenario(t, name), &sc); err != nil {
-			t.Fatalf("decode %s: %v", name, err)
-		}
+		mustStrictJSON(t, "reliable-sync scenario "+name, fx.scenario(t, name), &sc)
 		coord := NewResyncCoordinatorWithEpoch(sc.StartLastEpoch)
+		graph := map[NodeId][]byte{}
+		for id, payload := range sc.StateBefore {
+			graph[NodeId(mustParseNodeId(t, id))] = payload
+		}
+		before := map[NodeId][]byte{}
+		for k, v := range graph {
+			before[k] = v
+		}
 		for _, frame := range sc.Inbound {
-			if action, _ := coord.Ingest(mustMessage(t, frame.Frame)); action != ResyncActionIgnore {
-				t.Fatalf("%s: action = %v, want Ignore", name, action)
+			msg := mustMessage(t, frame.Frame)
+			action, _ := coord.Ingest(msg)
+			if got := action.String(); got != frame.ExpectAction {
+				t.Fatalf("%s: action = %q, want %q", name, got, frame.ExpectAction)
+			}
+			if action == ResyncActionApply {
+				rsApplyToGraph(t, graph, msg)
 			}
 			if coord.LastEpoch() != frame.LastEpochAfter {
 				t.Fatalf("%s: last_epoch = %d, want %d", name, coord.LastEpoch(), frame.LastEpochAfter)
@@ -294,6 +556,18 @@ func TestReliableSyncIdempotentRedelivery(t *testing.T) {
 		}
 		if coord.LastEpoch() != sc.Expect.FinalLastEpoch {
 			t.Fatalf("%s: final last_epoch = %d, want %d", name, coord.LastEpoch(), sc.Expect.FinalLastEpoch)
+		}
+		wantAfter := map[NodeId][]byte{}
+		for id, payload := range sc.Expect.StateAfter {
+			wantAfter[NodeId(mustParseNodeId(t, id))] = payload
+		}
+		if !reflect.DeepEqual(graph, wantAfter) {
+			t.Fatalf("%s: state_after = %v, want %v", name, graph, wantAfter)
+		}
+		if want := sc.Expect.NetEffectUnchanged; want != nil {
+			if unchanged := reflect.DeepEqual(graph, before); unchanged != *want {
+				t.Fatalf("%s: net_effect_unchanged = %v, want %v", name, unchanged, *want)
+			}
 		}
 	}
 }
@@ -415,19 +689,26 @@ func TestReliableSyncOutboxReplayAfterCrash(t *testing.T) {
 	fx := loadReliableSyncFixture(t, "outbox_replay_after_crash.json")
 
 	var sc struct {
-		Appended        []rsAppended `json:"appended"`
-		AckThrough      Epoch        `json:"ack_through"`
-		ReconnectCursor Epoch        `json:"reconnect_cursor"`
+		rsScenarioHead
+		Appended   []rsAppended `json:"appended"`
+		AckThrough Epoch        `json:"ack_through"`
+		// `crash` is the scenario's whole premise — the runner reopened the
+		// durable outbox from disk unconditionally, so a fixture that said "no
+		// crash" would have been replayed as a crash anyway.
+		Crash           bool  `json:"crash"`
+		ReconnectCursor Epoch `json:"reconnect_cursor"`
 		Expect          struct {
 			RetainedAfterAck       []Epoch `json:"retained_after_ack"`
 			ReplayedFromCursor     []Epoch `json:"replayed_from_cursor"`
+			ReplayOrder            []Epoch `json:"replay_order"`
 			ReceiverApplies        []Epoch `json:"receiver_applies"`
 			ReceiverLastEpochAfter Epoch   `json:"receiver_last_epoch_after"`
+			OpsLost                int     `json:"ops_lost"`
+			OpsDoubled             int     `json:"ops_doubled"`
+			ExactlyOnceEffect      *bool   `json:"exactly_once_effect"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "crash_between_append_and_ack_replays_on_reconnect"), &sc); err != nil {
-		t.Fatalf("decode scenario: %v", err)
-	}
+	mustStrictJSON(t, "reliable-sync scenario crash_between_append_and_ack_replays_on_reconnect", fx.scenario(t, "crash_between_append_and_ack_replays_on_reconnect"), &sc)
 
 	path := filepath.Join(t.TempDir(), "outbox.jsonl")
 	mem := NewInMemoryOutbox()
@@ -447,8 +728,12 @@ func TestReliableSyncOutboxReplayAfterCrash(t *testing.T) {
 		t.Fatalf("file retained = %v, want %v", file.retainedEpochs(t), sc.Expect.RetainedAfterAck)
 	}
 
-	// "crash": reopen the durable file outbox from disk.
-	file = newFileOutbox(t, path)
+	// "crash": reopen the durable file outbox from disk. Only when the fixture
+	// says a crash happened — otherwise the in-process handle survives and the
+	// durability claim is not the one under test.
+	if sc.Crash {
+		file = newFileOutbox(t, path)
+	}
 	replay := file.replayFrom(t, sc.ReconnectCursor)
 	replayEpochs := make([]Epoch, 0, len(replay))
 	for _, e := range replay {
@@ -457,13 +742,22 @@ func TestReliableSyncOutboxReplayAfterCrash(t *testing.T) {
 	if !reflect.DeepEqual(replayEpochs, sc.Expect.ReplayedFromCursor) {
 		t.Fatalf("replay = %v, want %v", replayEpochs, sc.Expect.ReplayedFromCursor)
 	}
+	// `replay_order` is the ordering claim, stated separately from the set: the
+	// outbox must re-send in append order, not merely re-send the right frames.
+	if !reflect.DeepEqual(replayEpochs, sc.Expect.ReplayOrder) {
+		t.Fatalf("replay order = %v, want %v", replayEpochs, sc.Expect.ReplayOrder)
+	}
 
 	// Feed the replay to a receiver at the reconnect cursor: applies each once.
 	coord := NewResyncCoordinatorWithEpoch(sc.ReconnectCursor)
 	var applied []Epoch
+	deliveries := map[NodeId]int{}
 	for _, e := range replay {
 		if action, _ := coord.Ingest(e.Msg); action == ResyncActionApply {
 			applied = append(applied, coord.LastEpoch())
+			for _, node := range rsDeltaNodes(t, e.Msg) {
+				deliveries[node]++
+			}
 		}
 	}
 	if !reflect.DeepEqual(applied, sc.Expect.ReceiverApplies) {
@@ -473,30 +767,116 @@ func TestReliableSyncOutboxReplayAfterCrash(t *testing.T) {
 		t.Fatalf("receiver last_epoch = %d, want %d", coord.LastEpoch(), sc.Expect.ReceiverLastEpochAfter)
 	}
 
+	// Exactly-once: every op appended after the reconnect cursor lands exactly
+	// once at the receiver. `ops_lost` counts those that never arrived,
+	// `ops_doubled` those applied more than once.
+	expectedNodes := map[NodeId]bool{}
+	for _, a := range sc.Appended {
+		if a.Epoch <= sc.ReconnectCursor {
+			continue
+		}
+		for _, node := range rsDeltaNodes(t, mustMessage(t, a.Frame)) {
+			expectedNodes[node] = true
+		}
+	}
+	lost, doubled := 0, 0
+	for node := range expectedNodes {
+		switch n := deliveries[node]; {
+		case n == 0:
+			lost++
+		case n > 1:
+			doubled += n - 1
+		}
+	}
+	if lost != sc.Expect.OpsLost {
+		t.Fatalf("ops_lost = %d, want %d", lost, sc.Expect.OpsLost)
+	}
+	if doubled != sc.Expect.OpsDoubled {
+		t.Fatalf("ops_doubled = %d, want %d", doubled, sc.Expect.OpsDoubled)
+	}
+	if want := sc.Expect.ExactlyOnceEffect; want != nil {
+		got := lost == 0 && doubled == 0
+		if got != *want {
+			t.Fatalf("exactly_once_effect = %v (lost=%d doubled=%d), want %v", got, lost, doubled, *want)
+		}
+	}
+
 	// send_failure_retains_frame_for_next_tick
 	var sc2 struct {
-		Appended []rsAppended `json:"appended"`
-		Expect   struct {
-			Retained []Epoch `json:"retained"`
+		rsScenarioHead
+		Appended              []rsAppended `json:"appended"`
+		AckThrough            Epoch        `json:"ack_through"`
+		SendFailsFirstAttempt bool         `json:"send_fails_first_attempt"`
+		Expect                struct {
+			FrameRetainedAfterFailedSend *bool   `json:"frame_retained_after_failed_send"`
+			Retained                     []Epoch `json:"retained"`
+			ResentOnNextTick             []Epoch `json:"resent_on_next_tick"`
+			PermanentGap                 *bool   `json:"permanent_gap"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "send_failure_retains_frame_for_next_tick"), &sc2); err != nil {
-		t.Fatalf("decode send-failure scenario: %v", err)
+	mustStrictJSON(t, "reliable-sync scenario send_failure_retains_frame_for_next_tick", fx.scenario(t, "send_failure_retains_frame_for_next_tick"), &sc2)
+	if !sc2.SendFailsFirstAttempt {
+		t.Fatal("send_fails_first_attempt must be set for this scenario to mean anything")
 	}
 	mem2 := NewInMemoryOutbox()
 	for _, a := range sc2.Appended {
 		mem2.Append(a.Epoch, mustMessage(t, a.Frame))
 	}
+	mem2.AckThrough(sc2.AckThrough)
 	if !reflect.DeepEqual(mem2.RetainedEpochs(), sc2.Expect.Retained) {
 		t.Fatalf("retained = %v, want %v", mem2.RetainedEpochs(), sc2.Expect.Retained)
 	}
-	resent := make([]Epoch, 0, len(sc2.Expect.Retained))
+	// The send failed, so nothing was acked past the cursor: the frame is still
+	// there to resend. That is `frame_retained_after_failed_send`.
+	if want := sc2.Expect.FrameRetainedAfterFailedSend; want != nil {
+		got := len(mem2.RetainedEpochs()) > 0
+		if got != *want {
+			t.Fatalf("frame_retained_after_failed_send = %v, want %v", got, *want)
+		}
+	}
+	resent := make([]Epoch, 0, len(sc2.Expect.ResentOnNextTick))
 	for _, e := range mem2.ReplayFrom(sc2.Expect.Retained[0] - 1) {
 		resent = append(resent, e.Epoch)
 	}
-	if !reflect.DeepEqual(resent, sc2.Expect.Retained) {
-		t.Fatalf("resent = %v, want %v", resent, sc2.Expect.Retained)
+	if !reflect.DeepEqual(resent, sc2.Expect.ResentOnNextTick) {
+		t.Fatalf("resent_on_next_tick = %v, want %v", resent, sc2.Expect.ResentOnNextTick)
 	}
+	// `permanent_gap` false means the retained frames cover every epoch from the
+	// cursor onward with no hole, so the resend closes the gap for good.
+	if want := sc2.Expect.PermanentGap; want != nil {
+		gap := false
+		for i := 1; i < len(resent); i++ {
+			if resent[i] != resent[i-1]+1 {
+				gap = true
+			}
+		}
+		if len(resent) == 0 {
+			gap = true
+		}
+		if gap != *want {
+			t.Fatalf("permanent_gap = %v (resent %v), want %v", gap, resent, *want)
+		}
+	}
+}
+
+// rsDeltaNodes lists the nodes a delta frame writes, so redelivery can be counted
+// per op rather than per frame.
+func rsDeltaNodes(t *testing.T, msg IpcMessage) []NodeId {
+	t.Helper()
+	d, ok := msg.(IpcMessageDelta)
+	if !ok {
+		return nil
+	}
+	var out []NodeId
+	for _, op := range d.Value.Ops {
+		switch o := op.(type) {
+		case DeltaOpCellSet:
+			out = append(out, o.Node)
+		case DeltaOpSlotValue:
+			out = append(out, o.Node)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------
@@ -528,76 +908,169 @@ func parsePid(t *testing.T, s string) PeerId {
 	return PeerId(n)
 }
 
+// rsRequireRegisterKind consumes a scenario's `register_kind`, pinning the CRDT
+// the runner is about to replay it through.
+func rsRequireRegisterKind(t *testing.T, scenario, got, want string) {
+	t.Helper()
+	if got != want {
+		t.Fatalf("%s: register_kind = %q, but this replay drives a %q register", scenario, got, want)
+	}
+}
+
 func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 	fx := loadReliableSyncFixture(t, "liveness_orset_lww.json")
 
 	// open_set_add_wins_over_stale_remove
 	var add struct {
-		Ops []struct {
-			Op           string   `json:"op"`
-			Tag          string   `json:"tag"`
-			ObservedTags []string `json:"observed_tags"`
+		rsScenarioHead
+		// `register_kind` picks the CRDT the ops replay against, and `key` names
+		// the doc/peer the register belongs to. Both were unread, so an `lww`
+		// scenario would have been replayed through an OR-set without complaint.
+		RegisterKind string `json:"register_kind"`
+		Key          string `json:"key"`
+		Ops          []struct {
+			Op           string    `json:"op"`
+			Tag          string    `json:"tag"`
+			ObservedTags []string  `json:"observed_tags"`
+			Stamp        stampJSON `json:"stamp"`
 		} `json:"ops"`
 		Expect struct {
-			Present bool `json:"present"`
+			Present               bool   `json:"present"`
+			Reason                string `json:"reason"`
+			OrderIndependent      *bool  `json:"order_independent"`
+			RedeliverAppliedCount *int   `json:"redeliver_applied_count"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "open_set_add_wins_over_stale_remove"), &add); err != nil {
-		t.Fatalf("decode orset scenario: %v", err)
-	}
-	set := NewOrSet()
-	for _, op := range add.Ops {
-		switch op.Op {
-		case "add":
-			set.Add(op.Tag)
-		case "remove":
-			set.RemoveObserved(op.ObservedTags)
+	mustStrictJSON(t, "reliable-sync scenario open_set_add_wins_over_stale_remove", fx.scenario(t, "open_set_add_wins_over_stale_remove"), &add)
+	rsRequireRegisterKind(t, "open_set_add_wins_over_stale_remove", add.RegisterKind, "orset")
+	parsePid(t, add.Key) // the key must name a real doc/peer pair
+	replayOrSet := func(ops []int) *OrSet {
+		set := NewOrSet()
+		for _, i := range ops {
+			op := add.Ops[i]
+			switch op.Op {
+			case "add":
+				set.Add(op.Tag)
+			case "remove":
+				set.RemoveObserved(op.ObservedTags)
+			default:
+				t.Fatalf("unknown orset op %q", op.Op)
+			}
 		}
+		return set
 	}
+	forward := make([]int, len(add.Ops))
+	for i := range forward {
+		forward[i] = i
+	}
+	set := replayOrSet(forward)
 	if set.Present() != add.Expect.Present {
 		t.Fatalf("present = %v, want %v", set.Present(), add.Expect.Present)
+	}
+	if add.Expect.Reason == "" {
+		t.Fatal("open_set_add_wins_over_stale_remove: expect.reason must say why the doc stays open")
+	}
+	if want := add.Expect.OrderIndependent; want != nil {
+		reversed := make([]int, len(forward))
+		for i := range forward {
+			reversed[len(forward)-1-i] = forward[i]
+		}
+		got := replayOrSet(reversed).Present() == set.Present()
+		if got != *want {
+			t.Fatalf("order_independent = %v, want %v", got, *want)
+		}
+	}
+	if want := add.Expect.RedeliverAppliedCount; want != nil {
+		before := set.Present()
+		redelivered := replayOrSet(append(append([]int{}, forward...), forward...))
+		changed := 0
+		if redelivered.Present() != before {
+			changed = 1
+		}
+		if changed != *want {
+			t.Fatalf("redeliver_applied_count = %d, want %d", changed, *want)
+		}
 	}
 
 	// lww_alive_highest_stamp_wins
 	var lww struct {
-		Ops []struct {
+		rsScenarioHead
+		RegisterKind string `json:"register_kind"`
+		Key          string `json:"key"`
+		Ops          []struct {
 			Value bool      `json:"value"`
 			Stamp stampJSON `json:"stamp"`
 		} `json:"ops"`
 		Expect struct {
-			Value bool `json:"value"`
+			Value            bool   `json:"value"`
+			Resolution       string `json:"resolution"`
+			OrderIndependent *bool  `json:"order_independent"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "lww_alive_highest_stamp_wins"), &lww); err != nil {
-		t.Fatalf("decode lww scenario: %v", err)
+	mustStrictJSON(t, "reliable-sync scenario lww_alive_highest_stamp_wins", fx.scenario(t, "lww_alive_highest_stamp_wins"), &lww)
+	rsRequireRegisterKind(t, "lww_alive_highest_stamp_wins", lww.RegisterKind, "lww")
+	parsePid(t, lww.Key)
+	replayLww := func(order []int) bool {
+		reg := NewWireLwwRegister(lww.Ops[order[0]].Stamp.wire(), lww.Ops[order[0]].Value)
+		for _, i := range order[1:] {
+			reg.Set(lww.Ops[i].Stamp.wire(), lww.Ops[i].Value)
+		}
+		return reg.Value()
 	}
-	reg := NewWireLwwRegister(lww.Ops[0].Stamp.wire(), lww.Ops[0].Value)
-	for _, op := range lww.Ops[1:] {
-		reg.Set(op.Stamp.wire(), op.Value)
+	order := make([]int, len(lww.Ops))
+	for i := range order {
+		order[i] = i
 	}
-	if reg.Value() != lww.Expect.Value {
-		t.Fatalf("lww value = %v, want %v", reg.Value(), lww.Expect.Value)
+	got := replayLww(order)
+	if got != lww.Expect.Value {
+		t.Fatalf("lww value = %v, want %v", got, lww.Expect.Value)
+	}
+	// `resolution` names the rule; check the winner really is the max-stamp op.
+	if lww.Expect.Resolution != "max_stamp" {
+		t.Fatalf("unknown lww resolution %q", lww.Expect.Resolution)
+	}
+	best := 0
+	for i := range lww.Ops {
+		if lww.Ops[best].Stamp.wire().Greater(lww.Ops[i].Stamp.wire()) {
+			continue
+		}
+		best = i
+	}
+	if got != lww.Ops[best].Value {
+		t.Fatalf("resolution=max_stamp: value = %v, but the max-stamp op carries %v", got, lww.Ops[best].Value)
+	}
+	if want := lww.Expect.OrderIndependent; want != nil {
+		reversed := make([]int, len(order))
+		for i := range order {
+			reversed[len(order)-1-i] = order[i]
+		}
+		if indep := replayLww(reversed) == got; indep != *want {
+			t.Fatalf("lww order_independent = %v, want %v", indep, *want)
+		}
 	}
 
 	// whole_editor_death_cascades
 	var death struct {
+		rsScenarioHead
 		OpenSet []struct {
 			Key     string `json:"key"`
 			Present bool   `json:"present"`
 		} `json:"open_set"`
 		AliveBefore map[string]bool `json:"alive_before"`
 		Op          struct {
-			Key   string    `json:"key"`
-			Value bool      `json:"value"`
-			Stamp stampJSON `json:"stamp"`
+			RegisterKind string    `json:"register_kind"`
+			Key          string    `json:"key"`
+			Value        bool      `json:"value"`
+			Stamp        stampJSON `json:"stamp"`
 		} `json:"op"`
 		Expect struct {
-			LiveDocsAfter []string `json:"live_docs_after"`
+			LiveDocsBefore []string `json:"live_docs_before"`
+			LiveDocsAfter  []string `json:"live_docs_after"`
+			Cascade        *bool    `json:"cascade"`
+			Note           string   `json:"note"`
 		} `json:"expect"`
 	}
-	if err := json.Unmarshal(fx.scenario(t, "whole_editor_death_cascades"), &death); err != nil {
-		t.Fatalf("decode death scenario: %v", err)
-	}
+	mustStrictJSON(t, "reliable-sync scenario whole_editor_death_cascades", fx.scenario(t, "whole_editor_death_cascades"), &death)
 	type openEntry struct {
 		doc string
 		pid PeerId
@@ -618,24 +1091,61 @@ func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 		}
 		alive[PeerId(pid)] = NewWireLwwRegister(WireStamp{WallTime: 1, Logical: 0, Peer: 1}, v)
 	}
+	rsRequireRegisterKind(t, "whole_editor_death_cascades", death.Op.RegisterKind, "lww")
+
+	liveDocs := func() []string {
+		set := map[string]struct{}{}
+		for _, e := range open {
+			if reg, ok := alive[e.pid]; ok && reg.Value() {
+				set[e.doc] = struct{}{}
+			}
+		}
+		out := make([]string, 0, len(set))
+		for doc := range set {
+			out = append(out, doc)
+		}
+		sort.Strings(out)
+		return out
+	}
+
+	before := liveDocs()
+	wantBefore := append([]string(nil), death.Expect.LiveDocsBefore...)
+	sort.Strings(wantBefore)
+	if !reflect.DeepEqual(before, wantBefore) {
+		t.Fatalf("live_docs_before = %v, want %v", before, wantBefore)
+	}
+
 	deadPid := parsePid(t, death.Op.Key)
 	alive[deadPid].Set(death.Op.Stamp.wire(), death.Op.Value)
 
-	liveSet := map[string]struct{}{}
-	for _, e := range open {
-		if reg, ok := alive[e.pid]; ok && reg.Value() {
-			liveSet[e.doc] = struct{}{}
-		}
-	}
-	live := make([]string, 0, len(liveSet))
-	for doc := range liveSet {
-		live = append(live, doc)
-	}
-	sort.Strings(live)
+	live := liveDocs()
 	want := append([]string(nil), death.Expect.LiveDocsAfter...)
 	sort.Strings(want)
 	if !reflect.DeepEqual(live, want) {
 		t.Fatalf("live docs = %v, want %v", live, want)
+	}
+
+	// `cascade`: one liveness write moved more than one doc. That is the claim
+	// the scenario is named for, and it is the difference between this and a
+	// per-doc close.
+	if wantCascade := death.Expect.Cascade; wantCascade != nil {
+		dropped := 0
+		after := map[string]bool{}
+		for _, doc := range live {
+			after[doc] = true
+		}
+		for _, doc := range before {
+			if !after[doc] {
+				dropped++
+			}
+		}
+		if cascaded := dropped > 1; cascaded != *wantCascade {
+			t.Fatalf("cascade = %v (%d docs dropped on one write), want %v",
+				cascaded, dropped, *wantCascade)
+		}
+	}
+	if death.Expect.Note == "" {
+		t.Fatal("whole_editor_death_cascades: expect.note must say which docs drop and why")
 	}
 }
 
