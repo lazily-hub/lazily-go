@@ -15,11 +15,17 @@ build:
 # (#lzscenariocoverage) records which SCENARIO of each fixture was replayed; the
 # manifest records only which FILE was opened, and one scenario is enough to open
 # a file.
+#
+# -count=1 defeats Go's test-result cache. A cached package does not run, so it
+# writes nothing to either file, and `conformance-coverage` then fails with "no
+# conformance manifest" on an otherwise unchanged tree. Fail-closed, but still a
+# false red: whether the evidence exists must not depend on a warm cache. CI does
+# the same thing for the same reason (#lzguardsnotinci).
 test:
 	@mkdir -p build && : > build/conformance-fixtures-loaded.txt && : > build/conformance-scenarios-replayed.txt
 	LAZILY_CONFORMANCE_MANIFEST=$(CURDIR)/build/conformance-fixtures-loaded.txt \
 	LAZILY_CONFORMANCE_SCENARIOS=$(CURDIR)/build/conformance-scenarios-replayed.txt \
-	go test ./...
+	go test -count=1 ./...
 
 # CRDT/concurrency correctness under the race detector (cgo required).
 #

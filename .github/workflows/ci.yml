@@ -44,8 +44,39 @@ jobs:
             test -d "../lazily-spec/conformance/$corpus" || { echo "::error::../lazily-spec/conformance/$corpus missing — its conformance runner would silently skip"; exit 1; }
           done
 
+      # Rungs 1 and 4 (#lzguardsnotinci). The fixture manifest
+      # (#lazilyupgradeconformance) and the scenario ledger (#lzscenariocoverage)
+      # are RUNTIME evidence: the recorders in conformance_manifest_test.go and
+      # conformance_scenario_ledger_test.go no-op unless their env var is set, so
+      # a CI that runs `go test` without them produces no evidence at all. The
+      # script that audits them then has nothing to read.
+      #
+      # `make test` truncates both files and exports both absolute paths; CI runs
+      # the steps individually rather than through `make check`, so it has to do
+      # the same thing here or the guard below is auditing a file nobody wrote.
+      # Truncate, do not merely create: a manifest carried over from a previous
+      # step would credit this run with fixtures it never opened.
+      - name: Prepare conformance evidence files (#lzguardsnotinci)
+        run: |
+          mkdir -p build
+          : > build/conformance-fixtures-loaded.txt
+          : > build/conformance-scenarios-replayed.txt
+
+      # The two paths are ABSOLUTE for the same reason the Makefile makes them
+      # absolute: `go test ./...` runs one binary per package from that package's
+      # own directory, so a relative path would scatter partial evidence across
+      # three directories instead of accumulating one union.
+      #
+      # -count=1 defeats Go's test-result cache. A cached package does not run,
+      # so it writes nothing to either file, and the guard below would fail with
+      # "no conformance manifest" on a re-run of an unchanged commit. That is
+      # fail-closed rather than vacuous, but it is still a false red, and
+      # evidence collection must not depend on whether the build cache was warm.
       - name: test
-        run: go test ./...
+        env:
+          LAZILY_CONFORMANCE_MANIFEST: ${{ github.workspace }}/build/conformance-fixtures-loaded.txt
+          LAZILY_CONFORMANCE_SCENARIOS: ${{ github.workspace }}/build/conformance-scenarios-replayed.txt
+        run: go test -count=1 ./...
 
       # Every conformance runner in this repo t.Skip()s when the sibling spec
       # checkout is absent, so "green" and "ran nothing" are indistinguishable
@@ -97,5 +128,35 @@ jobs:
             fi
           done
 
+      # `race` runs after `test` and before the coverage guard on purpose, and it
+      # deliberately does NOT carry the two evidence env vars — same ordering and
+      # same reason as `make check`. The race binary replays the same corpus, so
+      # letting it append would double every entry for no new information; the
+      # union the guard audits stays the one the `test` step recorded.
       - name: race (cgo)
         run: CGO_ENABLED=1 go test -race ./...
+
+      # Rungs 1 and 4 execute HERE and nowhere else (#lzguardsnotinci). Unlike
+      # rung 2 (#lzassertunknownkeys) and rung 3 (#lzconsumednotasserted), which
+      # live inside the test binary and so were already enforced by the `test`
+      # step above, these two verify at the script and nothing in this workflow
+      # used to invoke it. CI enforced half the ladder and reported green for the
+      # whole of it.
+      - name: Conformance coverage + scenario ledger guard (#lzguardsnotinci)
+        run: |
+          # The script exits 0 with a "SKIP:" line when the sibling corpus is
+          # absent. The fixtures-present guard above should already have caught
+          # that, but a guard whose pass and whose no-op share an exit code has
+          # to be told apart by something, so tell them apart here.
+          out=$(./scripts/check-conformance-coverage.sh 2>&1) || { echo "$out"; echo "::error::conformance coverage/scenario guard failed"; exit 1; }
+          echo "$out"
+          if echo "$out" | grep -q "^SKIP:"; then
+            echo "::error::the coverage guard skipped instead of running — it proved nothing"
+            exit 1
+          fi
+          for want in "conformance coverage OK" "scenario coverage OK"; do
+            echo "$out" | grep -q "$want" || {
+              echo "::error::the coverage guard exited 0 without emitting '$want' — it did not reach its verdict"
+              exit 1
+            }
+          done
