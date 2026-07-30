@@ -28,12 +28,6 @@ fi
 # guard rots, so keep a reason with any new entry.
 KNOWN_UNCOVERED=(
   "arena_blob.json"
-  "collections/topiccell_broadcast_cursor_isolation.json"
-  "collections/topiccell_durable_replay_gc.json"
-  "collections/topiccell_ephemeral_lifecycle.json"
-  "collections/topiccell_offline_tail_bounds.json"
-  "collections/workqueue_competing_delivery.json"
-  "collections/workqueue_lease_deadletter.json"
   "reactive-graph/exact_fold_paths_stay_exact.json"
   "reactive-graph/feedback_drain_bound_reports_exhaustion.json"
   "reactive-graph/merge_cell_acquires_no_dependency_edge.json"
@@ -107,11 +101,29 @@ while IFS= read -r id; do
   fi
 done <<< "$OPENED"
 
-# A stale allowlist is its own drift: an entry naming a fixture that no longer
-# exists means the corpus moved and nobody updated the excuse.
+# A stale allowlist is its own drift, in two directions.
+#
+# 1. An entry naming a fixture that no longer exists means the corpus moved and
+#    nobody updated the excuse.
+# 2. An entry naming a fixture the suite DOES open is a stale excuse: the gap it
+#    claims was closed, and the excuse outlived it. That rot understates coverage,
+#    which is the direction nobody files a bug about — you do not report missing
+#    coverage you have been told you lack — and it buries the real gaps in noise.
+#
+# The open test below uses the SAME `grep -qxF ... <<< "$OPENED"` comparison as the
+# covered-check above, deliberately: if the two ever disagreed, a fixture could be
+# both counted as covered and excused as uncovered in one run.
 for known in "${KNOWN_UNCOVERED[@]:-}"; do
   if [ ! -f "$SPEC_DIR/$known" ]; then
     echo "ERROR: KNOWN_UNCOVERED lists '$known', which is not in the canonical corpus." >&2
+    missing=$((missing + 1))
+    continue
+  fi
+  if grep -qxF "$known" <<< "$OPENED"; then
+    echo "ERROR: KNOWN_UNCOVERED lists '$known', but the suite DID open it." >&2
+    echo "       The excuse is stale — the gap it claims no longer exists. Delete" >&2
+    echo "       this entry from KNOWN_UNCOVERED. Leaving it there understates this" >&2
+    echo "       binding's coverage and hides the fixtures that are really missing." >&2
     missing=$((missing + 1))
   fi
 done
