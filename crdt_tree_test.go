@@ -75,10 +75,14 @@ func crdtTreeScenario(t *testing.T, fixture crdtTreeFixture, name string) (out s
 	Expect             crdtTreeExpect `json:"expect"`
 }) {
 	t.Helper()
-	for _, scenario := range fixture.Scenarios {
-		if scenario.Name == name {
-			return scenario
+	for index, scenario := range fixture.Scenarios {
+		if scenario.Name != name {
+			continue
 		}
+		// Rung 4 (#lzscenariocoverage): this lookup IS the replay point for
+		// this fixture — a scenario nobody asks for is never recorded.
+		recordScenarioAt("crdt-tree/algebra.json", index, "", scenario.Name)
+		return scenario
 	}
 	t.Fatalf("missing scenario %q", name)
 	return out

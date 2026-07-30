@@ -7,12 +7,19 @@ all: check
 build:
 	go build ./...
 
-# The manifest path is ABSOLUTE: `go test ./...` runs one binary per package
-# from that package's directory, so a relative path would scatter partial
-# manifests instead of accumulating one union.
+# The manifest and scenario-ledger paths are ABSOLUTE: `go test ./...` runs one
+# binary per package from that package's directory, so a relative path would
+# scatter partial evidence instead of accumulating one union.
+#
+# Both files are truncated here and appended to by each test binary. The ledger
+# (#lzscenariocoverage) records which SCENARIO of each fixture was replayed; the
+# manifest records only which FILE was opened, and one scenario is enough to open
+# a file.
 test:
-	@mkdir -p build && : > build/conformance-fixtures-loaded.txt
-	LAZILY_CONFORMANCE_MANIFEST=$(CURDIR)/build/conformance-fixtures-loaded.txt go test ./...
+	@mkdir -p build && : > build/conformance-fixtures-loaded.txt && : > build/conformance-scenarios-replayed.txt
+	LAZILY_CONFORMANCE_MANIFEST=$(CURDIR)/build/conformance-fixtures-loaded.txt \
+	LAZILY_CONFORMANCE_SCENARIOS=$(CURDIR)/build/conformance-scenarios-replayed.txt \
+	go test ./...
 
 # CRDT/concurrency correctness under the race detector (cgo required).
 #
@@ -60,8 +67,8 @@ test-interop-peer:
 	CGO_ENABLED=1 go run -race ./cmd/lazily-interop-peer --self-check
 
 # `race` runs after `test` on purpose: `test` truncates the conformance manifest
-# and `race` never writes it, so the recorded fixture union stays the one the
-# coverage guard is meant to audit.
+# and the scenario ledger, and `race` writes neither, so the recorded fixture
+# union and scenario ledger stay the ones the coverage guard is meant to audit.
 check: fmt-check vet build test race test-interop-peer conformance-coverage
 	@echo "lazily-go: check OK"
 

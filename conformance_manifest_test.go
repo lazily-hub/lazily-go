@@ -83,11 +83,13 @@ func flushConformanceManifest() {
 	_, _ = f.WriteString(strings.Join(ids, "\n") + "\n")
 }
 
-// TestMain exists solely to flush the manifest after the package's tests finish.
-// A deferred flush in each test would race and truncate; a single exit hook is the
-// only place the union is complete.
+// TestMain exists solely to flush the manifest — and the per-scenario replay
+// ledger it is joined against (#lzscenariocoverage) — after the package's tests
+// finish. A deferred flush in each test would race and truncate; a single exit
+// hook is the only place the union is complete.
 func TestMain(m *testing.M) {
 	code := m.Run()
 	flushConformanceManifest()
+	flushConformanceScenarios()
 	os.Exit(code)
 }

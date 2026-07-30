@@ -179,7 +179,13 @@ func TestMergeCellAlgebraFixture(t *testing.T) {
 		"Max":        Max[int](),
 	}
 	seen := 0
-	for _, sc := range fixture.Scenarios {
+	for index, sc := range fixture.Scenarios {
+		// Rung 4 (#lzscenariocoverage). This is the one fixture in the corpus
+		// whose scenarios carry neither `id` nor `name` — they are distinguished
+		// only by `policy` — so every entry it contributes lands on the
+		// positional fallback and the verifier reports it as such. Recording
+		// `policy` instead would be a private id no other binding shares.
+		recordScenarioAt("collections/mergecell_algebra.json", index, "", "")
 		p := policies[sc.Policy]
 		if p.Commutative != sc.Flags.Commutative || p.Idempotent != sc.Flags.Idempotent {
 			t.Fatalf("%s flags mismatch", sc.Policy)

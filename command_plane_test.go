@@ -322,6 +322,13 @@ func runMessagePassingFixture(t *testing.T, name string) {
 	var fixture mpFixture
 	mustStrictJSON(t, name, raw, &fixture)
 	scenarios := fixture.Scenarios
+	// Rung 4 (#lzscenariocoverage): record the fixture's OWN scenarios, before
+	// the bare-frames wrapper below invents one. A synthetic scenario names
+	// nothing the corpus carries, so recording it would be evidence of a replay
+	// the fixture never asked for.
+	for index, sc := range fixture.Scenarios {
+		recordScenario(filepath.Join("message-passing", name), scenarioKey("", sc.Name, index))
+	}
 	if len(scenarios) == 0 {
 		// Bare frames+expect at the top level: wrap in a single scenario.
 		scenarios = []mpScenario{{Name: name, Frames: fixture.Frames, Expect: fixture.Expect}}

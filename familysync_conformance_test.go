@@ -121,8 +121,10 @@ func TestFamilySyncMaterializeOnIngestConformance(t *testing.T) {
 	}
 	ns := fx.Namespace
 
-	for _, sc := range fx.Scenarios {
-		t.Run(sc.Name, func(t *testing.T) {
+	for index, sc := range fx.Scenarios {
+		// Rung 4 (#lzscenariocoverage): record at the point of replay.
+		label := recordScenarioAt("familysync/materialize_on_ingest.json", index, "", sc.Name)
+		t.Run(label, func(t *testing.T) {
 			origin := NewCrdtPlaneRuntime(sc.OriginPeer)
 			defer origin.Close()
 			origin.RegisterFamilyLww(ns)

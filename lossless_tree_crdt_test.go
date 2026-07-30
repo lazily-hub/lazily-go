@@ -267,10 +267,9 @@ func runLosslessTreeFixture(t *testing.T, name string) {
 	var fixture ltFixture
 	mustStrictJSON(t, name, raw, &fixture)
 	for i, scenario := range fixture.Scenarios {
-		label := name + "[" + scenario.Name + "]"
-		if scenario.Name == "" {
-			label = name + "[" + itoa(i) + "]"
-		}
+		// Rung 4 (#lzscenariocoverage): record at the point of replay.
+		id := recordScenarioAt(filepath.Join("lossless-tree", name), i, "", scenario.Name)
+		label := name + "[" + id + "]"
 		t.Run(label, func(t *testing.T) {
 			world := newLtWorld()
 			world.replicas["a"] = NewLosslessTreeCrdt(scenario.Seed.Peer)
@@ -281,29 +280,6 @@ func runLosslessTreeFixture(t *testing.T, name string) {
 			world.assertExpect(t, scenario.Expect, label)
 		})
 	}
-}
-
-// itoa is a tiny strconv.Itoa without the import (kept local for clarity).
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	neg := i < 0
-	if neg {
-		i = -i
-	}
-	var b [20]byte
-	pos := len(b)
-	for i > 0 {
-		pos--
-		b[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	if neg {
-		pos--
-		b[pos] = '-'
-	}
-	return string(b[pos:])
 }
 
 func TestLosslessTreeConformance(t *testing.T) {

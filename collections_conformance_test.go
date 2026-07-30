@@ -413,9 +413,12 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
 	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect_initial / expect_after blocks are asserted in the subtest below")
-	for _, rawScenario := range jsList(fixture["scenarios"]) {
+	for index, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
-		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+		// Rung 4 (#lzscenariocoverage): record at the point of replay, so a
+		// scenario this loop stops reaching stops being recorded.
+		label := recordScenarioMap("collections/"+name, index, scenario)
+		t.Run(label, func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario,
 				"name", "fold", "tree", "expect_initial", "expect_after", "edit", "remove_child")
 			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
@@ -546,9 +549,12 @@ func TestCollectionsSeqCrdtConvergence(t *testing.T) {
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
 	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
-	for _, rawScenario := range jsList(fixture["scenarios"]) {
+	for index, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
-		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+		// Rung 4 (#lzscenariocoverage): record at the point of replay, so a
+		// scenario this loop stops reaching stops being recorded.
+		label := recordScenarioMap("collections/"+name, index, scenario)
+		t.Run(label, func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario, "name", "replica", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"orders_equal", "order_on", "order", "len", "get", "get_on",
@@ -718,9 +724,12 @@ func TestCollectionsTextCrdtConvergence(t *testing.T) {
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
 	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
-	for _, rawScenario := range jsList(fixture["scenarios"]) {
+	for index, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
-		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+		// Rung 4 (#lzscenariocoverage): record at the point of replay, so a
+		// scenario this loop stops reaching stops being recorded.
+		label := recordScenarioMap("collections/"+name, index, scenario)
+		t.Run(label, func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario, "name", "replica", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"text", "len", "texts_equal", "a_starts_with", "a_ends_with", "tombstone_count")
@@ -851,9 +860,12 @@ func TestCollectionsTextCrdtDeltaSync(t *testing.T) {
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
 	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
-	for _, rawScenario := range jsList(fixture["scenarios"]) {
+	for index, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
-		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+		// Rung 4 (#lzscenariocoverage): record at the point of replay, so a
+		// scenario this loop stops reaching stops being recorded.
+		label := recordScenarioMap("collections/"+name, index, scenario)
+		t.Run(label, func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario, "name", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"texts_equal", "text_on", "version_vector_on")
@@ -991,9 +1003,12 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
 	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
-	for _, rawScenario := range jsList(fixture["scenarios"]) {
+	for index, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
-		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
+		// Rung 4 (#lzscenariocoverage): record at the point of replay, so a
+		// scenario this loop stops reaching stops being recorded.
+		label := recordScenarioMap("collections/"+name, index, scenario)
+		t.Run(label, func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario, "name", "blocks", "old", "new", "expect")
 			expect := consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"key_equal", "key_not_equal", "matches", "removed", "similarity_min",

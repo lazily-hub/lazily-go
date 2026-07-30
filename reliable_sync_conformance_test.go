@@ -41,6 +41,10 @@ type rsFixture struct {
 	Wire       json.RawMessage            `json:"wire"`
 	Assertions map[string]json.RawMessage `json:"assertions"`
 	Scenarios  []json.RawMessage          `json:"scenarios"`
+
+	// fixtureID is the corpus-relative path this envelope was loaded from. It
+	// is unexported and untagged so DisallowUnknownFields never sees it.
+	fixtureID string
 }
 
 // assertRootDelta cross-checks the fixture's root `assertions` against the
@@ -155,22 +159,32 @@ func loadReliableSyncFixture(t *testing.T, name string) rsFixture {
 	raw := loadConformanceFixture(t, "reliable-sync", name)
 	var fx rsFixture
 	mustStrictJSON(t, name, raw, &fx)
+	// Unexported and untagged, so the strict decode never sees it: the fixture
+	// id the scenario ledger records against (#lzscenariocoverage).
+	fx.fixtureID = filepath.Join("reliable-sync", name)
 	return fx
 }
 
 // scenario returns the raw scenario object with the given name.
+//
+// Every reliable-sync runner reaches its scenarios through here, which makes it
+// the one place rung 4 has to be instrumented for this whole corpus: a scenario
+// no runner asks for is never recorded, and that is exactly the report
+// (#lzscenariocoverage).
 func (fx rsFixture) scenario(t *testing.T, name string) json.RawMessage {
 	t.Helper()
-	for _, sc := range fx.Scenarios {
+	for index, sc := range fx.Scenarios {
 		var head struct {
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(sc, &head); err != nil {
 			t.Fatalf("decode scenario head: %v", err)
 		}
-		if head.Name == name {
-			return sc
+		if head.Name != name {
+			continue
 		}
+		recordScenarioAt(fx.fixtureID, index, "", head.Name)
+		return sc
 	}
 	t.Fatalf("scenario %q not found", name)
 	return nil
@@ -917,6 +931,142 @@ func rsRequireRegisterKind(t *testing.T, scenario, got, want string) {
 	}
 }
 
+// rsLivenessOp is one op of the derived-aggregate scenario's stream. The corpus
+// interleaves both register kinds in a single list, so one shape carries the
+// union of their fields and `register_kind` picks which half applies.
+type rsLivenessOp struct {
+	RegisterKind string    `json:"register_kind"`
+	Key          string    `json:"key"`
+	Op           string    `json:"op"`
+	Tag          string    `json:"tag"`
+	ObservedTags []string  `json:"observed_tags"`
+	Value        bool      `json:"value"`
+	Stamp        stampJSON `json:"stamp"`
+}
+
+// rsDocOf splits the doc out of a `docA/pid100` presence key.
+func rsDocOf(key string) string {
+	if i := strings.Index(key, "/"); i >= 0 {
+		return key[:i]
+	}
+	return key
+}
+
+// rsLivenessReplica is the derived per-doc live aggregate: an OR-set per
+// `doc/pid` presence key, an LWW register per peer's `alive/pid`, and the join
+// of the two. The library ships neither the composition nor a name for it,
+// because which docs are live is the application's derivation over the two wire
+// CRDTs rather than anything the wire itself carries.
+type rsLivenessReplica struct {
+	open  map[string]*OrSet
+	alive map[PeerId]*WireLwwRegister[bool]
+}
+
+func newRsLivenessReplica() *rsLivenessReplica {
+	return &rsLivenessReplica{open: map[string]*OrSet{}, alive: map[PeerId]*WireLwwRegister[bool]{}}
+}
+
+// apply folds one op in and reports whether it CHANGED the replica. That is the
+// definition `redeliver_applied_count` needs: an op is "applied" when it moved
+// the state, so a redelivered op that re-derives the value it already had
+// counts as zero, and one that double-inserted would not.
+func (r *rsLivenessReplica) apply(t *testing.T, op rsLivenessOp) bool {
+	t.Helper()
+	before := r.snapshot()
+	switch op.RegisterKind {
+	case "orset":
+		set, ok := r.open[op.Key]
+		if !ok {
+			set = NewOrSet()
+			r.open[op.Key] = set
+		}
+		switch op.Op {
+		case "add":
+			set.Add(op.Tag)
+		case "remove":
+			set.RemoveObserved(op.ObservedTags)
+		default:
+			t.Fatalf("unknown orset op %q on %s", op.Op, op.Key)
+		}
+	case "lww":
+		pid := parsePid(t, op.Key)
+		reg, ok := r.alive[pid]
+		if !ok {
+			// An unheard-of peer is not yet alive, at the bottom stamp, so the
+			// first liveness write it receives always dominates.
+			reg = NewWireLwwRegister(WireStamp{}, false)
+			r.alive[pid] = reg
+		}
+		reg.Set(op.Stamp.wire(), op.Value)
+	default:
+		t.Fatalf("unknown register_kind %q on %s", op.RegisterKind, op.Key)
+	}
+	return r.snapshot() != before
+}
+
+// liveDocs is the derived aggregate: a doc is live iff some presence tag for it
+// survives AND the peer holding it is alive.
+func (r *rsLivenessReplica) liveDocs(t *testing.T) []string {
+	t.Helper()
+	docs := map[string]struct{}{}
+	for key, set := range r.open {
+		if !set.Present() {
+			continue
+		}
+		if reg, ok := r.alive[parsePid(t, key)]; ok && reg.Value() {
+			docs[rsDocOf(key)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(docs))
+	for doc := range docs {
+		out = append(out, doc)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// snapshot is the replica's full observable state, rendered deterministically.
+//
+// It reaches into the OR-set's tag sets on purpose: `Present()` alone collapses
+// two distinct add-tags into one bit, so an op that grew the tag set without
+// flipping presence would read as "applied nothing". Convergence and idempotence
+// are claims about the STATE, not about the projection of it.
+func (r *rsLivenessReplica) snapshot() string {
+	var b strings.Builder
+	keys := make([]string, 0, len(r.open))
+	for key := range r.open {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		set := r.open[key]
+		b.WriteString("open " + key + " add=" + strings.Join(sortedTagSet(set.adds), ",") +
+			" rm=" + strings.Join(sortedTagSet(set.removes), ",") + ";")
+	}
+	pids := make([]int, 0, len(r.alive))
+	for pid := range r.alive {
+		pids = append(pids, int(pid))
+	}
+	sort.Ints(pids)
+	for _, pid := range pids {
+		reg := r.alive[PeerId(pid)]
+		stamp := reg.Stamp()
+		b.WriteString("alive " + strconv.Itoa(pid) + "=" + strconv.FormatBool(reg.Value()) +
+			"@" + strconv.FormatInt(stamp.WallTime, 10) + "." + strconv.FormatInt(stamp.Logical, 10) +
+			"." + strconv.FormatInt(int64(stamp.Peer), 10) + ";")
+	}
+	return b.String()
+}
+
+func sortedTagSet(tags map[string]struct{}) []string {
+	out := make([]string, 0, len(tags))
+	for tag := range tags {
+		out = append(out, tag)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 	fx := loadReliableSyncFixture(t, "liveness_orset_lww.json")
 
@@ -1146,6 +1296,137 @@ func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 	}
 	if death.Expect.Note == "" {
 		t.Fatal("whole_editor_death_cascades: expect.note must say which docs drop and why")
+	}
+
+	// derived_live_doc_aggregate_converges_under_retry
+	//
+	// The fourth scenario in this fixture, and the one this binding never
+	// replayed (#lzscenariocoverage). It is not a property of OrSet or of
+	// WireLwwRegister on its own — it is the property of the DERIVED aggregate
+	// the two compose into: a doc is live iff some presence tag for it survives
+	// AND the peer holding it is still alive. Each half is a semilattice, so the
+	// join is one too, and the scenario states the three consequences: the
+	// aggregate is order-independent, re-delivering a seen op applies nothing,
+	// and one doc's liveness does not leak into another's.
+	//
+	// The library ships no type for that join, because it is the application's
+	// derivation rather than the wire's. That is why replaying this scenario
+	// means building the aggregate here — and why skipping it was easy.
+	var derived struct {
+		rsScenarioHead
+		// The scenario's two replicas exist to be fed the SAME ops in
+		// different orders, which is what `reverse_order_equivalent` asks for.
+		Replicas               []string       `json:"replicas"`
+		Ops                    []rsLivenessOp `json:"ops"`
+		ReverseOrderEquivalent bool           `json:"reverse_order_equivalent"`
+		Redeliver              bool           `json:"redeliver"`
+		Expect                 struct {
+			ConvergedLiveDocs     []string `json:"converged_live_docs"`
+			OrderIndependent      *bool    `json:"order_independent"`
+			RedeliverAppliedCount *int     `json:"redeliver_applied_count"`
+			PerDocIsolation       *bool    `json:"per_doc_isolation"`
+		} `json:"expect"`
+	}
+	mustStrictJSON(t, "reliable-sync scenario derived_live_doc_aggregate_converges_under_retry",
+		fx.scenario(t, "derived_live_doc_aggregate_converges_under_retry"), &derived)
+	if len(derived.Replicas) != 2 {
+		t.Fatalf("derived_live_doc_aggregate: %d replicas, this replay drives exactly 2 (forward and reverse)",
+			len(derived.Replicas))
+	}
+	if !derived.ReverseOrderEquivalent {
+		t.Fatal("derived_live_doc_aggregate: reverse_order_equivalent=false, but the scenario's whole claim is that the two orders agree")
+	}
+
+	replayLiveness := func(order []int, skipDoc string) (*rsLivenessReplica, int) {
+		replica := newRsLivenessReplica()
+		applied := 0
+		for _, i := range order {
+			op := derived.Ops[i]
+			if skipDoc != "" && op.RegisterKind == "orset" && rsDocOf(op.Key) == skipDoc {
+				continue
+			}
+			if replica.apply(t, op) {
+				applied++
+			}
+		}
+		return replica, applied
+	}
+
+	forwardOrder := make([]int, len(derived.Ops))
+	for i := range forwardOrder {
+		forwardOrder[i] = i
+	}
+	reverseOrder := make([]int, len(forwardOrder))
+	for i, v := range forwardOrder {
+		reverseOrder[len(forwardOrder)-1-i] = v
+	}
+
+	r1, _ := replayLiveness(forwardOrder, "")
+	r2, _ := replayLiveness(reverseOrder, "")
+
+	wantLive := append([]string(nil), derived.Expect.ConvergedLiveDocs...)
+	sort.Strings(wantLive)
+	for i, replica := range []*rsLivenessReplica{r1, r2} {
+		if got := replica.liveDocs(t); !reflect.DeepEqual(got, wantLive) {
+			t.Fatalf("replica %s: converged_live_docs = %v, want %v",
+				derived.Replicas[i], got, wantLive)
+		}
+	}
+
+	// `order_independent` is the semilattice claim itself: the two replicas saw
+	// the same ops in opposite orders and must be indistinguishable, not merely
+	// each equal to a literal the fixture also carries.
+	if want := derived.Expect.OrderIndependent; want != nil {
+		if indep := r1.snapshot() == r2.snapshot(); indep != *want {
+			t.Fatalf("order_independent = %v, want %v\n  forward %s\n  reverse %s",
+				indep, *want, r1.snapshot(), r2.snapshot())
+		}
+	}
+
+	// Re-delivery: feeding the whole stream again must apply nothing new. This
+	// is idempotence measured on the replica's own state, so an implementation
+	// that "ignored" a redelivered op by silently rebuilding the same value
+	// still counts as unapplied, and one that double-inserted would not.
+	if want := derived.Expect.RedeliverAppliedCount; want != nil {
+		if !derived.Redeliver {
+			t.Fatal("derived_live_doc_aggregate: redeliver_applied_count asserted with redeliver=false")
+		}
+		reapplied := 0
+		for _, i := range forwardOrder {
+			if r1.apply(t, derived.Ops[i]) {
+				reapplied++
+			}
+		}
+		if reapplied != *want {
+			t.Fatalf("redeliver_applied_count = %d, want %d", reapplied, *want)
+		}
+		if got := r1.liveDocs(t); !reflect.DeepEqual(got, wantLive) {
+			t.Fatalf("after redelivery live docs = %v, want %v", got, wantLive)
+		}
+	}
+
+	// `per_doc_isolation`: the aggregate is per-doc, so dropping one doc's
+	// presence ops removes exactly that doc and leaves the rest live. Asserting
+	// only the converged list cannot tell a per-doc aggregate from one global
+	// flag that happens to be on.
+	if want := derived.Expect.PerDocIsolation; want != nil {
+		isolated := true
+		for _, doc := range wantLive {
+			withoutDoc := make([]string, 0, len(wantLive))
+			for _, other := range wantLive {
+				if other != doc {
+					withoutDoc = append(withoutDoc, other)
+				}
+			}
+			partial, _ := replayLiveness(forwardOrder, doc)
+			if !reflect.DeepEqual(partial.liveDocs(t), withoutDoc) {
+				isolated = false
+				break
+			}
+		}
+		if isolated != *want {
+			t.Fatalf("per_doc_isolation = %v, want %v", isolated, *want)
+		}
 	}
 }
 

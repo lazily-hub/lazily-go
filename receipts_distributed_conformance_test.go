@@ -190,9 +190,11 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 		t.Fatal("anti_entropy fixture has no scenarios")
 	}
 
-	for _, scenario := range fixture.Scenarios {
+	for index, scenario := range fixture.Scenarios {
 		scenario := scenario
-		t.Run(scenario.Name, func(t *testing.T) {
+		// Rung 4 (#lzscenariocoverage): record at the point of replay.
+		label := recordScenarioAt("distributed/anti_entropy_converge.json", index, "", scenario.Name)
+		t.Run(label, func(t *testing.T) {
 			runtime := NewCrdtPlaneRuntime(1)
 			defer runtime.Close()
 

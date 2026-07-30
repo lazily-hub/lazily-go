@@ -70,11 +70,16 @@ func TestStdlibConformance(t *testing.T) {
 			fixture := loadStdlibFixture(t, name)
 			scenarios := make(map[string]bool, len(fixture.Scenarios))
 			assertions := 0
-			for _, scenario := range fixture.Scenarios {
+			for index, scenario := range fixture.Scenarios {
 				if scenarios[scenario.ID] {
 					t.Fatalf("duplicate scenario id %q", scenario.ID)
 				}
 				scenarios[scenario.ID] = true
+				// Rung 4 (#lzscenariocoverage): record at the point of replay.
+				// These three fixtures carry the corpus's only `id`-keyed
+				// scenarios, so they exercise the first arm of the resolution
+				// order the other 28 never reach.
+				recordScenarioAt(filepath.Join("stdlib", name), index, scenario.ID, "")
 				// The floor counts assertions this runner performed, so the
 				// replay has to happen inline rather than in a subtest whose
 				// tally the parent never sees.

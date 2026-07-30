@@ -1424,7 +1424,12 @@ func TestReactiveGraphConformance(t *testing.T) {
 						// streams, which a single `steps` array cannot express.
 						// Each scenario is replayed in its own context and the
 						// resulting observations are compared.
-						for _, sc := range fx.Scenarios {
+						for index, sc := range fx.Scenarios {
+							// Rung 4 (#lzscenariocoverage): record at the point
+							// of replay. The corpus is replayed once per
+							// execution model, so each id records twice; the
+							// ledger deduplicates.
+							recordScenario(filepath.Join(reactiveGraphSpecDir, name), scenarioKey("", sc.Name, index))
 							m := mdl.make()
 							e := newReplayEngine(t, m, name, "["+sc.Name+"]")
 							e.replay(sc.Steps)
