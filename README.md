@@ -388,6 +388,32 @@ notes and platform carve-outs lives in
 | Ingress family — async flavor (`AsyncIngressCell`): admission is not async-coloured (`#designimplementtransport`) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 <!-- coverage-table:end -->
 
+## The lazily family
+
+lazily is one reactive model implemented across many languages — the same cell
+kernel, the same keyed collections and CRDTs, and the same wire protocol — so
+peers written in different languages talk to each other without a translation
+layer.
+
+- [`lazily-spec`][spec] — the language-agnostic wire protocol, the
+  cross-language feature matrix, and the conformance corpus every binding
+  replays, lazily-go included.
+- [`lazily-formal`][formal] — the Lean 4 formal model every binding inherits its
+  proofs from.
+
+| Repo | Language |
+|---|---|
+| [`lazily-rs`][rs] | Rust — the reference implementation |
+| [`lazily-py`][py] | Python |
+| **`lazily-go`** | Go — you are here |
+| [`lazily-kt`][kt] | Kotlin / JVM |
+| [`lazily-js`][js] | JavaScript / TypeScript |
+| [`lazily-cs`][cs] | C# / .NET |
+| [`lazily-cpp`][cpp] | C++ |
+| [`lazily-zig`][zig] | Zig |
+| [`lazily-dart`][dart] | Dart / Flutter |
+| [`lazily-react`][react] | React / Preact bindings layered over `lazily-js` (not a separate language binding) |
+
 [spec]: https://github.com/lazily-hub/lazily-spec
 [formal]: https://github.com/lazily-hub/lazily-formal
 [rs]: https://github.com/lazily-hub/lazily-rs
@@ -396,3 +422,6 @@ notes and platform carve-outs lives in
 [js]: https://github.com/lazily-hub/lazily-js
 [dart]: https://github.com/lazily-hub/lazily-dart
 [zig]: https://github.com/lazily-hub/lazily-zig
+[cs]: https://github.com/lazily-hub/lazily-cs
+[cpp]: https://github.com/lazily-hub/lazily-cpp
+[react]: https://github.com/lazily-hub/lazily-react
