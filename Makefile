@@ -15,6 +15,13 @@ test:
 	LAZILY_CONFORMANCE_MANIFEST=$(CURDIR)/build/conformance-fixtures-loaded.txt go test ./...
 
 # CRDT/concurrency correctness under the race detector (cgo required).
+#
+# Gated by `check`, not optional. A reactive read is a graph WRITE in this
+# binding — `Get` marks, caches, and re-links edges — so an unsynchronized read
+# path is a data race that the plain `go test ./...` run cannot see. That is
+# exactly how the v0.23.2 map data race shipped: every read ran off the context
+# lock, `make check` was green, and CI caught it. Local closeout must be able to
+# catch that class too.
 race:
 	CGO_ENABLED=1 go test -race ./...
 
@@ -52,7 +59,10 @@ tidy:
 test-interop-peer:
 	CGO_ENABLED=1 go run -race ./cmd/lazily-interop-peer --self-check
 
-check: fmt-check vet build test test-interop-peer conformance-coverage
+# `race` runs after `test` on purpose: `test` truncates the conformance manifest
+# and `race` never writes it, so the recorded fixture union stays the one the
+# coverage guard is meant to audit.
+check: fmt-check vet build test race test-interop-peer conformance-coverage
 	@echo "lazily-go: check OK"
 
 # Conformance-coverage guard (#portconformancecoverage). Static: fails when the
