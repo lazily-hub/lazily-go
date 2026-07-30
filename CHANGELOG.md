@@ -150,6 +150,49 @@ No library behaviour changed — no non-test `.go` source differs from v0.23.0.
 
 ## Unreleased
 
+### Added — transport-agnostic reactive ingress, all three flavors (`#designimplementtransport`)
+
+- **`IngressCore[K, T]`** (`ingress_core.go`) — the graph-agnostic admission
+  algebra, the same core/shell split `keyedOrder` makes for the map family.
+  Keyed lifecycle scopes (Opening/Live/Suspended/Closed), a normative admission
+  order (lifecycle → generation fence → freshness → handoff → dedupe → ordering
+  → backpressure → merge), a bounded reorder buffer, a hot window coalescing
+  under `MergePolicy`, and a bounded three-channel receipt log whose offsets
+  survive eviction. Reactivity is deliberately excluded: every mutator returns an
+  `IngressChange` naming the reader kinds it dirtied, and each shell clears
+  exactly that set on its own graph. Two orderings are load-bearing and have
+  named tests — the fence outranks dedupe (else a zombie producer reads as a
+  duplicate) and freshness outranks ordering (else an expired envelope takes a
+  reorder slot). A generation handoff is a baseline reset: it discards the
+  superseded incarnation's buffered successors AND its undrained window.
+- **`IngressCell` / `ThreadSafeIngressCell` / `AsyncIngressCell`** — the three
+  flavor shells, each with four reader kinds per scope (`value` / `readiness` /
+  `authority` / `retry`), three separate receipt-channel readers, and a derived
+  `IngressSchedule`. Readiness, authority, and retry are derives, not refresh
+  calls, so a buffered out-of-order envelope, a tick inside the freshness
+  horizon, and an empty drain each invalidate nothing, and a suspend invalidates
+  readiness only. The thread-safe shell runs invalidation with the core lock
+  released and fans out through one `ts.Batch`, and takes the graph lock for
+  READS as well as writes — a `Get` of a stale derived reader is a graph
+  mutation, which is the defect `ThreadSafeReactiveMap` already shipped once. The
+  async shell publishes version inputs inside one `AsyncContext.Batch`; nothing
+  in the family is async-coloured.
+- **`IngressTransport` / `InProcIngress` / `Pump`** — the transport seam. The
+  core never touches a transport, so a WebSocket frame, an RPC response, and a
+  polled page are the same input once decoded. A bounded-polling transport
+  answers `false` to a replay request, which makes "this gap will never close"
+  observable rather than silent. Backpressure reuses the relay `Overflow`
+  algebra, validated against the merge policy's `Conflates` flag at
+  construction; `Block` refuses WITHOUT advancing the watermark, so the
+  producer's retry is in-order rather than a duplicate.
+- **Conformance** — all seven `lazily-spec/conformance/ingress/*.json` fixtures
+  replayed against all three flavors through one `ingressFixtureModel`, with
+  `invalidates` asserted per reader kind in BOTH directions via a recompute
+  probe (over-invalidation is as visible as under-), a positive step-count
+  assertion per flavor, a filesystem-enforced (primitive × flavor) ledger, and a
+  `-race` gate for the thread-safe flavor. Eight mutation probes are recorded in
+  the runner tail; all eight go red.
+
 ### Added — disposal, teardown scopes, and edge-degree introspection (`#lzspecedgeindex`)
 
 - **`Slot.Dispose`, `Cell.Dispose`, `Memo.DisposeNode`, `Signal.DisposeNode`.**
