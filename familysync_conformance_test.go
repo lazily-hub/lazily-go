@@ -122,6 +122,14 @@ func TestFamilySyncMaterializeOnIngestConformance(t *testing.T) {
 	ns := fx.Namespace
 
 	for index, sc := range fx.Scenarios {
+		// DELIBERATE mutation probe (#lzguardsnotinci), throwaway branch only.
+		// Skipping a whole scenario is invisible to rungs 1-3 — the fixture is
+		// still opened, and a block no runner reaches carries no unconsumed and
+		// no unasserted key. Only rung 4 can see it, and rung 4 only runs if CI
+		// invokes the coverage script.
+		if sc.Name == "membership only grows and re-ingest is idempotent" {
+			continue
+		}
 		// Rung 4 (#lzscenariocoverage): record at the point of replay.
 		label := recordScenarioAt("familysync/materialize_on_ingest.json", index, "", sc.Name)
 		t.Run(label, func(t *testing.T) {
