@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -398,9 +400,83 @@ func TestIPCConformanceAssertionDrift(t *testing.T) {
 // agent-doc state-projection conformance fixtures
 // ---------------------------------------------------------------------------
 
+// agentDocSchemaVersionFallback is the vocabulary revision the hardcoded
+// fallback below transcribes. It travels with that list: a fallback edited
+// without bumping this is a fallback claiming to be a revision it is not.
+const agentDocSchemaVersionFallback = "1.1.0"
+
+// agentDocSchemaVersion reports the SemVer of the canonical vocabulary the
+// replay is validating against — from the spec checkout when present, else the
+// revision the transcribed fallback pins.
+func agentDocSchemaVersion(t *testing.T) string {
+	t.Helper()
+	for _, dir := range []string{
+		filepath.Join("schemas"),
+		filepath.Join("..", "lazily-spec", "schemas"),
+	} {
+		raw, err := specReadFile(filepath.Join(dir, "agent-doc-state.json"))
+		if err != nil {
+			continue
+		}
+		var schema struct {
+			SchemaVersion string `json:"schema_version"`
+		}
+		if err := json.Unmarshal(raw, &schema); err == nil && schema.SchemaVersion != "" {
+			return schema.SchemaVersion
+		}
+	}
+	return agentDocSchemaVersionFallback
+}
+
+// assertAgentDocSchemaVersion checks the fixture's `schema_version` against the
+// vocabulary the replay actually validates type_tags with.
+//
+// The key was decoded and dropped: the runner pinned an eight-tag vocabulary and
+// never asked which revision of that vocabulary the fixture was written for, so
+// a fixture carried forward across a MAJOR bump — the schema's own rule is that
+// a renamed or removed type_tag bumps major — would still have been checked
+// against the new vocabulary and passed. The schema's compatibility rule is the
+// assertion: same major, and no minor the local vocabulary does not yet have.
+func assertAgentDocSchemaVersion(t *testing.T, fixture conformanceFixture, name string) {
+	t.Helper()
+	if fixture.SchemaVersion == "" {
+		t.Fatalf("%s: fixture states no schema_version; the type_tag vocabulary it is checked against is unpinned", name)
+	}
+	local := agentDocSchemaVersion(t)
+	fixMajor, fixMinor := agentDocSemver(t, name+" fixture", fixture.SchemaVersion)
+	locMajor, locMinor := agentDocSemver(t, name+" schema", local)
+	if fixMajor != locMajor {
+		t.Fatalf("%s: fixture schema_version %s and vocabulary %s differ in major — a renamed or removed type_tag means the replay is validating against a vocabulary the fixture was never written for",
+			name, fixture.SchemaVersion, local)
+	}
+	if fixMinor > locMinor {
+		t.Fatalf("%s: fixture schema_version %s is newer than the vocabulary %s the replay validates against — the fixture may name type_tags this checkout does not know",
+			name, fixture.SchemaVersion, local)
+	}
+}
+
+// agentDocSemver splits a `major.minor.patch` pin into the two components the
+// schema's compatibility rule is written in.
+func agentDocSemver(t *testing.T, what, version string) (int, int) {
+	t.Helper()
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		t.Fatalf("%s: schema_version %q is not major.minor.patch", what, version)
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		t.Fatalf("%s: schema_version %q has a non-numeric major", what, version)
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		t.Fatalf("%s: schema_version %q has a non-numeric minor", what, version)
+	}
+	return major, minor
+}
+
 // agentDocTypeTagVocabulary loads the pinned eight-value type_tag vocabulary
 // from the canonical schema when the spec checkout is present, else falls back
-// to the pinned 1.0.0 set (mirroring lazily-kt).
+// to the pinned set (mirroring lazily-kt).
 func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
 	t.Helper()
 	fallback := []string{
@@ -505,6 +581,7 @@ func TestIPCConformanceAgentDocSnapshot(t *testing.T) {
 	if f.Kind != "Snapshot" {
 		t.Fatalf("kind = %q, want Snapshot", f.Kind)
 	}
+	assertAgentDocSchemaVersion(t, f, "agent-doc/snapshot_agent_doc_state.json")
 	msg := decodeWire(t, f)
 	snap := msg.(IpcMessageSnapshot).Value
 	vocab := agentDocTypeTagVocabulary(t)
@@ -561,6 +638,7 @@ func TestIPCConformanceAgentDocDelta(t *testing.T) {
 	if f.Kind != "Delta" {
 		t.Fatalf("kind = %q, want Delta", f.Kind)
 	}
+	assertAgentDocSchemaVersion(t, f, "agent-doc/delta_agent_doc_state.json")
 	msg := decodeWire(t, f)
 	d := msg.(IpcMessageDelta).Value
 	vocab := agentDocTypeTagVocabulary(t)

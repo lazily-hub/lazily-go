@@ -14,12 +14,19 @@ type outboxStoreFixture struct {
 		PutEpochs  []Epoch `json:"put_epochs"`
 		ScanAfter  Epoch   `json:"scan_after"`
 		AckThrough []Epoch `json:"ack_through"`
-		// `restart` and `open_handles` were the scenario's setup, hard-coded in
-		// the runner: it always reopened from disk and always opened exactly the
-		// two handles named "stale" and "current".
-		Restart     bool     `json:"restart"`
-		OpenHandles []string `json:"open_handles"`
-		SaveCursor  []struct {
+		// `restart` and `open_handles` are the scenario's setup. They were
+		// decoded and dropped: the runner always reopened from disk and always
+		// opened exactly the two handles named "stale" and "current", so a
+		// fixture that stopped asking for a restart, or renamed a handle, would
+		// have gone on passing against the runner's own hardcoded setup.
+		//
+		// ReopensFromDisk is spelled unlike its json key on purpose:
+		// TestConformanceStructFieldsAreRead resolves reads by name, and Topic
+		// already has a Restart() method, so a field named `Restart` reads as
+		// consumed whether or not anything here ever touches it.
+		ReopensFromDisk bool     `json:"restart"`
+		OpenHandles     []string `json:"open_handles"`
+		SaveCursor      []struct {
 			Handle string `json:"handle"`
 			Epoch  Epoch  `json:"epoch"`
 		} `json:"save_cursor"`
@@ -51,12 +58,19 @@ func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) 
 	PutEpochs  []Epoch `json:"put_epochs"`
 	ScanAfter  Epoch   `json:"scan_after"`
 	AckThrough []Epoch `json:"ack_through"`
-	// `restart` and `open_handles` were the scenario's setup, hard-coded in
-	// the runner: it always reopened from disk and always opened exactly the
-	// two handles named "stale" and "current".
-	Restart     bool     `json:"restart"`
-	OpenHandles []string `json:"open_handles"`
-	SaveCursor  []struct {
+	// `restart` and `open_handles` are the scenario's setup. They were
+	// decoded and dropped: the runner always reopened from disk and always
+	// opened exactly the two handles named "stale" and "current", so a
+	// fixture that stopped asking for a restart, or renamed a handle, would
+	// have gone on passing against the runner's own hardcoded setup.
+	//
+	// ReopensFromDisk is spelled unlike its json key on purpose:
+	// TestConformanceStructFieldsAreRead resolves reads by name, and Topic
+	// already has a Restart() method, so a field named `Restart` reads as
+	// consumed whether or not anything here ever touches it.
+	ReopensFromDisk bool     `json:"restart"`
+	OpenHandles     []string `json:"open_handles"`
+	SaveCursor      []struct {
 		Handle string `json:"handle"`
 		Epoch  Epoch  `json:"epoch"`
 	} `json:"save_cursor"`
@@ -133,6 +147,11 @@ func TestOutboxStoreProtocol(t *testing.T) {
 	for _, epoch := range restart.AckThrough {
 		first.AckThrough(epoch)
 	}
+	// The reopen is what the fixture asks for, not what the runner assumes: the
+	// reload assertions below are only about a reload if a reload happened.
+	if !restart.ReopensFromDisk {
+		t.Fatalf("scenario %q does not set restart — without a reopen the loaded-cursor assertions read the live handle and prove nothing", restart.Name)
+	}
 	reopened, err := NewFileOutbox(path)
 	if err != nil {
 		t.Fatal(err)
@@ -156,15 +175,36 @@ func TestFileOutboxCursorRecordsAreSerializedMonotone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handles := map[string]*DurableStoreOutbox[*FileOutboxStore]{
-		"stale":   NewDurableStoreOutbox(staleStore),
-		"current": NewDurableStoreOutbox(currentStore),
+	// The handle set comes from the fixture. It used to be the pair
+	// {"stale", "current"} written into the runner, so `open_handles` decoded
+	// into a field nothing read and the scenario could rename or add a handle
+	// without the replay noticing.
+	if len(scenario.OpenHandles) != 2 {
+		t.Fatalf("scenario %q opens %d handles; the regression it describes needs two concurrent handles over one file",
+			scenario.Name, len(scenario.OpenHandles))
+	}
+	stores := []*FileOutboxStore{staleStore, currentStore}
+	handles := map[string]*DurableStoreOutbox[*FileOutboxStore]{}
+	for i, name := range scenario.OpenHandles {
+		handles[name] = NewDurableStoreOutbox(stores[i])
 	}
 	for _, save := range scenario.SaveCursor {
-		handles[save.Handle].AckThrough(save.Epoch)
+		handle, open := handles[save.Handle]
+		if !open {
+			t.Fatalf("scenario %q saves through handle %q, which open_handles does not open", scenario.Name, save.Handle)
+		}
+		handle.AckThrough(save.Epoch)
 	}
-	if cursor := handles["stale"].AckedThrough(); cursor != scenario.Expect.LoadedCursor {
-		t.Fatalf("stale handle observed cursor %d", cursor)
+	// EVERY open handle must observe the surviving cursor, not just the one the
+	// runner happened to name: that is what "cannot regress" means when the
+	// later save carries the lower epoch.
+	for _, name := range scenario.OpenHandles {
+		if cursor := handles[name].AckedThrough(); cursor != scenario.Expect.LoadedCursor {
+			t.Fatalf("handle %q observed cursor %d, want %d", name, cursor, scenario.Expect.LoadedCursor)
+		}
+	}
+	if !scenario.ReopensFromDisk {
+		t.Fatalf("scenario %q does not set restart — the serialized-cursor assertion below needs a fresh handle over the same file", scenario.Name)
 	}
 	reopened, err := NewFileOutboxStore(path)
 	if err != nil {

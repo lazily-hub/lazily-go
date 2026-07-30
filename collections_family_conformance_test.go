@@ -309,23 +309,39 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 	}
 
 	consumeFixtureKeys(t, name, fixture, "initial", "steps")
-	initial, _ := fixture["initial"].(map[string]any)
-	if initial == nil {
-		t.Fatalf("%s: fixture has no initial state", flavor.name())
-	}
-	seed := stringSlice(initial["order"])
-	if len(seed) == 0 {
-		t.Fatalf("%s: fixture %s seeds no keys", flavor.name(), name)
-	}
-	values, _ := initial["values"].(map[string]any)
-	for _, key := range seed {
-		v, present := values[key]
-		if !present {
-			t.Fatalf("%s: no initial value for key %s", flavor.name(), key)
+	excuseKey(t, fixture, "steps", "replay input: the step list drives the loop below, and each step's own `expected` block is asserted there")
+	// Seeding is also an assertion: this flavor must actually hold the state the
+	// fixture says the replay starts from, or every step below measures a
+	// different graph than the corpus describes.
+	assertKeyWith(t, fixture, "initial", func(want any) {
+		initial, _ := want.(map[string]any)
+		if initial == nil {
+			t.Fatalf("%s: fixture has no initial state", flavor.name())
 		}
-		num, _ := v.(float64)
-		flavor.insert(key, int(num))
-	}
+		seed := stringSlice(initial["order"])
+		if len(seed) == 0 {
+			t.Fatalf("%s: fixture %s seeds no keys", flavor.name(), name)
+		}
+		values, _ := initial["values"].(map[string]any)
+		for _, key := range seed {
+			v, present := values[key]
+			if !present {
+				t.Fatalf("%s: no initial value for key %s", flavor.name(), key)
+			}
+			num, _ := v.(float64)
+			flavor.insert(key, int(num))
+		}
+		if got := flavor.keysUntracked(); !sameOrder(seed, got) {
+			t.Fatalf("%s: seeded order = %v, want %v", flavor.name(), got, seed)
+		}
+		for _, key := range seed {
+			num, _ := values[key].(float64)
+			got, present := flavor.valueUntracked(key)
+			if !present || got != int(num) {
+				t.Fatalf("%s: seeded value for %s = %d (present=%v), want %d", flavor.name(), key, got, present, int(num))
+			}
+		}
+	})
 
 	steps, _ := fixture["steps"].([]any)
 	// A zero-step replay asserts nothing and still reports green.
@@ -340,8 +356,9 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		op, _ := step["op"].(map[string]any)
 		expected := consumeKeys(t, where(i)+" expected", mapOf(step["expected"]),
 			"invalidates", "handle_stable", "order", "membership", "values")
-		consumeKeys(t, where(i)+" expected.invalidates", mapOf(expected["invalidates"]),
+		invalidatesBlock := consumeKeys(t, where(i)+" expected.invalidates", mapOf(expected["invalidates"]),
 			"value", "membership", "order")
+		excuseKey(t, expected, "invalidates", "container: its three reader classes are asserted key-by-key against the expected.invalidates block below")
 		if op == nil || expected == nil {
 			t.Fatalf("%s: missing op or expected", where(i))
 		}
@@ -406,83 +423,119 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 			t.Fatalf("%s: unsupported op %v - an unknown op must fail, never silently skip", where(i), op["type"])
 		}
 
-		wantOrder := stringSlice(expected["order"])
 		gotOrder := flavor.keysUntracked()
-		if !sameOrder(wantOrder, gotOrder) {
-			t.Fatalf("%s: order = %v, want %v", where(i), gotOrder, wantOrder)
+		assertKeyWith(t, expected, "order", func(want any) {
+			if wantOrder := stringSlice(want); !sameOrder(wantOrder, gotOrder) {
+				t.Fatalf("%s: order = %v, want %v", where(i), gotOrder, wantOrder)
+			}
+		})
+
+		// `membership` was declared as consumed and then never read: the runner
+		// named it in the consumeKeys list and asserted the ORDER instead, so a
+		// fixture whose set-identity claim drifted from its order claim would
+		// have gone on passing. Order is a sequence, membership is a set — a
+		// pure reorder leaves the second unchanged, which is the whole point of
+		// the separate reader class asserted below.
+		if _, stated := expected["membership"]; stated {
+			assertKeyWith(t, expected, "membership", func(want any) {
+				wantSet := stringSlice(want)
+				if len(wantSet) != len(gotOrder) {
+					t.Fatalf("%s: membership = %v, want set %v", where(i), gotOrder, wantSet)
+				}
+				present := map[string]bool{}
+				for _, key := range gotOrder {
+					present[key] = true
+				}
+				for _, key := range wantSet {
+					if !present[key] {
+						t.Fatalf("%s: membership = %v, want set %v (missing %s)", where(i), gotOrder, wantSet, key)
+					}
+				}
+			})
 		}
 
-		if wantValues, ok := expected["values"].(map[string]any); ok {
-			for key, raw := range wantValues {
-				num, _ := raw.(float64)
-				got, present := flavor.valueUntracked(key)
-				if !present {
-					t.Fatalf("%s: value for %s is absent", where(i), key)
+		if _, stated := expected["values"]; stated {
+			assertKeyWith(t, expected, "values", func(want any) {
+				wantValues, _ := want.(map[string]any)
+				for key, raw := range wantValues {
+					num, _ := raw.(float64)
+					got, present := flavor.valueUntracked(key)
+					if !present {
+						t.Fatalf("%s: value for %s is absent", where(i), key)
+					}
+					if got != int(num) {
+						t.Fatalf("%s: value for %s = %d, want %d", where(i), key, got, int(num))
+					}
 				}
-				if got != int(num) {
-					t.Fatalf("%s: value for %s = %d, want %d", where(i), key, got, int(num))
-				}
-			}
+			})
 		}
 
 		// The invalidation matrix, read from expected.invalidates — where the
 		// fixtures actually nest it. lazily-rs read it off the step instead, so
 		// its assertion never ran once.
-		invalidates, ok := expected["invalidates"].(map[string]any)
-		if !ok {
+		if invalidatesBlock == nil {
 			t.Fatalf("%s: expected.invalidates is missing - the matrix is the contract", where(i))
 		}
 		matrices++
 
-		dirty := map[string]bool{}
-		for _, key := range stringSlice(invalidates["value"]) {
-			dirty[key] = true
-		}
 		survivors := map[string]bool{}
 		for _, key := range gotOrder {
 			survivors[key] = true
 		}
-		for key, r := range valueReaders {
-			if !survivors[key] {
-				continue // removed by this op: no entry left to read
+		assertKeyWith(t, invalidatesBlock, "value", func(want any) {
+			dirty := map[string]bool{}
+			for _, key := range stringSlice(want) {
+				dirty[key] = true
 			}
-			recomputed := r.drive() != baseline[key]
-			if dirty[key] && !recomputed {
-				t.Fatalf("%s: value reader for %s should have been invalidated", where(i), key)
+			for key, r := range valueReaders {
+				if !survivors[key] {
+					continue // removed by this op: no entry left to read
+				}
+				recomputed := r.drive() != baseline[key]
+				if dirty[key] && !recomputed {
+					t.Fatalf("%s: value reader for %s should have been invalidated", where(i), key)
+				}
+				if !dirty[key] && recomputed {
+					t.Fatalf("%s: value reader for %s should have stayed cached - per-entry independence is the whole point", where(i), key)
+				}
 			}
-			if !dirty[key] && recomputed {
-				t.Fatalf("%s: value reader for %s should have stayed cached - per-entry independence is the whole point", where(i), key)
-			}
-		}
+		})
 
-		wantMembershipDirty, _ := invalidates["membership"].(bool)
-		if got := membership.drive() != membershipBase; got != wantMembershipDirty {
-			t.Fatalf("%s: membership reader invalidated=%v, want %v - a pure reorder must NOT invalidate set-identity readers",
-				where(i), got, wantMembershipDirty)
-		}
+		assertKeyWith(t, invalidatesBlock, "membership", func(want any) {
+			wantMembershipDirty, _ := want.(bool)
+			if got := membership.drive() != membershipBase; got != wantMembershipDirty {
+				t.Fatalf("%s: membership reader invalidated=%v, want %v - a pure reorder must NOT invalidate set-identity readers",
+					where(i), got, wantMembershipDirty)
+			}
+		})
 
-		wantOrderDirty, _ := invalidates["order"].(bool)
-		if got := order.drive() != orderBase; got != wantOrderDirty {
-			t.Fatalf("%s: order reader invalidated=%v, want %v", where(i), got, wantOrderDirty)
-		}
+		assertKeyWith(t, invalidatesBlock, "order", func(want any) {
+			wantOrderDirty, _ := want.(bool)
+			if got := order.drive() != orderBase; got != wantOrderDirty {
+				t.Fatalf("%s: order reader invalidated=%v, want %v", where(i), got, wantOrderDirty)
+			}
+		})
 
 		// Handle stability: the law that separates an atomic move from a remove +
 		// re-mint. A reorder keeps the entry's node, so dependents and lineage
 		// survive.
-		if stable, ok := expected["handle_stable"].(map[string]any); ok {
-			for key, raw := range stable {
-				want, _ := raw.(bool)
-				after, present := flavor.entryID(key)
-				before, had := idsBefore[key]
-				if want {
-					if !had || !present || before != after {
-						t.Fatalf("%s: entry identity for %s must survive the move - a reorder that re-mints is a remove + insert",
-							where(i), key)
+		if _, stated := expected["handle_stable"]; stated {
+			assertKeyWith(t, expected, "handle_stable", func(raw any) {
+				stable, _ := raw.(map[string]any)
+				for key, rawWant := range stable {
+					want, _ := rawWant.(bool)
+					after, present := flavor.entryID(key)
+					before, had := idsBefore[key]
+					if want {
+						if !had || !present || before != after {
+							t.Fatalf("%s: entry identity for %s must survive the move - a reorder that re-mints is a remove + insert",
+								where(i), key)
+						}
+					} else if had && present && before == after {
+						t.Fatalf("%s: entry identity for %s should have changed", where(i), key)
 					}
-				} else if had && present && before == after {
-					t.Fatalf("%s: entry identity for %s should have changed", where(i), key)
 				}
-			}
+			})
 		}
 	}
 

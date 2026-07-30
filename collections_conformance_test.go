@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -141,11 +142,26 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 	m := NewSourceMap[string, int](ctx)
 
 	consumeFixtureKeys(t, name, fixture, "initial", "steps")
-	initial := jsMap(fixture["initial"])
-	values := jsMap(initial["values"])
-	for _, k := range jsStrList(initial["order"]) {
-		m.Set(k, jsInt(values[k]))
-	}
+	excuseKey(t, fixture, "steps", "replay input: the step list drives the loop below, and each step's own `expected` block is asserted there")
+	assertKeyWith(t, fixture, "initial", func(want any) {
+		// Seeding is also an assertion: the map must actually hold the state the
+		// fixture says it starts from, or every step below measures a different
+		// graph than the corpus describes.
+		initial := jsMap(want)
+		values := jsMap(initial["values"])
+		order := jsStrList(initial["order"])
+		for _, k := range order {
+			m.Set(k, jsInt(values[k]))
+		}
+		if got := m.Keys(ctx); !reflect.DeepEqual(got, order) {
+			t.Fatalf("%s: seeded order = %v, want %v", name, got, order)
+		}
+		for _, k := range order {
+			if got, _ := m.Get(k); got != jsInt(values[k]) {
+				t.Fatalf("%s: seeded value[%s] = %d, want %d", name, k, got, jsInt(values[k]))
+			}
+		}
+	})
 
 	for i, rawStep := range jsList(fixture["steps"]) {
 		step := jsMap(rawStep)
@@ -154,6 +170,7 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 			"invalidates", "handle_stable", "order", "membership", "values")
 		invalidates := consumeKeys(t, fmt.Sprintf("%s step %d expected.invalidates", name, i),
 			jsMap(expected["invalidates"]), "value", "membership", "order")
+		excuseKey(t, expected, "invalidates", "container: its three reader classes are asserted key-by-key against the expected.invalidates block below")
 
 		// Prime readers against the CURRENT key set so each step's invalidation
 		// is measured in isolation (matches lazily-rs / lazily-dart).
@@ -169,11 +186,13 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 		orderReader := NewSlot(ctx, func(c *Compute) int { Get(c, m.orderSignal); return 0 })
 		orderReader.Get()
 
-		// Snapshot handles for stability assertions.
-		handleStable := jsMap(expected["handle_stable"])
+		// Snapshot handles for stability assertions. Every key the fixture names
+		// is snapshotted, not only the ones it expects to survive: a `false`
+		// entry is the claim that the identity CHANGED, and without a before
+		// there is nothing to compare it to.
 		handlesBefore := map[string]*Source[int]{}
-		for k, v := range handleStable {
-			if v == true {
+		for k := range jsMap(expected["handle_stable"]) {
+			if _, present := m.Get(k); present {
 				handlesBefore[k] = m.Cell(k)
 			}
 		}
@@ -181,62 +200,83 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 		applySourceMapOp(m, op)
 
 		// Value readers: only survivor keys are checked (removed keys are not).
-		expectedValueInval := map[string]bool{}
-		for _, k := range jsStrList(invalidates["value"]) {
-			expectedValueInval[k] = true
-		}
 		survivors := map[string]bool{}
 		for _, k := range m.Keys(ctx) {
 			survivors[k] = true
 		}
-		for k, slot := range valueReaders {
-			if !survivors[k] {
-				continue
+		assertKeyWith(t, invalidates, "value", func(want any) {
+			expectedValueInval := map[string]bool{}
+			for _, k := range jsStrList(want) {
+				expectedValueInval[k] = true
 			}
-			_, warm := slot.Peek()
-			wantInval := expectedValueInval[k]
-			if warm == wantInval {
-				t.Errorf("%s step %d %s: value reader %q warm=%v, wantInvalidated=%v",
-					name, i, op["type"], k, warm, wantInval)
-			}
-		}
-
-		_, memWarm := membershipReader.Peek()
-		memInval := invalidates["membership"] == true
-		if memWarm == memInval {
-			t.Errorf("%s step %d %s: membership warm=%v, wantInvalidated=%v",
-				name, i, op["type"], memWarm, memInval)
-		}
-		_, ordWarm := orderReader.Peek()
-		ordInval := invalidates["order"] == true
-		if ordWarm == ordInval {
-			t.Errorf("%s step %d %s: order warm=%v, wantInvalidated=%v",
-				name, i, op["type"], ordWarm, ordInval)
-		}
-
-		// Resulting state.
-		if got := m.Keys(ctx); !reflect.DeepEqual(got, jsStrList(expected["order"])) {
-			t.Errorf("%s step %d %s: order = %v, want %v", name, i, op["type"], got, jsStrList(expected["order"]))
-		}
-		if !sameStringSet(m.Keys(ctx), jsStrList(expected["membership"])) {
-			t.Errorf("%s step %d %s: membership = %v, want set %v", name, i, op["type"], m.Keys(ctx), jsStrList(expected["membership"]))
-		}
-		if ev := jsMap(expected["values"]); ev != nil {
-			for k, want := range ev {
-				if got, _ := m.Get(k); got != jsInt(want) {
-					t.Errorf("%s step %d %s: value[%s] = %d, want %d", name, i, op["type"], k, got, jsInt(want))
+			for k, slot := range valueReaders {
+				if !survivors[k] {
+					continue
+				}
+				_, warm := slot.Peek()
+				wantInval := expectedValueInval[k]
+				if warm == wantInval {
+					t.Errorf("%s step %d %s: value reader %q warm=%v, wantInvalidated=%v",
+						name, i, op["type"], k, warm, wantInval)
 				}
 			}
+		})
+
+		assertKeyWith(t, invalidates, "membership", func(want any) {
+			_, memWarm := membershipReader.Peek()
+			if memWarm == (want == true) {
+				t.Errorf("%s step %d %s: membership warm=%v, wantInvalidated=%v",
+					name, i, op["type"], memWarm, want)
+			}
+		})
+		assertKeyWith(t, invalidates, "order", func(want any) {
+			_, ordWarm := orderReader.Peek()
+			if ordWarm == (want == true) {
+				t.Errorf("%s step %d %s: order warm=%v, wantInvalidated=%v",
+					name, i, op["type"], ordWarm, want)
+			}
+		})
+
+		// Resulting state.
+		assertKey(t, expected, "order", m.Keys(ctx))
+		assertKeyWith(t, expected, "membership", func(want any) {
+			if !sameStringSet(m.Keys(ctx), jsStrList(want)) {
+				t.Errorf("%s step %d %s: membership = %v, want set %v", name, i, op["type"], m.Keys(ctx), jsStrList(want))
+			}
+		})
+		if _, stated := expected["values"]; stated {
+			assertKeyWith(t, expected, "values", func(want any) {
+				for k, v := range jsMap(want) {
+					if got, _ := m.Get(k); got != jsInt(v) {
+						t.Errorf("%s step %d %s: value[%s] = %d, want %d", name, i, op["type"], k, got, jsInt(v))
+					}
+				}
+			})
 		}
 
 		// Handle stability: same *Cell identity before and after.
-		for k, before := range handlesBefore {
-			after := m.Cell(k)
-			if after == nil {
-				t.Errorf("%s step %d: handle %q missing after op", name, i, k)
-			} else if before != after {
-				t.Errorf("%s step %d %s: handle %q not stable", name, i, op["type"], k)
-			}
+		if _, stated := expected["handle_stable"]; stated {
+			assertKeyWith(t, expected, "handle_stable", func(want any) {
+				for k, raw := range jsMap(want) {
+					before, snapped := handlesBefore[k]
+					after := m.Cell(k)
+					if raw != true {
+						// The fixture claims this handle is NOT stable, so a
+						// surviving identity is the failure.
+						if !snapped {
+							t.Errorf("%s step %d: handle_stable names %q as re-minted, but it did not exist before the op", name, i, k)
+						} else if after != nil && before == after {
+							t.Errorf("%s step %d %s: handle %q stayed stable, want re-minted", name, i, op["type"], k)
+						}
+						continue
+					}
+					if after == nil {
+						t.Errorf("%s step %d: handle %q missing after op", name, i, k)
+					} else if !snapped || before != after {
+						t.Errorf("%s step %d %s: handle %q not stable", name, i, op["type"], k)
+					}
+				}
+			})
 		}
 	}
 }
@@ -260,6 +300,8 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 		return
 	}
 	consumeFixtureKeys(t, name, fixture, "reconcile", "expected")
+	excuseKey(t, fixture, "reconcile", "replay input: the prior/target pair the diff is computed FROM; what it produces is asserted through expected.ops and expected.result_order")
+	excuseKey(t, fixture, "expected", "container: its three claims are asserted key-by-key against the expected block below")
 	reconcile := jsMap(fixture["reconcile"])
 	expected := consumeKeys(t, name+" expected", jsMap(fixture["expected"]),
 		"ops", "result_order", "stable_keys_not_invalidated")
@@ -277,63 +319,9 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 	resultOrder := jsStrList(expected["result_order"])
 
 	ops := ReconcileDiff(prior, target)
-	expectedOps := jsList(expected["ops"])
-	if len(ops) != len(expectedOps) {
-		t.Fatalf("%s: op count = %d, want %d (%v)", name, len(ops), len(expectedOps), ops)
-	}
-	for i, rawWant := range expectedOps {
-		want := jsMap(rawWant)
-		switch want["type"].(string) {
-		case "remove":
-			rem, isRem := ops[i].(DiffOpRemove[string, int])
-			if !isRem {
-				t.Errorf("%s op[%d]: want Remove, got %T", name, i, ops[i])
-			} else if rem.Key != jsStr(want["key"]) {
-				t.Errorf("%s op[%d]: remove key = %q, want %q", name, i, rem.Key, jsStr(want["key"]))
-			}
-		case "move":
-			mv, isMv := ops[i].(DiffOpMove[string, int])
-			if !isMv {
-				t.Errorf("%s op[%d]: want Move, got %T", name, i, ops[i])
-				continue
-			}
-			if mv.Key != jsStr(want["key"]) {
-				t.Errorf("%s op[%d]: move key = %q, want %q", name, i, mv.Key, jsStr(want["key"]))
-			}
-			// Resolve the fixture's relative anchor to a final index.
-			anchorIdx := func(anchor string) int {
-				for j, k := range resultOrder {
-					if k == anchor {
-						return j
-					}
-				}
-				return -1
-			}
-			if after, ok := want["after"]; ok {
-				if got, exp := mv.To, anchorIdx(jsStr(after))+1; got != exp {
-					t.Errorf("%s op[%d]: move to = %d, want %d", name, i, got, exp)
-				}
-			} else if before, ok := want["before"]; ok {
-				if got, exp := mv.To, anchorIdx(jsStr(before)); got != exp {
-					t.Errorf("%s op[%d]: move to = %d, want %d", name, i, got, exp)
-				}
-			}
-		case "insert":
-			ins, isIns := ops[i].(DiffOpInsert[string, int])
-			if !isIns {
-				t.Errorf("%s op[%d]: want Insert, got %T", name, i, ops[i])
-			} else if ins.Key != jsStr(want["key"]) {
-				t.Errorf("%s op[%d]: insert key = %q, want %q", name, i, ins.Key, jsStr(want["key"]))
-			}
-		case "update":
-			upd, isUpd := ops[i].(DiffOpUpdate[string, int])
-			if !isUpd {
-				t.Errorf("%s op[%d]: want Update, got %T", name, i, ops[i])
-			} else if upd.Key != jsStr(want["key"]) {
-				t.Errorf("%s op[%d]: update key = %q, want %q", name, i, upd.Key, jsStr(want["key"]))
-			}
-		}
-	}
+	assertKeyWith(t, expected, "ops", func(wantOps any) {
+		assertReconcileOps(t, name, ops, jsList(wantOps), resultOrder)
+	})
 
 	// Convergence: applying the minimal op set reproduces result_order.
 	ctx := NewContext()
@@ -348,25 +336,28 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 		targetValues[e.Key] = e.Value
 	}
 	m.Reconcile(targetOrder, targetValues)
-	if got := m.Keys(ctx); !reflect.DeepEqual(got, resultOrder) {
-		t.Errorf("%s: convergence order = %v, want %v", name, got, resultOrder)
-	}
+	assertKey(t, expected, "result_order", m.Keys(ctx))
 
 	// stable_keys_not_invalidated: prime readers, run a no-op reconcile, assert warm.
-	stableKeys := jsStrList(expected["stable_keys_not_invalidated"])
-	readers := map[string]*Computed[int]{}
-	for _, k := range stableKeys {
-		key := k
-		slot := NewSlot(ctx, func(c *Compute) int { v, _ := m.Read(key); return v })
-		slot.Get()
-		readers[key] = slot
-	}
-	m.Reconcile(targetOrder, targetValues) // no-op
-	for _, k := range stableKeys {
-		if _, warm := readers[k].Peek(); !warm {
-			t.Errorf("%s: stable key %q invalidated by sibling reorder", name, k)
+	assertKeyWith(t, expected, "stable_keys_not_invalidated", func(want any) {
+		stableKeys := jsStrList(want)
+		if len(stableKeys) == 0 {
+			t.Fatalf("%s: stable_keys_not_invalidated is empty; the no-op reconcile below would assert nothing", name)
 		}
-	}
+		readers := map[string]*Computed[int]{}
+		for _, k := range stableKeys {
+			key := k
+			slot := NewSlot(ctx, func(c *Compute) int { v, _ := m.Read(key); return v })
+			slot.Get()
+			readers[key] = slot
+		}
+		m.Reconcile(targetOrder, targetValues) // no-op
+		for _, k := range stableKeys {
+			if _, warm := readers[k].Peek(); !warm {
+				t.Errorf("%s: stable key %q invalidated by sibling reorder", name, k)
+			}
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -421,25 +412,45 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 		return
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
+	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect_initial / expect_after blocks are asserted in the subtest below")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario,
 				"name", "fold", "tree", "expect_initial", "expect_after", "edit", "remove_child")
+			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKey(t, scenario, "fold", "discriminator: selects which fold is built; what the fold computes is asserted through expect_initial and expect_after")
+			excuseKey(t, scenario, "tree", "replay input: the tree the fold is built over; the derived values it produces are asserted through expect_initial")
+			excuseKeys(t, scenario, "replay input: the mutation whose effect expect_after asserts", "edit", "remove_child")
 			ctx := NewContext()
 			fold := semFold(jsStr(scenario["fold"]))
 			tree := BuildSemTree(ctx, parseTreeNode(jsMap(scenario["tree"])), fold)
 
 			// Prime + assert initial derived values.
-			if init := jsMap(scenario["expect_initial"]); init != nil {
-				for id, want := range init {
-					if id == "sibling_a_cached" || id == "downstream_consumer_reran" {
-						continue
+			//
+			// The two reserved keys used to be `continue`d past here — read out
+			// of the block, which marked them consumed, and then dropped. They
+			// are now handled: `sibling_a_cached` is an observable fact about
+			// the tree before any edit, and `downstream_consumer_reran` cannot
+			// be stated before there is an edit to re-run from, so a fixture
+			// that states it here is wrong rather than ignorable.
+			if _, stated := scenario["expect_initial"]; stated {
+				assertKeyWith(t, scenario, "expect_initial", func(want any) {
+					for id, value := range jsMap(want) {
+						switch id {
+						case "sibling_a_cached":
+							if got := tree.IsCached("a"); got != (value == true) {
+								t.Errorf("initial sibling_a_cached = %v, want %v", got, value)
+							}
+						case "downstream_consumer_reran":
+							t.Errorf("expect_initial states downstream_consumer_reran; there has been no edit to re-run from")
+						default:
+							if got, _ := tree.NodeValue(id); got != jsInt(value) {
+								t.Errorf("initial %s = %d, want %d", id, got, jsInt(value))
+							}
+						}
 					}
-					if got, _ := tree.NodeValue(id); got != jsInt(want) {
-						t.Errorf("initial %s = %d, want %d", id, got, jsInt(want))
-					}
-				}
+				})
 			}
 
 			// The memo-guard contract is "downstream did not RE-RUN", so it is
@@ -466,6 +477,7 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 			}
 			runsBefore := downstreamRuns
 
+			mutated := false
 			if edit := jsMap(scenario["edit"]); edit != nil {
 				if err := tree.SetValue(jsStr(edit["id"]), jsInt(edit["value"])); err != nil {
 					t.Fatalf("edit: %v", err)
@@ -473,7 +485,10 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 				if downstream != nil {
 					downstream.Get() // pull the consumer, as rs and js do
 				}
-				checkSemTreeAfter(t, tree, after, downstreamRuns > runsBefore)
+				mutated = true
+				assertKeyWith(t, scenario, "expect_after", func(want any) {
+					checkSemTreeAfter(t, tree, jsMap(want), downstreamRuns > runsBefore)
+				})
 			}
 
 			if rc := jsMap(scenario["remove_child"]); rc != nil {
@@ -483,7 +498,13 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 				if downstream != nil {
 					downstream.Get() // pull the consumer, as rs and js do
 				}
-				checkSemTreeAfter(t, tree, after, downstreamRuns > runsBefore)
+				mutated = true
+				assertKeyWith(t, scenario, "expect_after", func(want any) {
+					checkSemTreeAfter(t, tree, jsMap(want), downstreamRuns > runsBefore)
+				})
+			}
+			if !mutated {
+				t.Fatalf("scenario states expect_after but neither edit nor remove_child: nothing changed, so expect_after asserts nothing")
 			}
 		})
 	}
@@ -524,6 +545,7 @@ func TestCollectionsSeqCrdtConvergence(t *testing.T) {
 		return
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
+	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
@@ -531,6 +553,10 @@ func TestCollectionsSeqCrdtConvergence(t *testing.T) {
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"orders_equal", "order_on", "order", "len", "get", "get_on",
 				"contains_all", "not_contains_on")
+			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "replay input: seeds the replicas and drives the ops; what they produce is asserted through the expect block",
+				"replica", "seed", "steps")
+			excuseKey(t, scenario, "expect", "container: asserted key-by-key in checkSeqCrdtExpect")
 			replicas := map[string]*SeqCrdt[string, any]{}
 
 			seedPeer := int64(1)
@@ -610,61 +636,73 @@ func checkSeqCrdtExpect(t *testing.T, replicas map[string]*SeqCrdt[string, any],
 		}
 	}
 
-	if order, ok := expect["order"]; ok {
-		if got, want := replicas[primary].Order(), jsStrList(order); !reflect.DeepEqual(got, want) {
-			t.Errorf("order = %v, want %v", got, want)
-		}
+	if _, stated := expect["order"]; stated {
+		assertKey(t, expect, "order", replicas[primary].Order())
 	}
-	if l, ok := expect["len"]; ok {
-		if got := replicas[primary].Len(); got != jsInt(l) {
-			t.Errorf("len = %d, want %d", got, jsInt(l))
-		}
+	if _, stated := expect["len"]; stated {
+		assertKey(t, expect, "len", replicas[primary].Len())
 	}
-	if get := jsMap(expect["get"]); get != nil {
-		for id, want := range get {
-			got, _ := replicas[primary].Get(id)
-			if !reflect.DeepEqual(got, want) {
-				t.Errorf("get %s = %v, want %v", id, got, want)
-			}
-		}
-	}
-	for _, rawPair := range jsList(expect["orders_equal"]) {
-		pair := jsList(rawPair)
-		a, b := jsStr(pair[0]), jsStr(pair[1])
-		if !reflect.DeepEqual(replicas[a].Order(), replicas[b].Order()) {
-			t.Errorf("orders_equal %s/%s: %v != %v", a, b, replicas[a].Order(), replicas[b].Order())
-		}
-	}
-	for _, id := range jsList(expect["contains_all"]) {
-		if !replicas[primary].Contains(jsStr(id)) {
-			t.Errorf("contains_all: missing %v", id)
-		}
-	}
-	if oo := jsMap(expect["order_on"]); oo != nil {
-		for rep, want := range oo {
-			if got := replicas[rep].Order(); !reflect.DeepEqual(got, jsStrList(want)) {
-				t.Errorf("order_on %s = %v, want %v", rep, got, jsStrList(want))
-			}
-		}
-	}
-	if go_ := jsMap(expect["get_on"]); go_ != nil {
-		for rep, kvs := range go_ {
-			for id, want := range jsMap(kvs) {
-				got, _ := replicas[rep].Get(id)
-				if !reflect.DeepEqual(got, want) {
-					t.Errorf("get_on %s/%s = %v, want %v", rep, id, got, want)
+	if _, stated := expect["get"]; stated {
+		assertKeyWith(t, expect, "get", func(want any) {
+			for id, value := range jsMap(want) {
+				got, _ := replicas[primary].Get(id)
+				if !reflect.DeepEqual(got, value) {
+					t.Errorf("get %s = %v, want %v", id, got, value)
 				}
 			}
-		}
+		})
 	}
-	if nc := jsMap(expect["not_contains_on"]); nc != nil {
-		for rep, ids := range nc {
-			for _, id := range jsList(ids) {
-				if replicas[rep].Contains(jsStr(id)) {
-					t.Errorf("not_contains_on %s: still contains %v", rep, id)
+	if _, stated := expect["orders_equal"]; stated {
+		assertKeyWith(t, expect, "orders_equal", func(want any) {
+			for _, rawPair := range jsList(want) {
+				pair := jsList(rawPair)
+				a, b := jsStr(pair[0]), jsStr(pair[1])
+				if !reflect.DeepEqual(replicas[a].Order(), replicas[b].Order()) {
+					t.Errorf("orders_equal %s/%s: %v != %v", a, b, replicas[a].Order(), replicas[b].Order())
 				}
 			}
-		}
+		})
+	}
+	if _, stated := expect["contains_all"]; stated {
+		assertKeyWith(t, expect, "contains_all", func(want any) {
+			for _, id := range jsList(want) {
+				if !replicas[primary].Contains(jsStr(id)) {
+					t.Errorf("contains_all: missing %v", id)
+				}
+			}
+		})
+	}
+	if _, stated := expect["order_on"]; stated {
+		assertKeyWith(t, expect, "order_on", func(want any) {
+			for replica, order := range jsMap(want) {
+				if got := replicas[replica].Order(); !reflect.DeepEqual(got, jsStrList(order)) {
+					t.Errorf("order_on %s = %v, want %v", replica, got, jsStrList(order))
+				}
+			}
+		})
+	}
+	if _, stated := expect["get_on"]; stated {
+		assertKeyWith(t, expect, "get_on", func(want any) {
+			for replica, kvs := range jsMap(want) {
+				for id, value := range jsMap(kvs) {
+					got, _ := replicas[replica].Get(id)
+					if !reflect.DeepEqual(got, value) {
+						t.Errorf("get_on %s/%s = %v, want %v", replica, id, got, value)
+					}
+				}
+			}
+		})
+	}
+	if _, stated := expect["not_contains_on"]; stated {
+		assertKeyWith(t, expect, "not_contains_on", func(want any) {
+			for replica, ids := range jsMap(want) {
+				for _, id := range jsList(ids) {
+					if replicas[replica].Contains(jsStr(id)) {
+						t.Errorf("not_contains_on %s: still contains %v", replica, id)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -679,12 +717,17 @@ func TestCollectionsTextCrdtConvergence(t *testing.T) {
 		return
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
+	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario, "name", "replica", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"text", "len", "texts_equal", "a_starts_with", "a_ends_with", "tombstone_count")
+			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "replay input: seeds the replicas and drives the ops; what they produce is asserted through the expect block",
+				"replica", "seed", "steps")
+			excuseKey(t, scenario, "expect", "container: asserted key-by-key in checkTextCrdtExpect")
 			replicas := map[string]*TextCrdt{}
 			replicas["a"] = seedTextCrdt(scenario)
 			for _, rawStep := range jsList(scenario["steps"]) {
@@ -758,39 +801,41 @@ func checkTextCrdtExpect(t *testing.T, replicas map[string]*TextCrdt, expect map
 	if expect == nil {
 		return
 	}
-	if text, ok := expect["text"]; ok {
-		if got := replicas["a"].Text(); got != jsStr(text) {
-			t.Errorf("text = %q, want %q", got, jsStr(text))
-		}
+	if _, stated := expect["text"]; stated {
+		assertKey(t, expect, "text", replicas["a"].Text())
 	}
-	if l, ok := expect["len"]; ok {
-		if got := replicas["a"].Len(); got != jsInt(l) {
-			t.Errorf("len = %d, want %d", got, jsInt(l))
-		}
+	if _, stated := expect["len"]; stated {
+		assertKey(t, expect, "len", replicas["a"].Len())
 	}
-	for _, rawPair := range jsList(expect["texts_equal"]) {
-		pair := jsList(rawPair)
-		a, b := jsStr(pair[0]), jsStr(pair[1])
-		if replicas[a].Text() != replicas[b].Text() {
-			t.Errorf("texts_equal %s/%s: %q != %q", a, b, replicas[a].Text(), replicas[b].Text())
-		}
+	if _, stated := expect["texts_equal"]; stated {
+		assertKeyWith(t, expect, "texts_equal", func(want any) {
+			for _, rawPair := range jsList(want) {
+				pair := jsList(rawPair)
+				a, b := jsStr(pair[0]), jsStr(pair[1])
+				if replicas[a].Text() != replicas[b].Text() {
+					t.Errorf("texts_equal %s/%s: %q != %q", a, b, replicas[a].Text(), replicas[b].Text())
+				}
+			}
+		})
 	}
-	if p, ok := expect["a_starts_with"]; ok {
-		if txt := replicas["a"].Text(); len(txt) < len(jsStr(p)) || txt[:len(jsStr(p))] != jsStr(p) {
-			t.Errorf("a_starts_with %q: text = %q", jsStr(p), txt)
-		}
+	if _, stated := expect["a_starts_with"]; stated {
+		assertKeyWith(t, expect, "a_starts_with", func(want any) {
+			prefix := jsStr(want)
+			if txt := replicas["a"].Text(); !strings.HasPrefix(txt, prefix) {
+				t.Errorf("a_starts_with %q: text = %q", prefix, txt)
+			}
+		})
 	}
-	if s, ok := expect["a_ends_with"]; ok {
-		txt := replicas["a"].Text()
-		suf := jsStr(s)
-		if len(txt) < len(suf) || txt[len(txt)-len(suf):] != suf {
-			t.Errorf("a_ends_with %q: text = %q", suf, txt)
-		}
+	if _, stated := expect["a_ends_with"]; stated {
+		assertKeyWith(t, expect, "a_ends_with", func(want any) {
+			suffix := jsStr(want)
+			if txt := replicas["a"].Text(); !strings.HasSuffix(txt, suffix) {
+				t.Errorf("a_ends_with %q: text = %q", suffix, txt)
+			}
+		})
 	}
-	if tc, ok := expect["tombstone_count"]; ok {
-		if got := replicas["a"].TombstoneCount(); got != jsInt(tc) {
-			t.Errorf("tombstone_count = %d, want %d", got, jsInt(tc))
-		}
+	if _, stated := expect["tombstone_count"]; stated {
+		assertKey(t, expect, "tombstone_count", replicas["a"].TombstoneCount())
 	}
 }
 
@@ -805,12 +850,17 @@ func TestCollectionsTextCrdtDeltaSync(t *testing.T) {
 		return
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
+	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario, "name", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"texts_equal", "text_on", "version_vector_on")
+			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "replay input: seeds the replicas and drives the delta exchange; what it produces is asserted through the expect block",
+				"seed", "steps")
+			excuseKey(t, scenario, "expect", "container: asserted key-by-key in checkTextCrdtDeltaExpect")
 			replicas := map[string]*TextCrdt{}
 			seed := jsMap(scenario["seed"])
 			replicas["a"] = TextCrdtFromStr(int64(jsInt(seed["peer"])), jsStr(seed["text"]))
@@ -881,36 +931,44 @@ func checkTextCrdtDeltaExpect(t *testing.T, replicas map[string]*TextCrdt, expec
 	if expect == nil {
 		return
 	}
-	for _, rawPair := range jsList(expect["texts_equal"]) {
-		pair := jsList(rawPair)
-		a, b := jsStr(pair[0]), jsStr(pair[1])
-		if replicas[a].Text() != replicas[b].Text() {
-			t.Errorf("texts_equal %s/%s: %q != %q", a, b, replicas[a].Text(), replicas[b].Text())
-		}
-	}
-	if to := jsMap(expect["text_on"]); to != nil {
-		for rep, want := range to {
-			if got := replicas[rep].Text(); got != jsStr(want) {
-				t.Errorf("text_on %s = %q, want %q", rep, got, jsStr(want))
-			}
-		}
-	}
-	if vv := jsMap(expect["version_vector_on"]); vv != nil {
-		for rep, want := range vv {
-			got := replicas[rep].VersionVector()
-			wantMap := map[PeerId]int64{}
-			for k, v := range jsMap(want) {
-				peer := int64(0)
-				// keys are decimal strings
-				for _, r := range k {
-					peer = peer*10 + int64(r-'0')
+	if _, stated := expect["texts_equal"]; stated {
+		assertKeyWith(t, expect, "texts_equal", func(want any) {
+			for _, rawPair := range jsList(want) {
+				pair := jsList(rawPair)
+				a, b := jsStr(pair[0]), jsStr(pair[1])
+				if replicas[a].Text() != replicas[b].Text() {
+					t.Errorf("texts_equal %s/%s: %q != %q", a, b, replicas[a].Text(), replicas[b].Text())
 				}
-				wantMap[peer] = int64(jsInt(v))
 			}
-			if !reflect.DeepEqual(got, wantMap) {
-				t.Errorf("version_vector_on %s = %v, want %v", rep, got, wantMap)
+		})
+	}
+	if _, stated := expect["text_on"]; stated {
+		assertKeyWith(t, expect, "text_on", func(want any) {
+			for replica, text := range jsMap(want) {
+				if got := replicas[replica].Text(); got != jsStr(text) {
+					t.Errorf("text_on %s = %q, want %q", replica, got, jsStr(text))
+				}
 			}
-		}
+		})
+	}
+	if _, stated := expect["version_vector_on"]; stated {
+		assertKeyWith(t, expect, "version_vector_on", func(want any) {
+			for replica, vector := range jsMap(want) {
+				got := replicas[replica].VersionVector()
+				wantMap := map[PeerId]int64{}
+				for k, v := range jsMap(vector) {
+					peer := int64(0)
+					// keys are decimal strings
+					for _, r := range k {
+						peer = peer*10 + int64(r-'0')
+					}
+					wantMap[peer] = int64(jsInt(v))
+				}
+				if !reflect.DeepEqual(got, wantMap) {
+					t.Errorf("version_vector_on %s = %v, want %v", replica, got, wantMap)
+				}
+			}
+		})
 	}
 }
 
@@ -932,6 +990,7 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 		return
 	}
 	consumeFixtureKeys(t, name, fixture, "scenarios")
+	excuseKey(t, fixture, "scenarios", "replay input: each scenario's own expect block is asserted in the subtest below")
 	for _, rawScenario := range jsList(fixture["scenarios"]) {
 		scenario := jsMap(rawScenario)
 		t.Run(jsStr(scenario["name"]), func(t *testing.T) {
@@ -939,25 +998,37 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 			expect := consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"key_equal", "key_not_equal", "matches", "removed", "similarity_min",
 				"new_key_equals_old_key")
+			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "replay input: the block lists the keys and the alignment are computed FROM; what they produce is asserted through the expect block",
+				"blocks", "old", "new")
+			excuseKey(t, scenario, "expect", "container: asserted key-by-key against the expect block below")
 
 			if blocksField := jsList(scenario["blocks"]); blocksField != nil {
 				keys := make([]BlockKey, len(blocksField))
 				for i, b := range blocksField {
 					keys[i] = BlockKeyOf(parseBlock(jsMap(b)))
 				}
-				for _, rawPair := range jsList(expect["key_equal"]) {
-					pair := jsList(rawPair)
-					i, j := jsInt(pair[0]), jsInt(pair[1])
-					if !keys[i].Equals(keys[j]) {
-						t.Errorf("key_equal [%d,%d]: %s != %s", i, j, keys[i], keys[j])
-					}
+				if _, stated := expect["key_equal"]; stated {
+					assertKeyWith(t, expect, "key_equal", func(want any) {
+						for _, rawPair := range jsList(want) {
+							pair := jsList(rawPair)
+							i, j := jsInt(pair[0]), jsInt(pair[1])
+							if !keys[i].Equals(keys[j]) {
+								t.Errorf("key_equal [%d,%d]: %s != %s", i, j, keys[i], keys[j])
+							}
+						}
+					})
 				}
-				for _, rawPair := range jsList(expect["key_not_equal"]) {
-					pair := jsList(rawPair)
-					i, j := jsInt(pair[0]), jsInt(pair[1])
-					if keys[i].Equals(keys[j]) {
-						t.Errorf("key_not_equal [%d,%d]: %s == %s", i, j, keys[i], keys[j])
-					}
+				if _, stated := expect["key_not_equal"]; stated {
+					assertKeyWith(t, expect, "key_not_equal", func(want any) {
+						for _, rawPair := range jsList(want) {
+							pair := jsList(rawPair)
+							i, j := jsInt(pair[0]), jsInt(pair[1])
+							if keys[i].Equals(keys[j]) {
+								t.Errorf("key_not_equal [%d,%d]: %s == %s", i, j, keys[i], keys[j])
+							}
+						}
+					})
 				}
 				return
 			}
@@ -971,46 +1042,125 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 				newBlocks = append(newBlocks, parseBlock(jsMap(b)))
 			}
 
-			if matches := jsList(expect["matches"]); matches != nil {
-				alignment := Align(oldBlocks, newBlocks)
-				for i, want := range matches {
-					if got := alignment.NewMatches[i].String(); got != jsStr(want) {
-						t.Errorf("match[%d] = %q, want %q", i, got, jsStr(want))
+			if _, stated := expect["matches"]; stated {
+				assertKeyWith(t, expect, "matches", func(want any) {
+					alignment := Align(oldBlocks, newBlocks)
+					for i, m := range jsList(want) {
+						if got := alignment.NewMatches[i].String(); got != jsStr(m) {
+							t.Errorf("match[%d] = %q, want %q", i, got, jsStr(m))
+						}
 					}
-				}
+				})
 			}
-			if removed, ok := expect["removed"]; ok {
-				alignment := Align(oldBlocks, newBlocks)
-				wantRemoved := []int{}
-				for _, r := range jsList(removed) {
-					wantRemoved = append(wantRemoved, jsInt(r))
-				}
-				if !reflect.DeepEqual(alignment.Removed, wantRemoved) {
-					t.Errorf("removed = %v, want %v", alignment.Removed, wantRemoved)
-				}
-			}
-			if min, ok := expect["similarity_min"]; ok {
-				alignment := Align(oldBlocks, newBlocks)
-				for _, m := range alignment.NewMatches {
-					if m.Kind == "edited" && m.Similarity < min.(float64) {
-						t.Errorf("similarity_min: edited similarity %v < %v", m.Similarity, min)
+			if _, stated := expect["removed"]; stated {
+				assertKeyWith(t, expect, "removed", func(want any) {
+					alignment := Align(oldBlocks, newBlocks)
+					wantRemoved := []int{}
+					for _, r := range jsList(want) {
+						wantRemoved = append(wantRemoved, jsInt(r))
 					}
-				}
-			}
-			if nkeo := jsList(expect["new_key_equals_old_key"]); nkeo != nil {
-				keys := AssignStableKeys(oldBlocks, newBlocks)
-				oldKeys := make([]string, len(oldBlocks))
-				for i, b := range oldBlocks {
-					oldKeys[i] = BlockKeyOf(b).AsString()
-				}
-				for _, rawPair := range nkeo {
-					pair := jsList(rawPair)
-					ni, oi := jsInt(pair[0]), jsInt(pair[1])
-					if keys[ni] != oldKeys[oi] {
-						t.Errorf("new_key_equals_old_key [%d,%d]: %q != %q", ni, oi, keys[ni], oldKeys[oi])
+					if !reflect.DeepEqual(alignment.Removed, wantRemoved) {
+						t.Errorf("removed = %v, want %v", alignment.Removed, wantRemoved)
 					}
-				}
+				})
+			}
+			if _, stated := expect["similarity_min"]; stated {
+				assertKeyWith(t, expect, "similarity_min", func(want any) {
+					alignment := Align(oldBlocks, newBlocks)
+					edited := 0
+					for _, m := range alignment.NewMatches {
+						if m.Kind != "edited" {
+							continue
+						}
+						edited++
+						if m.Similarity < want.(float64) {
+							t.Errorf("similarity_min: edited similarity %v < %v", m.Similarity, want)
+						}
+					}
+					if edited == 0 {
+						t.Errorf("similarity_min: the alignment produced no edited match, so the floor bounded nothing")
+					}
+				})
+			}
+			if _, stated := expect["new_key_equals_old_key"]; stated {
+				assertKeyWith(t, expect, "new_key_equals_old_key", func(want any) {
+					keys := AssignStableKeys(oldBlocks, newBlocks)
+					oldKeys := make([]string, len(oldBlocks))
+					for i, b := range oldBlocks {
+						oldKeys[i] = BlockKeyOf(b).AsString()
+					}
+					for _, rawPair := range jsList(want) {
+						pair := jsList(rawPair)
+						ni, oi := jsInt(pair[0]), jsInt(pair[1])
+						if keys[ni] != oldKeys[oi] {
+							t.Errorf("new_key_equals_old_key [%d,%d]: %q != %q", ni, oi, keys[ni], oldKeys[oi])
+						}
+					}
+				})
 			}
 		})
+	}
+}
+
+// assertReconcileOps checks the diff the library produced against the op list
+// the fixture states, resolving the fixture's relative move anchors against the
+// fixture's own result order.
+func assertReconcileOps(t *testing.T, name string, ops []DiffOp[string, int], expectedOps []any, resultOrder []string) {
+	t.Helper()
+	if len(ops) != len(expectedOps) {
+		t.Fatalf("%s: op count = %d, want %d (%v)", name, len(ops), len(expectedOps), ops)
+	}
+	anchorIdx := func(anchor string) int {
+		for j, k := range resultOrder {
+			if k == anchor {
+				return j
+			}
+		}
+		return -1
+	}
+	for i, rawWant := range expectedOps {
+		want := jsMap(rawWant)
+
+		switch want["type"].(string) {
+		case "remove":
+			rem, isRem := ops[i].(DiffOpRemove[string, int])
+			if !isRem {
+				t.Errorf("%s op[%d]: want Remove, got %T", name, i, ops[i])
+			} else if rem.Key != jsStr(want["key"]) {
+				t.Errorf("%s op[%d]: remove key = %q, want %q", name, i, rem.Key, jsStr(want["key"]))
+			}
+		case "move":
+			mv, isMv := ops[i].(DiffOpMove[string, int])
+			if !isMv {
+				t.Errorf("%s op[%d]: want Move, got %T", name, i, ops[i])
+				continue
+			}
+			if mv.Key != jsStr(want["key"]) {
+				t.Errorf("%s op[%d]: move key = %q, want %q", name, i, mv.Key, jsStr(want["key"]))
+			}
+			if after, ok := want["after"]; ok {
+				if got, exp := mv.To, anchorIdx(jsStr(after))+1; got != exp {
+					t.Errorf("%s op[%d]: move to = %d, want %d", name, i, got, exp)
+				}
+			} else if before, ok := want["before"]; ok {
+				if got, exp := mv.To, anchorIdx(jsStr(before)); got != exp {
+					t.Errorf("%s op[%d]: move to = %d, want %d", name, i, got, exp)
+				}
+			}
+		case "insert":
+			ins, isIns := ops[i].(DiffOpInsert[string, int])
+			if !isIns {
+				t.Errorf("%s op[%d]: want Insert, got %T", name, i, ops[i])
+			} else if ins.Key != jsStr(want["key"]) {
+				t.Errorf("%s op[%d]: insert key = %q, want %q", name, i, ins.Key, jsStr(want["key"]))
+			}
+		case "update":
+			upd, isUpd := ops[i].(DiffOpUpdate[string, int])
+			if !isUpd {
+				t.Errorf("%s op[%d]: want Update, got %T", name, i, ops[i])
+			} else if upd.Key != jsStr(want["key"]) {
+				t.Errorf("%s op[%d]: update key = %q, want %q", name, i, upd.Key, jsStr(want["key"]))
+			}
+		}
 	}
 }

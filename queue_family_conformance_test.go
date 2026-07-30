@@ -116,7 +116,14 @@ func loadQueueFamilyFixture(t *testing.T, name string) map[string]any {
 		t.Fatalf("canonical fixture %s was not found", name)
 	}
 	consumeFixtureKeys(t, name, fixture, "config", "initial", "invariants", "steps")
-	assertQueueInvariantsDocumented(t, name, jsMap(fixture["invariants"]))
+	excuseKeys(t, fixture, "replay input: the config and seed state the replay is set up FROM; what they produce is asserted through each step's expected block",
+		"config", "initial")
+	excuseKey(t, fixture, "steps", "replay input: the step list drives the loop, and each step's own `expected` block is asserted there")
+	if _, stated := fixture["invariants"]; stated {
+		assertKeyWith(t, fixture, "invariants", func(want any) {
+			assertQueueInvariantsDocumented(t, name, jsMap(want))
+		})
+	}
 	for i, raw := range jsList(fixture["steps"]) {
 		step := jsMap(raw)
 		if _, bad := step["invalidates"]; bad {
@@ -167,6 +174,8 @@ func queueFamilyConfigOf(t *testing.T, name string, fixture map[string]any) queu
 	if cfg == nil {
 		t.Fatalf("%s: config is required for the work-queue corpus", name)
 	}
+	excuseKeys(t, cfg, "replay input: the two knobs the work queue is CONSTRUCTED with; what they produce is asserted through the lease/redelivery expectations each step states",
+		"visibility_timeout", "max_deliveries")
 	return queueFamilyConfig{
 		VisibilityTimeout: int64(jsInt(cfg["visibility_timeout"])),
 		MaxDeliveries:     uint64(jsInt(cfg["max_deliveries"])),
@@ -511,33 +520,36 @@ func assertQueueFixtureState(
 	expected map[string]any,
 ) {
 	t.Helper()
-	if value, ok := expected["elements"]; ok {
-		want := jsStrList(value)
-		if got := model.elements(); !reflect.DeepEqual(got, want) {
-			t.Errorf("%s elements=%v, want %v", label, got, want)
-		}
-	}
-	if value, ok := expected["head"]; ok {
-		got, exists := model.head()
-		if value == nil {
-			if exists {
-				t.Errorf("%s head=%q, want none", label, got)
+	if _, stated := expected["elements"]; stated {
+		assertKeyWith(t, expected, "elements", func(want any) {
+			if got := model.elements(); !reflect.DeepEqual(got, jsStrList(want)) {
+				t.Errorf("%s elements=%v, want %v", label, got, jsStrList(want))
 			}
-		} else if !exists || got != jsStr(value) {
-			t.Errorf("%s head=(%q,%v), want %q", label, got, exists, jsStr(value))
-		}
+		})
 	}
-	if value, ok := expected["len"]; ok && model.length() != jsInt(value) {
-		t.Errorf("%s len=%d, want %d", label, model.length(), jsInt(value))
+	if _, stated := expected["head"]; stated {
+		assertKeyWith(t, expected, "head", func(want any) {
+			got, exists := model.head()
+			if want == nil {
+				if exists {
+					t.Errorf("%s head=%q, want none", label, got)
+				}
+			} else if !exists || got != jsStr(want) {
+				t.Errorf("%s head=(%q,%v), want %q", label, got, exists, jsStr(want))
+			}
+		})
 	}
-	if value, ok := expected["is_empty"]; ok && model.isEmpty() != (value == true) {
-		t.Errorf("%s is_empty=%v, want %v", label, model.isEmpty(), value)
+	if _, stated := expected["len"]; stated {
+		assertKey(t, expected, "len", model.length())
 	}
-	if value, ok := expected["is_full"]; ok && model.isFull() != (value == true) {
-		t.Errorf("%s is_full=%v, want %v", label, model.isFull(), value)
+	if _, stated := expected["is_empty"]; stated {
+		assertKey(t, expected, "is_empty", model.isEmpty())
 	}
-	if value, ok := expected["closed"]; ok && model.isClosed() != (value == true) {
-		t.Errorf("%s closed=%v, want %v", label, model.isClosed(), value)
+	if _, stated := expected["is_full"]; stated {
+		assertKey(t, expected, "is_full", model.isFull())
+	}
+	if _, stated := expected["closed"]; stated {
+		assertKey(t, expected, "closed", model.isClosed())
 	}
 }
 
@@ -568,6 +580,7 @@ func replayQueueFixture(t *testing.T, name string, model queueFixtureModel) int 
 			"invalidates", "elements", "head", "len", "is_empty", "is_full", "closed")
 		invalidates := consumeKeys(t, qLabel+" expected.invalidates", jsMap(expected["invalidates"]),
 			"value", "head", "len", "is_empty", "is_full", "closed")
+		excuseKey(t, expected, "invalidates", "container: its reader classes are asserted key-by-key against the expected.invalidates block below")
 		before := map[string]int{}
 		for kind, reader := range readers {
 			before[kind] = reader.drive()
@@ -606,13 +619,16 @@ func replayQueueFixture(t *testing.T, name string, model queueFixtureModel) int 
 		}
 
 		label := fmt.Sprintf("%s %s step %d", model.name(), name, i)
-		for kind, wantRaw := range invalidates {
+		for kind := range invalidates {
 			reader := readers[kind]
 			if reader == nil {
 				t.Fatalf("%s: no reader for invalidates.%s", label, kind)
 			}
-			assertInvalidationDelta(t, label+" invalidates."+kind,
-				reader, before[kind], wantRaw == true)
+			readerKind := kind
+			assertKeyWith(t, invalidates, kind, func(want any) {
+				assertInvalidationDelta(t, label+" invalidates."+readerKind,
+					reader, before[readerKind], want == true)
+			})
 		}
 		if want, ok := step["returns"]; ok && want != nil &&
 			!reflect.DeepEqual(gotReturn, want) {
@@ -831,33 +847,37 @@ func assertTopicState(
 	expected map[string]any,
 ) {
 	t.Helper()
-	if got, want := model.baseOffset(), jsInt(expected["base_offset"]); got != want {
-		t.Errorf("%s base_offset=%d, want %d", label, got, want)
-	}
-	if got, want := model.elements(), jsStrList(expected["elements"]); !slices.Equal(got, want) {
-		t.Errorf("%s elements=%v, want %v", label, got, want)
-	}
-	wantSubscriptions := jsMap(expected["subscriptions"])
-	for id, raw := range wantSubscriptions {
-		want := jsMap(raw)
-		got, ok := model.subscription(id)
-		if !ok {
-			t.Errorf("%s subscription %q missing", label, id)
-			continue
+	assertKey(t, expected, "base_offset", model.baseOffset())
+	assertKeyWith(t, expected, "elements", func(rawElements any) {
+		if got, want := model.elements(), jsStrList(rawElements); !slices.Equal(got, want) {
+			t.Errorf("%s elements=%v, want %v", label, got, want)
 		}
-		if got.Cursor != jsInt(want["cursor"]) ||
-			got.Durability != TopicDurability(jsStr(want["durability"])) ||
-			got.Connected != (want["connected"] == true) {
-			t.Errorf("%s subscription %q=%+v, want %v", label, id, got, want)
+	})
+	assertKeyWith(t, expected, "subscriptions", func(rawSubscriptions any) {
+		wantSubscriptions := jsMap(rawSubscriptions)
+		for id, raw := range wantSubscriptions {
+			want := jsMap(raw)
+			got, ok := model.subscription(id)
+			if !ok {
+				t.Errorf("%s subscription %q missing", label, id)
+				continue
+			}
+			if got.Cursor != jsInt(want["cursor"]) ||
+				got.Durability != TopicDurability(jsStr(want["durability"])) ||
+				got.Connected != (want["connected"] == true) {
+				t.Errorf("%s subscription %q=%+v, want %v", label, id, got, want)
+			}
 		}
-	}
-	for id, raw := range jsMap(expected["reads"]) {
-		got, exists := model.read(id)
-		want := jsStrList(raw)
-		if !exists || !slices.Equal(got, want) {
-			t.Errorf("%s read %q=(%v,%v), want %v", label, id, got, exists, want)
+	})
+	assertKeyWith(t, expected, "reads", func(rawReads any) {
+		for id, raw := range jsMap(rawReads) {
+			got, exists := model.read(id)
+			want := jsStrList(raw)
+			if !exists || !slices.Equal(got, want) {
+				t.Errorf("%s read %q=(%v,%v), want %v", label, id, got, exists, want)
+			}
 		}
-	}
+	})
 }
 
 func replayTopicFixture(t *testing.T, name string, model topicFixtureModel) int {
@@ -872,6 +892,7 @@ func replayTopicFixture(t *testing.T, name string, model topicFixtureModel) int 
 		expected := consumeKeys(t, fmt.Sprintf("%s %s step %d expected", model.name(), name, i),
 			jsMap(step["expected"]),
 			"invalidates", "base_offset", "elements", "subscriptions", "reads")
+
 		// TopicCell invalidation is keyed by subscriber id, so the readable set
 		// is the fixture's own subscriber vocabulary rather than a fixed list.
 		invalidates := jsMap(expected["invalidates"])
@@ -908,10 +929,14 @@ func replayTopicFixture(t *testing.T, name string, model topicFixtureModel) int 
 		}
 
 		label := fmt.Sprintf("%s %s step %d", model.name(), name, i)
-		for id, reader := range readers {
-			want := invalidates[id] == true
-			assertInvalidationDelta(t, label+" invalidates."+id, reader, before[id], want)
-		}
+		// Keyed by the fixture's own subscriber vocabulary rather than a fixed
+		// list, so the claim is read out of the block itself. An empty block is
+		// a real claim too: no subscriber, nothing to invalidate.
+		assertKeyWith(t, expected, "invalidates", func(want any) {
+			for id, reader := range readers {
+				assertInvalidationDelta(t, label+" invalidates."+id, reader, before[id], jsMap(want)[id] == true)
+			}
+		})
 		if want, ok := step["returns"]; ok && want != nil {
 			switch want := want.(type) {
 			case float64:
@@ -1154,71 +1179,79 @@ func assertWorkQueueState(
 	expected map[string]any,
 ) {
 	t.Helper()
-	wantPending := jsList(expected["pending"])
-	gotPending := model.pending()
-	if len(gotPending) != len(wantPending) {
-		t.Errorf("%s pending len=%d, want %d", label, len(gotPending), len(wantPending))
-	} else {
-		for i, raw := range wantPending {
-			want := jsMap(raw)
-			got := gotPending[i]
-			if got.ItemID != uint64(jsInt(want["item_id"])) ||
-				got.Value != jsStr(want["value"]) ||
-				got.Attempts != uint64(jsInt(want["attempts"])) {
-				t.Errorf("%s pending[%d]=%+v, want %v", label, i, got, want)
-			}
-		}
-	}
-	wantFlight := jsList(expected["in_flight"])
-	gotFlight := model.inFlight()
-	if len(gotFlight) != len(wantFlight) {
-		t.Errorf("%s in_flight len=%d, want %d", label, len(gotFlight), len(wantFlight))
-	} else {
-		for i, raw := range wantFlight {
-			want := jsMap(raw)
-			got := gotFlight[i]
-			if got.DeliveryID != uint64(jsInt(want["delivery_id"])) ||
-				got.ItemID != uint64(jsInt(want["item_id"])) ||
-				got.Value != jsStr(want["value"]) ||
-				got.Worker != jsStr(want["worker"]) ||
-				got.Attempt != uint64(jsInt(want["attempt"])) ||
-				got.Deadline != int64(jsInt(want["deadline"])) {
-				t.Errorf("%s in_flight[%d]=%+v, want %v", label, i, got, want)
-			}
-		}
-	}
-	wantDead := jsList(expected["dead_letters"])
-	gotDead := model.deadLetters()
-	if len(gotDead) != len(wantDead) {
-		t.Errorf("%s dead_letters len=%d, want %d", label, len(gotDead), len(wantDead))
-	} else {
-		for i, raw := range wantDead {
-			want := jsMap(raw)
-			got := gotDead[i]
-			if got.ItemID != uint64(jsInt(want["item_id"])) ||
-				got.Value != jsStr(want["value"]) ||
-				got.Attempts != uint64(jsInt(want["attempts"])) ||
-				got.Reason != WorkQueueDeadLetterReason(jsStr(want["reason"])) {
-				t.Errorf("%s dead_letters[%d]=%+v, want %v", label, i, got, want)
-			}
-		}
-	}
-	reads := jsMap(expected["reads"])
-	gotReads := model.reads()
-	kinds := []string{"pending_len", "is_empty", "in_flight_len", "dead_letter_len"}
-	for i, kind := range kinds {
-		want := 0
-		if kind == "is_empty" {
-			if reads[kind] == true {
-				want = 1
-			}
+	assertKeyWith(t, expected, "pending", func(rawPending any) {
+		wantPending := jsList(rawPending)
+		gotPending := model.pending()
+		if len(gotPending) != len(wantPending) {
+			t.Errorf("%s pending len=%d, want %d", label, len(gotPending), len(wantPending))
 		} else {
-			want = jsInt(reads[kind])
+			for i, raw := range wantPending {
+				want := jsMap(raw)
+				got := gotPending[i]
+				if got.ItemID != uint64(jsInt(want["item_id"])) ||
+					got.Value != jsStr(want["value"]) ||
+					got.Attempts != uint64(jsInt(want["attempts"])) {
+					t.Errorf("%s pending[%d]=%+v, want %v", label, i, got, want)
+				}
+			}
 		}
-		if gotReads[i] != want {
-			t.Errorf("%s reads.%s=%d, want %d", label, kind, gotReads[i], want)
+	})
+	assertKeyWith(t, expected, "in_flight", func(rawFlight any) {
+		wantFlight := jsList(rawFlight)
+		gotFlight := model.inFlight()
+		if len(gotFlight) != len(wantFlight) {
+			t.Errorf("%s in_flight len=%d, want %d", label, len(gotFlight), len(wantFlight))
+		} else {
+			for i, raw := range wantFlight {
+				want := jsMap(raw)
+				got := gotFlight[i]
+				if got.DeliveryID != uint64(jsInt(want["delivery_id"])) ||
+					got.ItemID != uint64(jsInt(want["item_id"])) ||
+					got.Value != jsStr(want["value"]) ||
+					got.Worker != jsStr(want["worker"]) ||
+					got.Attempt != uint64(jsInt(want["attempt"])) ||
+					got.Deadline != int64(jsInt(want["deadline"])) {
+					t.Errorf("%s in_flight[%d]=%+v, want %v", label, i, got, want)
+				}
+			}
 		}
-	}
+	})
+	assertKeyWith(t, expected, "dead_letters", func(rawDead any) {
+		wantDead := jsList(rawDead)
+		gotDead := model.deadLetters()
+		if len(gotDead) != len(wantDead) {
+			t.Errorf("%s dead_letters len=%d, want %d", label, len(gotDead), len(wantDead))
+		} else {
+			for i, raw := range wantDead {
+				want := jsMap(raw)
+				got := gotDead[i]
+				if got.ItemID != uint64(jsInt(want["item_id"])) ||
+					got.Value != jsStr(want["value"]) ||
+					got.Attempts != uint64(jsInt(want["attempts"])) ||
+					got.Reason != WorkQueueDeadLetterReason(jsStr(want["reason"])) {
+					t.Errorf("%s dead_letters[%d]=%+v, want %v", label, i, got, want)
+				}
+			}
+		}
+	})
+	assertKeyWith(t, expected, "reads", func(rawReads any) {
+		reads := jsMap(rawReads)
+		gotReads := model.reads()
+		kinds := []string{"pending_len", "is_empty", "in_flight_len", "dead_letter_len"}
+		for i, kind := range kinds {
+			want := 0
+			if kind == "is_empty" {
+				if reads[kind] == true {
+					want = 1
+				}
+			} else {
+				want = jsInt(reads[kind])
+			}
+			if gotReads[i] != want {
+				t.Errorf("%s reads.%s=%d, want %d", label, kind, gotReads[i], want)
+			}
+		}
+	})
 }
 
 func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureModel) int {
@@ -1238,6 +1271,7 @@ func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureMod
 			"invalidates", "pending", "in_flight", "dead_letters", "reads")
 		invalidates := consumeKeys(t, wLabel+" expected.invalidates", jsMap(expected["invalidates"]),
 			"pending_len", "in_flight_len", "dead_letter_len", "is_empty")
+		excuseKey(t, expected, "invalidates", "container: its four reader classes are asserted key-by-key against the expected.invalidates block below")
 		before := map[string]int{}
 		for kind, reader := range readers {
 			before[kind] = reader.drive()
@@ -1264,8 +1298,11 @@ func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureMod
 
 		label := fmt.Sprintf("%s %s step %d", model.name(), name, i)
 		for kind, reader := range readers {
-			assertInvalidationDelta(t, label+" invalidates."+kind,
-				reader, before[kind], invalidates[kind] == true)
+			readerKind, readerFor := kind, reader
+			assertKeyWith(t, invalidates, kind, func(want any) {
+				assertInvalidationDelta(t, label+" invalidates."+readerKind,
+					readerFor, before[readerKind], want == true)
+			})
 		}
 		if want, ok := step["returns"]; ok {
 			switch want := want.(type) {
