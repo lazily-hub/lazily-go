@@ -1,6 +1,6 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test test-interop-peer vet fmt fmt-check race cover conformance bench check tidy conformance-coverage
+.PHONY: all build test test-interop-peer vet fmt fmt-check race cover conformance bench check tidy conformance-coverage ci-reach
 
 all: check
 
@@ -75,8 +75,15 @@ test-interop-peer:
 # `race` runs after `test` on purpose: `test` truncates the conformance manifest
 # and the scenario ledger, and `race` writes neither, so the recorded fixture
 # union and scenario ledger stay the ones the coverage guard is meant to audit.
-check: fmt-check vet build test race test-interop-peer conformance-coverage
+check: fmt-check vet build test race test-interop-peer conformance-coverage ci-reach
 	@echo "lazily-go: check OK"
+
+# CI-reachability guard (#lzcheckcireachguard). Fails when a target above runs a
+# gate no CI workflow step reaches — the drift that hid #lzinteroppeerci in every
+# binding for months. It guards itself: `ci-reach` is in `check`, so CI has to run
+# it too or this target reports itself missing.
+ci-reach:
+	./scripts/check-ci-reach.sh
 
 # Conformance-coverage guard (#portconformancecoverage). Static: fails when the
 # canonical corpus grows a fixture no test in this repo even names. Naming is not
