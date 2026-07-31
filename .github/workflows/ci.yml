@@ -136,6 +136,15 @@ jobs:
       - name: race (cgo)
         run: CGO_ENABLED=1 go test -race ./...
 
+      # The interop peer is the cross-binding WIRE-COMPATIBILITY gate — the one
+      # check that matters most when nine bindings must agree on a byte layout —
+      # and until now it ran on a developer's laptop and nowhere else
+      # (#lzinteroppeerci). `make check` has always run it; no binding's CI did.
+      # A check that only ever runs locally is a check that rots, and this one
+      # rots into a silent cross-language incompatibility.
+      - name: Interop peer self-check (#lzinteroppeerci)
+        run: CGO_ENABLED=1 go run -race ./cmd/lazily-interop-peer --self-check
+
       # Rungs 1 and 4 execute HERE and nowhere else (#lzguardsnotinci). Unlike
       # rung 2 (#lzassertunknownkeys) and rung 3 (#lzconsumednotasserted), which
       # live inside the test binary and so were already enforced by the `test`
