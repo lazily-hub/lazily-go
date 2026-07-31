@@ -160,6 +160,19 @@ func TestAsyncCascadeDiamond(t *testing.T) {
 // An async effect must keep reacting across MORE THAN ONE successive write.
 // One rerun is not enough to detect an effect that fails to re-register its
 // dependencies (the "deaf after one rerun" defect).
+//
+// The counter is bumped AFTER the tracking read, and that ordering is the whole
+// reason this test is deterministic (#lzgoasynclostwake). runEffect detaches the
+// effect's edges on the owner goroutine and the body re-registers them from a
+// separate goroutine, so a counter bumped at the TOP of the body says only that
+// the body started — not that it has subscribed. A write landing in that gap is
+// absorbed into the run already in flight: TrackSource registers the edge and
+// reads the value in one c.do() closure, so the body sees the NEW value and the
+// run count never reaches the next number. That coalescing is correct — the
+// effect is never left holding a stale value, which is the property that matters
+// — but an exact run-count assertion is not entitled to it. Bumping after the
+// read makes runs==N evidence that the edge exists, so every later write must
+// schedule a real rerun.
 func TestAsyncEffectRerunsAcrossTwoWrites(t *testing.T) {
 	ctx := NewAsyncContext()
 	defer ctx.Close()
@@ -167,8 +180,8 @@ func TestAsyncEffectRerunsAcrossTwoWrites(t *testing.T) {
 	var runs int64
 	var last atomic.Int64
 	eff := ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
-		atomic.AddInt64(&runs, 1)
 		last.Store(int64(TrackSource(cc, cell)))
+		atomic.AddInt64(&runs, 1)
 		return nil
 	})
 	defer eff.DisposeAsync()
@@ -193,12 +206,14 @@ func TestAsyncEffectDownstreamOfSlotCascade(t *testing.T) {
 	})
 	var runs int64
 	var last atomic.Int64
+	// Counter after the tracking read, for the reason spelled out on
+	// TestAsyncEffectRerunsAcrossTwoWrites (#lzgoasynclostwake).
 	eff := ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
-		atomic.AddInt64(&runs, 1)
 		v, err := TrackComputed(cc, slot)
 		if err == nil {
 			last.Store(int64(v))
 		}
+		atomic.AddInt64(&runs, 1)
 		return nil
 	})
 	defer eff.DisposeAsync()
