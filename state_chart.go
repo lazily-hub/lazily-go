@@ -230,6 +230,29 @@ func parseState(id string, obj map[string]any) (stateDef, error) {
 		return stateDef{}, fmt.Errorf("state %s uses `run` actions, which are not supported", id)
 	}
 
+	// Kind derivation is DELIBERATELY lenient, and this is a wire contract, not
+	// an oversight. `kind` is an OPEN annotation slot in the chart document: the
+	// spec fixes only the meaning of `kind: "final"`, and every other value —
+	// `"machine"`, a future `"parallel-final"`, a vendor annotation — is
+	// reserved for later revisions. A chart written against a newer spec must
+	// still load in an older binding rather than fail the whole document, so an
+	// unrecognised `kind` falls through to the structural derivation below:
+	// `parallel: true` wins, else a string `initial` makes it Compound, else
+	// Atomic. The consequence of the Atomic default is bounded and observable —
+	// an Atomic state has no descent, so entering it enters nothing further and
+	// its own entry/exit actions and transitions still run.
+	//
+	// This is a FAMILY-WIDE contract, not a Go choice: lazily-rs derives the
+	// same ladder in `parse_state` (`src/statechart.rs`), ending in
+	// `Kind::Atomic`, and reads `history` through `as_str()` so a non-string
+	// `history` likewise falls through instead of erroring. Diverging here
+	// would make the same chart document load differently per binding.
+	//
+	// Note what is NOT lenient: a `history` that IS a string but is neither
+	// "shallow" nor "deep" is rejected below, because the history KIND changes
+	// what gets restored, and guessing there silently loses state.
+	//
+	// Pinned by TestStateChartKindLeniencyIsPinned.
 	var kind kindTag
 	switch h := obj["history"].(type) {
 	case string:

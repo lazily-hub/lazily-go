@@ -20,6 +20,36 @@ All notable changes to lazily-go are documented here. This project adheres to
   `conformance/codec/frame_roundtrip_msgpack.json` is replayed rather than listed
   as known-uncovered.
 
+### Changed — BREAKING: `OpIdFromWire` / `TextOpFromWire` return an error
+
+- A fail-open dispatch audit of the library sources (AST-based, not grep: every
+  `switch`/type-switch `default`, terminal `else`, single-literal comparison,
+  discarded decode error, and wire-tagged struct field that is decoded but never
+  read) found one decode path that coerced malformed input instead of rejecting
+  it. `OpIdFromWire(any) OpId` and `TextOpFromWire(any) TextOp` are now
+  `(OpId, error)` and `(TextOp, error)`.
+- The old shape coerced an absent, null, string, bool, or fractional
+  `counter`/`peer` to `0` through an unexported `wireInt64` helper. Zero is not a
+  neutral default on this wire: counters are minted from 1, so `OpId{0, 0}` is
+  exactly the document-root key elements with no origin hash to. A malformed
+  delta-sync op therefore reparented onto the document root and merged into the
+  visible text as if it were well formed. `lazily-rs` derives serde on `OpId` and
+  has always rejected the same frames, so this closes a divergence rather than
+  opening one. Both functions also refuse a non-object argument and a non-string
+  `ch` instead of panicking on an unchecked type assertion.
+
+### Added
+
+- `failopen_audit_test.go` — rejection tests for the conversion above, plus
+  pinning tests for the three leniencies the audit ruled INTENTIONAL, each of
+  which now also carries a comment stating its wire reason: an unrecognised
+  state-chart `kind` deriving `Atomic` (matching `lazily-rs parse_state`), an
+  out-of-range `LazilyFfiMessageKind` code decoding as `Unknown` (the C enum's
+  zero default, for older hosts), and an unknown `ShmBlobRef.backend` string
+  normalizing to `Shm` (the omitted-when-default legacy descriptor). An
+  undocumented default and a deliberate one are indistinguishable from outside
+  the package; the pins make a later tidy-up that removes one show up red.
+
 ## v0.25.0
 
 ### Added

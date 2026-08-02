@@ -22,6 +22,8 @@ package lazily
 
 import (
 	"encoding/json"
+	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,10 +67,30 @@ func (id OpId) ToWire() map[string]any {
 	return map[string]any{"counter": id.Counter, "peer": id.Peer}
 }
 
-// OpIdFromWire parses an OpId from its decoded-JSON map form.
-func OpIdFromWire(v any) OpId {
-	m := v.(map[string]any)
-	return OpId{Counter: wireInt64(m["counter"]), Peer: wireInt64(m["peer"])}
+// OpIdFromWire parses an OpId from its decoded-JSON map form, rejecting a
+// malformed one rather than coercing it.
+//
+// A silent zero here is not a harmless default: counters minted by nextId are
+// always >= 1, so OpId{0,0} is exactly textRootKey, the byOrigin bucket for
+// elements whose origin is the document start. Coercing an absent, null, or
+// non-numeric `counter`/`peer` to 0 would reparent a foreign op onto the
+// document root and merge it into the visible text as if it were well-formed.
+// The sibling bindings reject the same frames: lazily-rs derives serde on
+// `OpId`, so a string or missing `counter` is a deserialization error there.
+func OpIdFromWire(v any) (OpId, error) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return OpId{}, fmt.Errorf("OpId must be a JSON object, got %T", v)
+	}
+	counter, err := wireInt64(m["counter"])
+	if err != nil {
+		return OpId{}, fmt.Errorf("OpId.counter: %w", err)
+	}
+	peer, err := wireInt64(m["peer"])
+	if err != nil {
+		return OpId{}, fmt.Errorf("OpId.peer: %w", err)
+	}
+	return OpId{Counter: counter, Peer: peer}, nil
 }
 
 // textElem is a single character element: a code point, its left-origin (nil
@@ -107,19 +129,39 @@ func (op TextOp) ToWire() map[string]any {
 	}
 }
 
-// TextOpFromWire parses a TextOp from its decoded-JSON map form.
-func TextOpFromWire(v any) TextOp {
-	m := v.(map[string]any)
-	op := TextOp{Id: OpIdFromWire(m["id"]), Ch: m["ch"].(string)}
+// TextOpFromWire parses a TextOp from its decoded-JSON map form, rejecting a
+// malformed op rather than coercing it. `origin` and `deleted` are the only
+// legitimately-absent keys (JSON null = document start / live), so an explicit
+// null stays lenient while a present-but-malformed value is refused.
+func TextOpFromWire(v any) (TextOp, error) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return TextOp{}, fmt.Errorf("TextOp must be a JSON object, got %T", v)
+	}
+	id, err := OpIdFromWire(m["id"])
+	if err != nil {
+		return TextOp{}, fmt.Errorf("TextOp.id: %w", err)
+	}
+	ch, ok := m["ch"].(string)
+	if !ok {
+		return TextOp{}, fmt.Errorf("TextOp.ch must be a string, got %T", m["ch"])
+	}
+	op := TextOp{Id: id, Ch: ch}
 	if o, ok := m["origin"]; ok && o != nil {
-		id := OpIdFromWire(o)
-		op.Origin = &id
+		origin, err := OpIdFromWire(o)
+		if err != nil {
+			return TextOp{}, fmt.Errorf("TextOp.origin: %w", err)
+		}
+		op.Origin = &origin
 	}
 	if d, ok := m["deleted"]; ok && d != nil {
-		id := OpIdFromWire(d)
-		op.Deleted = &id
+		deleted, err := OpIdFromWire(d)
+		if err != nil {
+			return TextOp{}, fmt.Errorf("TextOp.deleted: %w", err)
+		}
+		op.Deleted = &deleted
 	}
-	return op
+	return op, nil
 }
 
 // textRootKey is the byOrigin bucket for elements whose origin is the document
@@ -462,19 +504,32 @@ func cloneOpIdPtr(p *OpId) *OpId {
 	return &v
 }
 
-// wireInt64 coerces a decoded-JSON numeric value to int64 (JSON decodes numbers
-// as float64 by default, or json.Number under UseNumber).
-func wireInt64(v any) int64 {
+// wireInt64 converts a decoded-JSON numeric value to int64 (JSON decodes
+// numbers as float64 by default, or json.Number under UseNumber).
+//
+// It rejects rather than coerces. Returning 0 for a nil, string, bool, or
+// out-of-range value would type-check and read like a decision, but it hands
+// the caller a well-formed-looking integer it never received — the accidental
+// fail-open this language makes easiest. Every rejection names the offending
+// value so the caller can attribute it to a field.
+func wireInt64(v any) (int64, error) {
 	switch n := v.(type) {
 	case int64:
-		return n
+		return n, nil
 	case int:
-		return int64(n)
+		return int64(n), nil
 	case float64:
-		return int64(n)
+		if n != math.Trunc(n) || n < math.MinInt64 || n >= math.MaxInt64 {
+			return 0, fmt.Errorf("expected an integer, got %v", n)
+		}
+		return int64(n), nil
 	case json.Number:
-		i, _ := n.Int64()
-		return i
+		i, err := n.Int64()
+		if err != nil {
+			return 0, fmt.Errorf("expected an integer, got %q: %w", n.String(), err)
+		}
+		return i, nil
+	default:
+		return 0, fmt.Errorf("expected an integer, got %T (%v)", v, v)
 	}
-	return 0
 }
