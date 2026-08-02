@@ -4,6 +4,22 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## Unreleased
+
+### Added
+
+- `msgpack` frame codec (`EncodeIpcMessageMsgpack` / `DecodeIpcMessageMsgpack`,
+  `#lzmsgpackseven`) — the cross-language binary default protocol.md § Frame
+  codecs makes MUST-level: the externally tagged envelope (`{"Snapshot": …}`)
+  over MessagePack maps keyed by the JSON field name, optional `NodeKey` omitted
+  when absent, `CrdtOp.key` always written (nil when unset), and byte payloads as
+  arrays of integers rather than MessagePack `bin`. Dependency-free: the packer
+  walks the `json` codec's own value tree, so tags, field names, and both NodeKey
+  rules are identical across the two codecs by construction. `msgpack` is no
+  longer a carve-out in the interop peer's handshake, and
+  `conformance/codec/frame_roundtrip_msgpack.json` is replayed rather than listed
+  as known-uncovered.
+
 ## v0.25.0
 
 ### Added

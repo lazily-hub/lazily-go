@@ -28,14 +28,6 @@ fi
 # guard rots, so keep a reason with any new entry.
 KNOWN_UNCOVERED=(
   "arena_blob.json"
-  # msgpack is a protocol.md MUST that lazily-go does not implement
-  # (#lzmsgpackparity). The gap was already declared, but only in
-  # cmd/lazily-interop-peer's `carve_outs` — a place no parity surface reads.
-  # It belongs here, beside every other declared gap: the `json` half of the
-  # codec obligation IS replayed (codec_conformance_test.go), so this entry
-  # names exactly what is missing rather than the whole obligation. Closing
-  # it means encoding/decoding IpcMessage as a named-field MessagePack map.
-  "codec/frame_roundtrip_msgpack.json"
   "reactive-graph/exact_fold_paths_stay_exact.json"
   "reactive-graph/feedback_drain_bound_reports_exhaustion.json"
   "reactive-graph/merge_cell_acquires_no_dependency_edge.json"

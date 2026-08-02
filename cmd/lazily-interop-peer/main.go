@@ -95,11 +95,15 @@ func (p *peer) hello(req request) any {
 			"stdlib_timeout_v1",
 			"stdlib_revision_barrier_v1",
 		},
-		"codecs":           []string{"json"},
+		// Both MUST-level frame codecs are implemented and replayed through the
+		// canonical corpus: `json` by ipc.go and `msgpack` — the externally
+		// tagged frame over named-field maps — by msgpack_codec.go
+		// (#lzmsgpackseven). Neither is a carve-out any more.
+		"codecs":           []string{"json", "msgpack"},
 		"channels":         []string{},
 		"channel_variants": map[string][]string{},
 		"platform_profile": "portable",
-		"carve_outs":       []string{"msgpack", "transport_links"},
+		"carve_outs":       []string{"transport_links"},
 	}
 }
 
