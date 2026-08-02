@@ -230,31 +230,59 @@ func parseState(id string, obj map[string]any) (stateDef, error) {
 		return stateDef{}, fmt.Errorf("state %s uses `run` actions, which are not supported", id)
 	}
 
-	// Kind derivation is DELIBERATELY lenient, and this is a wire contract, not
-	// an oversight. `kind` is an OPEN annotation slot in the chart document: the
-	// spec fixes only the meaning of `kind: "final"`, and every other value —
-	// `"machine"`, a future `"parallel-final"`, a vendor annotation — is
-	// reserved for later revisions. A chart written against a newer spec must
-	// still load in an older binding rather than fail the whole document, so an
-	// unrecognised `kind` falls through to the structural derivation below:
-	// `parallel: true` wins, else a string `initial` makes it Compound, else
-	// Atomic. The consequence of the Atomic default is bounded and observable —
-	// an Atomic state has no descent, so entering it enters nothing further and
-	// its own entry/exit actions and transitions still run.
+	// `kind` is a CLOSED enum in `schemas/statechart.json` — atomic | compound |
+	// parallel | history | final, under `additionalProperties: false`. What the
+	// schema documents as inferred is an OMITTED `kind`, and that inference is
+	// kept below unchanged. A PRESENT value outside the enum is a different
+	// fact, and it used to get the same answer: only `"final"` was ever
+	// compared, so `"finall"`, `"machine"` and any vendor annotation fell
+	// through to the structural derivation and the chart ran with no diagnostic
+	// anywhere.
 	//
-	// This is a FAMILY-WIDE contract, not a Go choice: lazily-rs derives the
-	// same ladder in `parse_state` (`src/statechart.rs`), ending in
-	// `Kind::Atomic`, and reads `history` through `as_str()` so a non-string
-	// `history` likewise falls through instead of erroring. Diverging here
-	// would make the same chart document load differently per binding.
+	// There is no forward-compat channel to appeal to. A chart is COMPUTE, not
+	// protocol — the schema's own description says it "is never serialized over
+	// IPC/FFI as a distinct type" — so no peer ever mints these strings; an
+	// unrecognised `kind` is an authoring error in a local document, and quietly
+	// running a different chart than the author wrote is the worse outcome.
+	// lazily-rs, lazily-dart, lazily-js, lazily-kt and lazily-cs all reject it
+	// by name; this comment previously cited lazily-rs's ladder as the reason to
+	// stay lenient, and lazily-rs has since reversed that.
 	//
-	// Note what is NOT lenient: a `history` that IS a string but is neither
-	// "shallow" nor "deep" is rejected below, because the history KIND changes
-	// what gets restored, and guessing there silently loses state.
+	// `history` is closed the same way, to the strings "shallow" and "deep". A
+	// non-string `history` used to fall through to the structural derivation,
+	// which drops the pseudo-state entirely — strictly worse than guessing a
+	// mode, which this function already refuses to do for an unknown history
+	// STRING. The asymmetry had no basis, so both are rejected now, naming the
+	// offending value. lazily-rs reads `history` through a checked
+	// `optional_str` for the same reason.
 	//
-	// Pinned by TestStateChartKindLeniencyIsPinned.
+	// Pinned by TestStateChartKindStrictness.
+	if declared, present := obj["kind"]; present && declared != nil {
+		s, ok := declared.(string)
+		if !ok {
+			return stateDef{}, fmt.Errorf("state %s: `kind` must be a string, got %v", id, declared)
+		}
+		switch s {
+		case "atomic", "compound", "parallel", "history", "final":
+		default:
+			return stateDef{}, fmt.Errorf(
+				"state %s: unknown kind %q (expected one of atomic, compound, parallel, history, final)",
+				id, s)
+		}
+	}
+
 	var kind kindTag
 	switch h := obj["history"].(type) {
+	case nil:
+		if p, ok := obj["parallel"].(bool); ok && p {
+			kind = kindParallel
+		} else if asStr(obj["kind"]) == "final" {
+			kind = kindFinal
+		} else if _, ok := obj["initial"].(string); ok {
+			kind = kindCompound
+		} else {
+			kind = kindAtomic
+		}
 	case string:
 		switch h {
 		case "shallow":
@@ -265,15 +293,8 @@ func parseState(id string, obj map[string]any) (stateDef, error) {
 			return stateDef{}, fmt.Errorf("state %s: unknown history kind %s", id, h)
 		}
 	default:
-		if p, ok := obj["parallel"].(bool); ok && p {
-			kind = kindParallel
-		} else if asStr(obj["kind"]) == "final" {
-			kind = kindFinal
-		} else if _, ok := obj["initial"].(string); ok {
-			kind = kindCompound
-		} else {
-			kind = kindAtomic
-		}
+		return stateDef{}, fmt.Errorf(
+			"state %s: `history` must be the string \"shallow\" or \"deep\", got %v", id, h)
 	}
 
 	entry, err := actionList(obj["entry"])

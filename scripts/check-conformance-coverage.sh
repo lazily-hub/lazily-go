@@ -336,7 +336,7 @@ fi
 # distinguish "nothing is wrong" from "nothing was examined", so assert the
 # magnitude explicitly before reporting OK. Do not lower these to fix a red run —
 # a drop here means the corpus or the recorder shrank, which IS the finding.
-MIN_FIXTURES="${MIN_FIXTURES:-125}"
+MIN_FIXTURES="${MIN_FIXTURES:-130}"
 if [ "$total" -eq 0 ]; then
   echo "ERROR: the corpus at $SPEC_DIR listed ZERO fixtures." >&2
   echo "       Every check above is vacuously green over an empty population." >&2
@@ -355,7 +355,7 @@ echo "conformance coverage OK: $covered/$total canonical fixtures OPENED by the 
 # The same floor for rung 4. Its loop walks the scenarios of OPENED fixtures, so
 # zero opened fixtures means zero scenarios, which means zero unreplayed
 # scenarios — OK reported having compared nothing.
-MIN_SCENARIOS="${MIN_SCENARIOS:-114}"
+MIN_SCENARIOS="${MIN_SCENARIOS:-126}"
 if [ "$SCENARIO_TOTAL" -eq 0 ]; then
   echo "ERROR: ZERO scenarios were found across the opened fixtures." >&2
   echo "       The rung above is vacuously green over an empty population." >&2

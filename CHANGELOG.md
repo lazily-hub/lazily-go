@@ -41,14 +41,46 @@ All notable changes to lazily-go are documented here. This project adheres to
 ### Added
 
 - `failopen_audit_test.go` — rejection tests for the conversion above, plus
-  pinning tests for the three leniencies the audit ruled INTENTIONAL, each of
-  which now also carries a comment stating its wire reason: an unrecognised
-  state-chart `kind` deriving `Atomic` (matching `lazily-rs parse_state`), an
+  pinning tests for the leniencies the audit ruled INTENTIONAL, each of which
+  now also carries a comment stating its wire reason. Two of those verdicts were
+  subsequently overturned family-wide (see below); the surviving pin is the
   out-of-range `LazilyFfiMessageKind` code decoding as `Unknown` (the C enum's
-  zero default, for older hosts), and an unknown `ShmBlobRef.backend` string
-  normalizing to `Shm` (the omitted-when-default legacy descriptor). An
-  undocumented default and a deliberate one are indistinguishable from outside
-  the package; the pins make a later tidy-up that removes one show up red.
+  zero default, for older hosts). An undocumented default and a deliberate one
+  are indistinguishable from outside the package; the pins make a later tidy-up
+  that removes one show up red.
+
+### Changed — BREAKING: an unknown `ShmBlobRef.backend` and an unknown state-chart `kind` are rejected
+
+- `ShmBlobRef.backend` outside `{shm, arrow, in_process}` now FAILS the decode,
+  naming the offending token, in both the `json` and `msgpack` codecs
+  (`#lzblobbackendstrict`). It used to normalize to `Shm`. An ABSENT `backend` is
+  unchanged and still decodes as `Shm` — that absence is the field's only
+  forward-compatibility channel, since a new backend enters the protocol by
+  adding an enum value. `shm` is a backend this build genuinely resolves, so
+  folding an unknown token into it routed a non-shm descriptor into the shm
+  table, leaving the `resolve_wrong_backend` guarantee
+  (`docs/zero-copy-transport.md`) to be discharged probabilistically by a 64-bit
+  checksum instead of structurally by the routing rule. `lazily-rs` reversed the
+  same verdict and `lazily-js` had already shipped the refusal.
+- `BlobBackendKind.Normalized()` now collapses only the zero value; a
+  present-but-unknown kind is returned unchanged so it stays visibly unknown to
+  the encoder and the router. `BlobBackendKind.routerIndex()` returns
+  `(int, bool)` and `BlobRouter.ReadView` resolves nothing for a kind it cannot
+  route rather than falling into slot 0. New: `ParseBlobBackendKind(string)` and
+  `BlobBackendKind.IsKnown()`.
+- A state-chart `kind` outside `{atomic, compound, parallel, history, final}` is
+  rejected naming the value, and a non-string `history` is rejected naming the
+  field. `schemas/statechart.json` closes both, and a chart is COMPUTE — the
+  schema's own description says it "is never serialized over IPC/FFI as a
+  distinct type" — so there is no wire forward-compat argument for either. An
+  OMITTED `kind` keeps the structural inference unchanged, which is the case the
+  schema documents as inferred. The previous asymmetry, where a `history` of
+  `"medium"` was refused but a `history` of `7` silently dropped the
+  pseudo-state, had no basis.
+
+- `conformance/codec/blob_backend_discriminator.json` (8 scenarios, both codecs)
+  is replayed by `blob_backend_discriminator_conformance_test.go`, and vendored
+  under `test/conformance/` for the offline fallback.
 
 ## v0.25.0
 

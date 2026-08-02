@@ -43,6 +43,11 @@ func loadCodecFixture(t *testing.T, name string) (map[string]any, bool) {
 	t.Helper()
 	candidates := []string{
 		filepath.Join("..", "lazily-spec", "conformance", name),
+		// The vendored mirror, in the same place loadConformanceFixture reads
+		// it from, so the offline fallback is a real one rather than a copy
+		// nothing loads. TestVendoredFixturesMatchCanonical holds it
+		// byte-identical to the canonical corpus whenever the sibling is present.
+		filepath.Join("test", "conformance", name),
 		filepath.Join("conformance", name),
 		filepath.Join("testdata", "conformance", name),
 	}

@@ -25,6 +25,8 @@ package lazily
 // issued-blob table, they hold uniformly for every backend that maintains the
 // BlobBackend contract.
 
+import "fmt"
+
 // DefaultSpillThreshold is the default byte size at or above which SpillValue /
 // SpillMessage spill an inline payload to a backend. It is a deployment knob,
 // not a protocol constant: payloads below the threshold stay Inline (copying a
@@ -289,15 +291,29 @@ func NewBlobRouter() *BlobRouter { return &BlobRouter{} }
 // Register installs backend for its Kind, replacing any previously-registered
 // backend of the same kind. It returns the router for chaining.
 func (r *BlobRouter) Register(backend BlobBackend) *BlobRouter {
-	r.backends[backend.Kind().routerIndex()] = backend
+	idx, ok := backend.Kind().routerIndex()
+	if !ok {
+		panic(fmt.Sprintf("BlobRouter.Register: backend reports unknown kind %q "+
+			"(expected \"shm\", \"arrow\" or \"in_process\")", backend.Kind()))
+	}
+	r.backends[idx] = backend
 	return r
 }
 
 // ReadView resolves a descriptor by routing to its Backend kind. Returns
-// (nil, false) if no backend is registered for this kind, or the descriptor did
-// not resolve.
+// (nil, false) if the kind is one this build cannot route, if no backend is
+// registered for it, or if the descriptor did not resolve.
+//
+// A kind outside the enum resolves to nothing here rather than falling into slot
+// 0. Decoding rejects such a descriptor before it can reach the router
+// (#lzblobbackendstrict), so this is the in-process counterpart: a descriptor
+// hand-built in Go is not routed into the shm table either.
 func (r *BlobRouter) ReadView(descriptor ShmBlobRef) ([]byte, bool) {
-	backend := r.backends[descriptor.Backend.routerIndex()]
+	idx, ok := descriptor.Backend.routerIndex()
+	if !ok {
+		return nil, false
+	}
+	backend := r.backends[idx]
 	if backend == nil {
 		return nil, false
 	}

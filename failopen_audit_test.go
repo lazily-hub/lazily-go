@@ -1,6 +1,7 @@
 package lazily
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -167,45 +168,112 @@ func TestTextOpWireRoundTripSurvives(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// INTENTIONAL — state-chart `kind` derivation (state_chart.go parseState)
+// FAIL CLOSED — state-chart `kind` derivation (state_chart.go parseState)
 // ---------------------------------------------------------------------------
 
-// TestStateChartKindLeniencyIsPinned pins the deliberate leniency in
-// parseState: an unrecognised `kind` annotation, and a non-string `history`,
-// both fall through to the structural derivation instead of failing the
-// document. See the block comment at the site for the wire reason.
+// TestStateChartKindStrictness covers both halves of the `kind` contract after
+// the leniency here was overturned (#failclosedsweep).
 //
-// This mirrors lazily-rs `parse_state`, which ends the same ladder in
-// `Kind::Atomic` and reads `history` through `as_str()`. If a future change
-// makes lazily-go strict here, the same chart document would load in one
-// binding and be refused by another — this test is what turns that into a
-// red build instead of a field report.
-func TestStateChartKindLeniencyIsPinned(t *testing.T) {
-	t.Run("unknown kind annotation derives Atomic", func(t *testing.T) {
-		def := mustChart(t, `{
-			"initial": "root",
-			"states": {
-				"root":  {"initial": "leaf"},
-				"leaf":  {"parent": "root", "kind": "vendor-annotation-from-a-newer-spec"}
-			}
-		}`)
-		if got := def.kind("leaf"); got != kindAtomic {
-			t.Fatalf("unknown kind derived %v, want kindAtomic", got)
-		}
-		// Bounded consequence: an Atomic state is a real active leaf.
-		chart := NewStateChart(NewContext(), def)
-		if leaves := chart.ActiveLeaves(); len(leaves) != 1 || leaves[0] != "leaf" {
-			t.Fatalf("active leaves %v, want [leaf]", leaves)
-		}
-	})
+// This site used to be pinned as INTENTIONAL on the argument that `kind` is an
+// open annotation slot and that lazily-rs ends the same ladder in
+// `Kind::Atomic`. Both premises are gone: `schemas/statechart.json` closes
+// `kind` to {atomic, compound, parallel, history, final} under
+// `additionalProperties: false`, and lazily-rs, -dart, -js, -kt and -cs now
+// reject an unrecognised value by name. A chart is never serialized over
+// IPC/FFI, so there was never a wire forward-compat argument to make.
+//
+// The OMITTED case is unchanged and is what the schema documents as inferred —
+// that half still has to work, or "reject everything" would pass the rejections.
+func TestStateChartKindStrictness(t *testing.T) {
+	// --- the rejections -----------------------------------------------------
 
-	t.Run("unknown kind does not defeat structural derivation", func(t *testing.T) {
+	rejects := []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{
+			"unknown kind annotation",
+			`{"initial": "root", "states": {
+				"root": {"initial": "leaf"},
+				"leaf": {"parent": "root", "kind": "vendor-annotation-from-a-newer-spec"}
+			}}`,
+			`unknown kind "vendor-annotation-from-a-newer-spec"`,
+		},
+		{
+			"a typo of a legal kind",
+			`{"initial": "root", "states": {"root": {"kind": "finall"}}}`,
+			`unknown kind "finall"`,
+		},
+		{
+			"unknown kind on a compound state",
+			`{"initial": "root", "states": {
+				"root": {"kind": "machine", "initial": "leaf"},
+				"leaf": {"parent": "root"}
+			}}`,
+			`unknown kind "machine"`,
+		},
+		{
+			"unknown kind does not hide behind parallel",
+			`{"initial": "root", "states": {
+				"root": {"parallel": true, "kind": "unrecognised"},
+				"a":    {"parent": "root"},
+				"b":    {"parent": "root"}
+			}}`,
+			`unknown kind "unrecognised"`,
+		},
+		{
+			"non-string kind",
+			`{"initial": "root", "states": {"root": {"kind": 7}}}`,
+			"`kind` must be a string",
+		},
+		// `history` is closed the same way. The unknown-STRING case was already
+		// strict; the non-string case was not, and dropping the pseudo-state
+		// entirely is worse than guessing its mode.
+		{
+			"unknown string history",
+			`{"initial": "root", "states": {
+				"root": {"initial": "leaf"},
+				"leaf": {"parent": "root", "history": "medium"}
+			}}`,
+			"unknown history kind medium",
+		},
+		{
+			"non-string history",
+			`{"initial": "root", "states": {
+				"root": {"initial": "leaf"},
+				"leaf": {"parent": "root", "history": 7}
+			}}`,
+			"`history` must be the string",
+		},
+	}
+	for _, c := range rejects {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ChartDefFromJSON([]byte(c.doc))
+			if err == nil {
+				t.Fatalf("%s was accepted; want a rejection", c.doc)
+			}
+			// Naming the offending value is the assertion. A rejection for an
+			// unrelated reason implements none of the clause.
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("error %q does not name %q", err.Error(), c.want)
+			}
+		})
+	}
+
+	// --- the inference that must survive ------------------------------------
+	//
+	// An OMITTED `kind` is the schema's documented inference rule and stays
+	// exactly as it was. Without these, rejecting every chart would pass above.
+
+	t.Run("omitted kind still infers structurally", func(t *testing.T) {
 		def := mustChart(t, `{
 			"initial": "root",
 			"states": {
-				"root":  {"kind": "machine", "initial": "mid"},
-				"mid":   {"parent": "root", "kind": "whatever", "initial": "leaf"},
-				"leaf":  {"parent": "mid"}
+				"root": {"initial": "mid"},
+				"mid":  {"parent": "root", "initial": "leaf"},
+				"leaf": {"parent": "mid"}
 			}
 		}`)
 		if got := def.kind("root"); got != kindCompound {
@@ -214,13 +282,20 @@ func TestStateChartKindLeniencyIsPinned(t *testing.T) {
 		if got := def.kind("mid"); got != kindCompound {
 			t.Fatalf("mid derived %v, want kindCompound", got)
 		}
+		if got := def.kind("leaf"); got != kindAtomic {
+			t.Fatalf("leaf derived %v, want kindAtomic", got)
+		}
+		chart := NewStateChart(NewContext(), def)
+		if leaves := chart.ActiveLeaves(); len(leaves) != 1 || leaves[0] != "leaf" {
+			t.Fatalf("active leaves %v, want [leaf]", leaves)
+		}
 	})
 
-	t.Run("parallel outranks an unknown kind", func(t *testing.T) {
+	t.Run("omitted kind infers parallel", func(t *testing.T) {
 		def := mustChart(t, `{
 			"initial": "root",
 			"states": {
-				"root": {"parallel": true, "kind": "unrecognised"},
+				"root": {"parallel": true},
 				"a":    {"parent": "root"},
 				"b":    {"parent": "root"}
 			}
@@ -230,36 +305,43 @@ func TestStateChartKindLeniencyIsPinned(t *testing.T) {
 		}
 	})
 
-	t.Run("non-string history falls through instead of erroring", func(t *testing.T) {
+	// Every legal enum value must still parse, or "reject any present `kind`"
+	// would pass the rejections above.
+	t.Run("every enum value is accepted", func(t *testing.T) {
+		for _, k := range []string{"atomic", "compound", "parallel", "history", "final"} {
+			doc := `{"initial": "root", "states": {
+				"root": {"initial": "leaf"},
+				"leaf": {"parent": "root", "kind": "` + k + `"}
+			}}`
+			if _, err := ChartDefFromJSON([]byte(doc)); err != nil {
+				t.Fatalf("kind %q was rejected: %v", k, err)
+			}
+		}
+	})
+
+	t.Run("kind final is still honoured", func(t *testing.T) {
 		def := mustChart(t, `{
 			"initial": "root",
 			"states": {
 				"root": {"initial": "leaf"},
-				"leaf": {"parent": "root", "history": 7}
+				"leaf": {"parent": "root", "kind": "final"}
 			}
 		}`)
-		if got := def.kind("leaf"); got != kindAtomic {
-			t.Fatalf("non-string history derived %v, want kindAtomic", got)
+		if got := def.kind("leaf"); got != kindFinal {
+			t.Fatalf("leaf derived %v, want kindFinal", got)
 		}
 	})
 
-	// The counterpart that is NOT lenient, pinned in the same place so the two
-	// halves of the contract cannot drift apart: a `history` that IS a string
-	// but names an unknown mode is rejected, because the history mode decides
-	// what gets restored and guessing silently loses state.
-	t.Run("unknown string history is rejected", func(t *testing.T) {
-		_, err := ChartDefFromJSON([]byte(`{
+	t.Run("a string history still parses", func(t *testing.T) {
+		def := mustChart(t, `{
 			"initial": "root",
 			"states": {
 				"root": {"initial": "leaf"},
-				"leaf": {"parent": "root", "history": "medium"}
+				"leaf": {"parent": "root", "default": "leaf", "history": "deep"}
 			}
-		}`))
-		if err == nil {
-			t.Fatal("history:\"medium\" was accepted; want a rejection")
-		}
-		if !strings.Contains(err.Error(), "unknown history kind") {
-			t.Fatalf("error %q does not name the offending history kind", err.Error())
+		}`)
+		if got := def.kind("leaf"); got != kindHistoryDeep {
+			t.Fatalf("leaf derived %v, want kindHistoryDeep", got)
 		}
 	})
 }
@@ -314,47 +396,122 @@ func TestFFIMessageKindLeniencyIsPinned(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// INTENTIONAL — blob backend discriminator (ipc.go)
+// FAIL CLOSED — blob backend discriminator (ipc.go)
 // ---------------------------------------------------------------------------
 
-// TestBlobBackendLeniencyIsPinned pins the unknown-backend default, which
-// transport_test.go exercises only through ShmBlobRef unmarshaling.
+// TestBlobBackendStrictness covers both halves of the `backend` discriminator
+// contract (#lzblobbackendstrict).
 //
-// Wire reason: `backend` is an OPTIONAL, omitted-when-default field, so a
-// legacy descriptor minted before the field existed carries no backend at all
-// and must still resolve as Shm. A producer on a newer binding may stamp a
-// backend this binding has no code for; normalizing it to Shm rather than
-// erroring keeps the descriptor parseable, and the router then declines it
-// safely — routerIndex sends it to slot 0, and if no Shm backend is
-// registered ReadView returns (nil, false). It never resolves against a
-// backend of the wrong kind.
-func TestBlobBackendLeniencyIsPinned(t *testing.T) {
-	for _, unknown := range []BlobBackendKind{"", "rdma", "cuda-ipc", "Shm", "ARROW"} {
-		if got := unknown.Normalized(); got != BackendShm {
-			t.Fatalf("BlobBackendKind(%q).Normalized() = %q, want %q", unknown, got, BackendShm)
+// This site used to be pinned as INTENTIONAL: an unknown token was normalized to
+// Shm on the argument that the router then declines it, so nothing misroutes.
+// That inverts the resolve_wrong_backend theorem
+// (docs/zero-copy-transport.md), which says a descriptor of one kind never
+// resolves against a different backend's table BECAUSE receivers route by kind.
+// Reading an unknown kind as `shm` IS routing a non-shm descriptor into the shm
+// table — a table this build genuinely resolves — leaving the header
+// verification to catch it probabilistically with a 64-bit checksum instead of
+// the routing rule catching it structurally.
+//
+// The forward-compat channel is the field's ABSENCE, and it is the only one: a
+// new backend enters the protocol by adding an enum value, which is a spec
+// change with a fixture, so an unknown token is a corrupt or non-conforming
+// producer rather than a newer peer.
+func TestBlobBackendStrictness(t *testing.T) {
+	// --- the rejection ------------------------------------------------------
+
+	for _, unknown := range []string{"rdma", "cuda-ipc", "Shm", "ARROW", ""} {
+		if _, err := ParseBlobBackendKind(unknown); err == nil {
+			t.Fatalf("ParseBlobBackendKind(%q) accepted; want a rejection", unknown)
+		} else if !strings.Contains(err.Error(), unknown) && unknown != "" {
+			t.Fatalf("error %q does not name the offending token %q", err.Error(), unknown)
 		}
-		if !unknown.IsDefault() {
-			t.Fatalf("BlobBackendKind(%q).IsDefault() = false, want true", unknown)
-		}
-		if got := unknown.routerIndex(); got != 0 {
-			t.Fatalf("BlobBackendKind(%q).routerIndex() = %d, want 0", unknown, got)
+		if BlobBackendKind(unknown).IsKnown() && unknown != "" {
+			t.Fatalf("BlobBackendKind(%q).IsKnown() = true", unknown)
 		}
 	}
-	// Known kinds must still round-trip, or "always Shm" would pass the above.
+
+	// A present-but-unknown `backend` fails the DECODE, naming the token. It is
+	// not silently rewritten to a legal value.
+	wire := []byte(`{"offset":40,"len":17,"generation":2,"epoch":9,` +
+		`"checksum":987654321,"backend":"rdma"}`)
+	var ref ShmBlobRef
+	err := json.Unmarshal(wire, &ref)
+	if err == nil {
+		t.Fatalf("a descriptor with backend \"rdma\" decoded to %+v; want a rejection", ref)
+	}
+	if !strings.Contains(err.Error(), "rdma") {
+		t.Fatalf("error %q does not name the offending token", err.Error())
+	}
+	if ref.Backend != "" {
+		t.Fatalf("a rejected decode still populated the descriptor: %+v", ref)
+	}
+
+	// --- the leniency that must survive -------------------------------------
+	//
+	// An ABSENT backend is the forward-compat channel and still decodes as Shm.
+
+	var legacy ShmBlobRef
+	if err := json.Unmarshal([]byte(
+		`{"offset":40,"len":17,"generation":2,"epoch":9,"checksum":987654321}`), &legacy); err != nil {
+		t.Fatalf("a descriptor with no `backend` must decode: %v", err)
+	}
+	if legacy.Backend.Normalized() != BackendShm {
+		t.Fatalf("absent backend decoded as %q, want %q", legacy.Backend, BackendShm)
+	}
+	// ...and re-encodes without the field, so a pre-field descriptor round-trips
+	// byte-identically.
+	out, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(out, []byte(`"backend"`)) {
+		t.Fatalf("a shm descriptor emitted the `backend` field: %s", out)
+	}
+
+	// Known kinds must still parse and route, or "reject everything" would pass
+	// the rejections above.
 	for kind, wantIndex := range map[BlobBackendKind]int{
 		BackendShm: 0, BackendArrow: 1, BackendInProcess: 2,
 	} {
-		if got := kind.Normalized(); got != kind {
-			t.Fatalf("%q.Normalized() = %q, want itself", kind, got)
+		parsed, err := ParseBlobBackendKind(string(kind))
+		if err != nil {
+			t.Fatalf("ParseBlobBackendKind(%q): %v", kind, err)
 		}
-		if got := kind.routerIndex(); got != wantIndex {
-			t.Fatalf("%q.routerIndex() = %d, want %d", kind, got, wantIndex)
+		if parsed != kind {
+			t.Fatalf("ParseBlobBackendKind(%q) = %q", kind, parsed)
+		}
+		got, ok := kind.routerIndex()
+		if !ok || got != wantIndex {
+			t.Fatalf("%q.routerIndex() = %d (ok=%v), want %d", kind, got, ok, wantIndex)
 		}
 	}
-	// The bounded consequence: an unknown backend resolves to nothing rather
-	// than to some other backend's bytes.
-	router := NewBlobRouter()
-	if _, ok := router.ReadView(ShmBlobRef{Backend: "rdma", Len: 4}); ok {
-		t.Fatal("an unknown backend resolved against an empty router")
+	// The absent discriminator routes to the shm slot, which is what makes the
+	// pre-field descriptor resolvable at all.
+	if got, ok := BlobBackendKind("").routerIndex(); !ok || got != 0 {
+		t.Fatalf("absent backend routerIndex() = %d (ok=%v), want 0", got, ok)
+	}
+
+	// --- the in-process counterpart -----------------------------------------
+	//
+	// A descriptor built in Go rather than decoded cannot reach the strict
+	// decoder, so the router refuses to route it too. It resolves to NOTHING
+	// rather than into slot 0.
+	if _, ok := BlobBackendKind("rdma").routerIndex(); ok {
+		t.Fatal("an unknown backend claimed a router slot")
+	}
+	backend := NewInProcessBackend()
+	router := NewBlobRouter().Register(backend)
+	desc, err := backend.Write([]byte("abcd"))
+	if err != nil {
+		t.Fatalf("in-process write: %v", err)
+	}
+	// Positive control first, so the refusal below is known to be about the
+	// discriminator rather than about an empty router.
+	if _, ok := router.ReadView(desc); !ok {
+		t.Fatal("a real descriptor did not resolve; the negative case below would prove nothing")
+	}
+	// Same descriptor, same registered backend, only the discriminator changed.
+	if _, ok := router.ReadView(desc.WithBackend("rdma")); ok {
+		t.Fatal("an unknown backend resolved against a populated router")
 	}
 }

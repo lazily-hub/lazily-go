@@ -121,9 +121,11 @@ func (k *NodeKey) UnmarshalJSON(b []byte) error {
 // Rust `BlobBackendKind` enum; the `arena` itself is backend-agnostic and does
 // not store it — the discriminator is wire-level routing only.
 //
-// The zero value ("") is the default backend, Shm, so a legacy descriptor with
-// no `backend` field resolves unchanged. Unknown strings also fall back to Shm
-// (never a hard failure), matching the Rust `from_str`.
+// The zero value ("") is the ABSENT discriminator and resolves to Shm, so a
+// descriptor minted before the field existed resolves unchanged. That absence is
+// the whole of the forward compatibility here (#lzblobbackendstrict): a value
+// that is PRESENT but outside the enum is rejected by name, never collapsed to
+// Shm — see ParseBlobBackendKind.
 type BlobBackendKind string
 
 const (
@@ -138,32 +140,78 @@ const (
 	BackendInProcess BlobBackendKind = "in_process"
 )
 
-// Normalized collapses the zero value and any unknown discriminator to the
-// default backend (Shm), so resolution never hard-fails on a legacy or
-// forward-compatible descriptor.
+// Normalized resolves the ABSENT discriminator — the zero value, which is what
+// an omitted `backend` field decodes to — into the default backend, Shm.
+//
+// That is the only collapse it performs. A present-but-unrecognised value is
+// returned UNCHANGED so that it stays visibly unknown to routerIndex, to the
+// encoder, and to String. It used to be folded into Shm here, and this comment
+// used to argue that was safe because the router merely declines. It is not: Shm
+// is a backend this build genuinely resolves, so folding an unknown kind into it
+// routes a non-shm descriptor into the shm table and leaves the
+// resolve_wrong_backend guarantee to be discharged probabilistically by a 64-bit
+// checksum instead of structurally by the routing rule
+// (docs/zero-copy-transport.md, #lzblobbackendstrict).
 func (k BlobBackendKind) Normalized() BlobBackendKind {
-	switch k {
-	case BackendArrow, BackendInProcess:
-		return k
-	default:
+	if k == "" {
 		return BackendShm
+	}
+	return k
+}
+
+// IsKnown reports whether k names a backend this build can route: one of the
+// three enum values, or the absent (zero) value, which means Shm.
+func (k BlobBackendKind) IsKnown() bool {
+	switch k.Normalized() {
+	case BackendShm, BackendArrow, BackendInProcess:
+		return true
+	default:
+		return false
 	}
 }
 
-// IsDefault reports whether this is the default backend (Shm). Used to omit the
-// `backend` field on the wire so legacy descriptors validate unchanged.
+// ParseBlobBackendKind decodes a `backend` discriminator that is PRESENT on the
+// wire, rejecting any value outside the enum and naming the offending token.
+//
+// Nothing here is a forward-compatibility hazard. A new backend enters the
+// protocol by adding an enum value — a spec change carrying its own fixture — so
+// a token this build does not know is a corrupt or non-conforming producer, not
+// a newer peer. Descriptors that predate the field carry no `backend` at all and
+// never reach this function.
+//
+// The empty string is rejected too: absence is spelled by OMITTING the field,
+// and `"backend": ""` names no member of the enum.
+func ParseBlobBackendKind(s string) (BlobBackendKind, error) {
+	switch BlobBackendKind(s) {
+	case BackendShm, BackendArrow, BackendInProcess:
+		return BlobBackendKind(s), nil
+	default:
+		return "", fmt.Errorf(
+			"unknown blob backend %q (expected \"shm\", \"arrow\" or \"in_process\")", s)
+	}
+}
+
+// IsDefault reports whether this is the default backend (Shm), including the
+// absent zero value. Used to OMIT the `backend` field on the wire when it is
+// `shm`, so a descriptor minted before the field existed round-trips
+// byte-identically. An unrecognised kind is not default, so it is emitted rather
+// than laundered into a legal-looking `shm` frame.
 func (k BlobBackendKind) IsDefault() bool { return k.Normalized() == BackendShm }
 
 // routerIndex is the BlobRouter slot for this backend kind (Shm=0, Arrow=1,
 // InProcess=2), matching the Rust `BlobBackendKind as usize` router indexing.
-func (k BlobBackendKind) routerIndex() int {
+// `ok` is false for a kind this build cannot route; the caller resolves nothing
+// rather than falling into slot 0.
+func (k BlobBackendKind) routerIndex() (int, bool) {
 	switch k.Normalized() {
+	case BackendShm:
+		return 0, true
 	case BackendArrow:
-		return 1
+		return 1, true
 	case BackendInProcess:
-		return 2
+		return 2, true
 	default:
-		return 0
+		return -1, false
 	}
 }
 
@@ -175,8 +223,9 @@ func (k BlobBackendKind) routerIndex() int {
 // arena writes a fixed header { generation, epoch, length, checksum } before
 // each payload; this struct is the wire mirror of that descriptor. The optional
 // Backend discriminator selects which pluggable backend resolves it; it defaults
-// to Shm and is omitted on the wire when default, so legacy descriptors validate
-// unchanged (a strict superset of the pre-existing shared-memory blob path).
+// to Shm and is omitted on the wire when default, so a descriptor minted before
+// the field existed round-trips byte-identically. A present value outside the
+// enum is rejected on decode (#lzblobbackendstrict).
 type ShmBlobRef struct {
 	Offset     int64           `json:"offset"`
 	Len        int64           `json:"len"`
@@ -195,8 +244,8 @@ func (r ShmBlobRef) WithBackend(kind BlobBackendKind) ShmBlobRef {
 }
 
 // MarshalJSON emits the descriptor with fields in schema order, omitting the
-// `backend` field when it is the default (Shm) so the wire form is a strict
-// superset of the legacy backend-absent descriptor.
+// `backend` field when it is the default (Shm) so a descriptor with no backend
+// round-trips byte-identically to the pre-field form.
 func (r ShmBlobRef) MarshalJSON() ([]byte, error) {
 	type wire struct {
 		Offset     int64  `json:"offset"`
@@ -230,18 +279,44 @@ func NewShmBlobRef(offset, length, generation, epoch, checksum int64) (ShmBlobRe
 }
 
 // UnmarshalJSON validates non-negative fields to match the Dart fromWire and
-// normalizes the optional `backend` discriminator (absent or unknown → Shm).
+// decides the optional `backend` discriminator (#lzblobbackendstrict): ABSENT
+// decodes as Shm, and a PRESENT value outside the enum is REJECTED naming the
+// token rather than normalized to Shm.
+//
+// The distinction needs a pointer. Decoding straight into BlobBackendKind makes
+// an omitted field and `"backend": ""` indistinguishable, and only the first of
+// those is the forward-compat channel.
 func (r *ShmBlobRef) UnmarshalJSON(b []byte) error {
-	type raw ShmBlobRef
-	var x raw
+	var x struct {
+		Offset     int64   `json:"offset"`
+		Len        int64   `json:"len"`
+		Generation int64   `json:"generation"`
+		Epoch      int64   `json:"epoch"`
+		Checksum   int64   `json:"checksum"`
+		Backend    *string `json:"backend"`
+	}
 	if err := json.Unmarshal(b, &x); err != nil {
 		return err
 	}
 	if x.Offset < 0 || x.Len < 0 || x.Generation < 0 || x.Epoch < 0 || x.Checksum < 0 {
 		return fmt.Errorf("ShmBlobRef fields must be non-negative")
 	}
-	x.Backend = x.Backend.Normalized()
-	*r = ShmBlobRef(x)
+	backend := BackendShm
+	if x.Backend != nil {
+		parsed, err := ParseBlobBackendKind(*x.Backend)
+		if err != nil {
+			return fmt.Errorf("ShmBlobRef.backend: %w", err)
+		}
+		backend = parsed
+	}
+	*r = ShmBlobRef{
+		Offset:     x.Offset,
+		Len:        x.Len,
+		Generation: x.Generation,
+		Epoch:      x.Epoch,
+		Checksum:   x.Checksum,
+		Backend:    backend,
+	}
 	return nil
 }
 

@@ -7,6 +7,7 @@ package lazily
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -265,16 +266,19 @@ func TestBackendWireOmittedWhenDefault(t *testing.T) {
 }
 
 func TestBackendWireRoundTrip(t *testing.T) {
-	// Absent backend → shm (default), and unknown backend → shm (never a hard
-	// failure), matching the Rust from_str fallback.
+	// An ABSENT backend decodes as shm (the default, and the field's only
+	// forward-compat channel); each enum value decodes as itself. An unknown
+	// token is REJECTED rather than folded into shm — see
+	// TestBlobBackendStrictness and blob_backend_discriminator.json
+	// (#lzblobbackendstrict).
 	cases := []struct {
 		in   string
 		want BlobBackendKind
 	}{
 		{`{"offset":40,"len":17,"generation":2,"epoch":9,"checksum":987654321}`, BackendShm},
+		{`{"offset":40,"len":17,"generation":2,"epoch":9,"checksum":987654321,"backend":"shm"}`, BackendShm},
 		{`{"offset":40,"len":17,"generation":2,"epoch":9,"checksum":987654321,"backend":"arrow"}`, BackendArrow},
 		{`{"offset":40,"len":17,"generation":2,"epoch":9,"checksum":987654321,"backend":"in_process"}`, BackendInProcess},
-		{`{"offset":40,"len":17,"generation":2,"epoch":9,"checksum":987654321,"backend":"rdma"}`, BackendShm},
 	}
 	for _, c := range cases {
 		var ref ShmBlobRef
@@ -284,5 +288,13 @@ func TestBackendWireRoundTrip(t *testing.T) {
 		if ref.Backend.Normalized() != c.want {
 			t.Fatalf("%s → backend %q, want %q", c.in, ref.Backend, c.want)
 		}
+	}
+
+	const unknown = `{"offset":40,"len":17,"generation":2,"epoch":9,"checksum":987654321,"backend":"rdma"}`
+	var ref ShmBlobRef
+	if err := json.Unmarshal([]byte(unknown), &ref); err == nil {
+		t.Fatalf("%s decoded to %+v; want a rejection naming `rdma`", unknown, ref)
+	} else if !strings.Contains(err.Error(), "rdma") {
+		t.Fatalf("error %q does not name the offending token", err.Error())
 	}
 }
