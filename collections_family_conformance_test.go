@@ -397,12 +397,20 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 			// `at` says where the new key lands; minting appends, so "end" is
 			// already right. An unrecognised form must fail, not silently append.
 			switch at := op["at"].(type) {
+			case nil:
+				// No placement stated: minting appends, which is "end".
 			case string:
 				if at != "end" {
 					t.Fatalf("%s: unsupported insert placement %q", where(i), at)
 				}
 			case float64:
 				flavor.moveTo(key, int(at))
+			default:
+				// Fail closed (#lzscenariobodyskip). Without this arm the type
+				// switch fell through for any other shape of `at`, so a fixture
+				// stating a placement this runner cannot read appended instead
+				// and still reported the scenario as covered.
+				t.Fatalf("%s: unsupported insert placement %T (%v)", where(i), at, at)
 			}
 		case "remove":
 			key, _ := op["key"].(string)

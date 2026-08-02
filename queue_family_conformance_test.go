@@ -1328,6 +1328,13 @@ func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureMod
 					got.Deadline != int64(jsInt(want["deadline"])) {
 					t.Errorf("%s returns=%v, want %v", label, gotReturn, want)
 				}
+			default:
+				// Fail closed (#lzscenariobodyskip). Without this arm a
+				// `returns` in any other JSON shape — a string, a list — fell
+				// through UNASSERTED while the step still counted as replayed.
+				// Sibling queue fixtures already state string returns, so this
+				// is one corpus edit away from a silent false green.
+				t.Fatalf("%s: unsupported `returns` shape %T (%v)", label, want, want)
 			}
 		}
 		assertWorkQueueState(t, label, model, expected)

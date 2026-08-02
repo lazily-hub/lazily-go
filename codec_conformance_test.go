@@ -407,6 +407,17 @@ func assertCodecEncoding(t *testing.T, block map[string]any, variant string, enc
 			msgpackFieldNames(t, msgpackElement(t, ops, 0, "ops"), "first op"))
 		assertKey(t, block, "second_op_encoded_field_names",
 			msgpackFieldNames(t, msgpackElement(t, ops, 1, "ops"), "second op"))
+	case "Delta":
+		// No per-variant encoded-field-name key: the Delta scenario pins its op
+		// shapes through `op_variants` and `first_op_payload` in
+		// assertCodecValues instead. Named explicitly so the `default` below can
+		// fail closed.
+	default:
+		// Fail closed (#lzscenariobodyskip). Without this the switch fell
+		// through, so a fixture naming a frame variant this function has no
+		// encoding assertion for checked nothing here and still reported the
+		// scenario as covered.
+		t.Fatalf("unknown frame variant %q", variant)
 	}
 }
 

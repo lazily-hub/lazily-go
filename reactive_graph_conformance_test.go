@@ -878,8 +878,15 @@ func (e *replayEngine) create(op reactiveGraphOp) nodeRef {
 		return target.cell(op.ID, *op.Value)
 	case "computed":
 		return target.computed(op.ID, e.refs(op.Reads), op.Offset)
-	default:
+	case "effect":
 		return target.effect(op.ID, e.refs(op.Reads))
+	default:
+		// Fail closed (#lzscenariobodyskip). `effect` used to be the `default`
+		// arm, which ASSUMED the last variant without checking it: any op type
+		// routed here that this runner does not implement silently built an
+		// effect, and the step still reported as replayed.
+		e.t.Fatalf("%s#%d: unknown node constructor %q", e.fixture, e.step, op.Type)
+		return nodeRef{}
 	}
 }
 

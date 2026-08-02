@@ -100,19 +100,32 @@ func applySourceMapOp(m *SourceMap[string, int], op map[string]any) {
 		key := jsStr(op["key"])
 		value := jsInt(op["value"])
 		switch at := op["at"].(type) {
+		case nil:
+			// No placement stated: minting appends, so this is already "end".
+			m.Set(key, value)
 		case string:
 			switch at {
 			case "front":
 				m.Set(key, value)
 				m.MoveTo(key, 0)
-			default: // "end"
+			case "end":
 				m.Set(key, value)
+			default:
+				// Fail closed (#lzscenariobodyskip). This arm used to be
+				// `default: // "end"`, so a placement this runner does not
+				// implement ("middle", "before_x", ...) silently appended and
+				// the scenario still reported as covered.
+				panic("unknown cellmap insert placement: " + at)
 			}
 		case float64:
 			m.Set(key, value)
 			m.MoveTo(key, int(at))
 		default:
-			m.Set(key, value)
+			// Fail closed (#lzscenariobodyskip). The old default appended for
+			// ANY shape of `at` — a bool, a list, an object — so a fixture
+			// stating a placement in a form this runner cannot read replayed a
+			// plain append and reported the scenario as covered.
+			panic(fmt.Sprintf("unsupported cellmap insert placement %T (%v)", at, at))
 		}
 	case "remove":
 		m.Remove(jsStr(op["key"]))
@@ -759,11 +772,18 @@ func seedTextCrdt(scenario map[string]any) *TextCrdt {
 		return TextCrdtFromStr(peer, s)
 	case map[string]any:
 		return TextCrdtFromStr(int64(jsInt(s["peer"])), jsStr(s["text"]))
-	default:
+	case nil:
+		// No seed stated: start empty.
 		if replicaSpec != nil {
 			return NewTextCrdt(int64(jsInt(replicaSpec["peer"])))
 		}
 		return NewTextCrdt(1)
+	default:
+		// Fail closed (#lzscenariobodyskip). The absent-seed arm used to be the
+		// `default`, so a seed in any other shape (a number, a list) was read as
+		// "no seed", replayed against an EMPTY document, and still reported the
+		// scenario as covered.
+		panic(fmt.Sprintf("unsupported textcrdt seed %T (%v)", s, s))
 	}
 }
 
@@ -1176,6 +1196,12 @@ func assertReconcileOps(t *testing.T, name string, ops []DiffOp[string, int], ex
 			} else if upd.Key != jsStr(want["key"]) {
 				t.Errorf("%s op[%d]: update key = %q, want %q", name, i, upd.Key, jsStr(want["key"]))
 			}
+		default:
+			// Fail closed (#lzscenariobodyskip). Without this the switch fell
+			// through, so a fixture stating an op type this runner does not
+			// implement asserted NOTHING about that op — only the op COUNT was
+			// checked — and the scenario still reported as covered.
+			t.Fatalf("%s op[%d]: unknown expected op type %v", name, i, want["type"])
 		}
 	}
 }
