@@ -18,8 +18,26 @@
 set -euo pipefail
 
 SPEC_DIR="${LAZILY_SPEC_CONFORMANCE_DIR:-../lazily-spec/conformance}"
+
+# A missing corpus is a legitimate local state (no sibling checkout) and an
+# illegitimate CI state (#lzvacuousrun). Skipping under CI is the vacuous green
+# this guard exists to prevent: every rung below reasons about fixtures the run
+# OPENED, so an absent corpus reports OK over nothing at all — zero opened
+# fixtures means zero uncovered fixtures, zero unreplayed scenarios, and zero
+# stale excuses, so nothing further down can contradict it. Under CI this is
+# missing EVIDENCE, exactly as a missing manifest is, and it fails the same way.
+# Locally it stays a skip, because a contributor without the sibling checkout is
+# not making a false claim.
 if [ ! -d "$SPEC_DIR" ]; then
+  if [ -n "${CI:-}" ]; then
+    echo "ERROR: canonical corpus not found at $SPEC_DIR, and CI is set." >&2
+    echo "       Under CI this is missing EVIDENCE, not evidence of absence: the" >&2
+    echo "       checkout is wrong, not the corpus. Exiting 0 here would report" >&2
+    echo "       conformance OK having examined zero fixtures (#lzvacuousrun)." >&2
+    exit 1
+  fi
   echo "SKIP: canonical corpus not found at $SPEC_DIR (clone the lazily-spec sibling)" >&2
+  echo "      Local checkout only — this would be a hard failure under CI." >&2
   exit 0
 fi
 
@@ -300,8 +318,45 @@ if [ "$missing" -gt 0 ]; then
   exit 1
 fi
 
+# ---- Positive-evidence floor (#lzvacuousrun) ----
+# Everything above reasons about fixtures this run OPENED, so all of it is
+# vacuously satisfied by an empty population: zero fixtures means zero uncovered
+# fixtures and zero stale excuses, and `missing` stays 0. The loops cannot
+# distinguish "nothing is wrong" from "nothing was examined", so assert the
+# magnitude explicitly before reporting OK. Do not lower these to fix a red run —
+# a drop here means the corpus or the recorder shrank, which IS the finding.
+MIN_FIXTURES="${MIN_FIXTURES:-125}"
+if [ "$total" -eq 0 ]; then
+  echo "ERROR: the corpus at $SPEC_DIR listed ZERO fixtures." >&2
+  echo "       Every check above is vacuously green over an empty population." >&2
+  exit 1
+fi
+if [ "$covered" -lt "$MIN_FIXTURES" ]; then
+  echo "ERROR: only $covered distinct canonical fixtures were OPENED, expected >= $MIN_FIXTURES." >&2
+  echo "       A replay was removed, renamed, or short-circuited, or the recorder" >&2
+  echo "       detached mid-run. Do not lower MIN_FIXTURES to fix this." >&2
+  exit 1
+fi
+
 echo "conformance coverage OK: $covered/$total canonical fixtures OPENED by the suite" \
      "(${#KNOWN_UNCOVERED[@]} listed as known-uncovered; runtime manifest — these bytes were really read)"
+
+# The same floor for rung 4. Its loop walks the scenarios of OPENED fixtures, so
+# zero opened fixtures means zero scenarios, which means zero unreplayed
+# scenarios — OK reported having compared nothing.
+MIN_SCENARIOS="${MIN_SCENARIOS:-114}"
+if [ "$SCENARIO_TOTAL" -eq 0 ]; then
+  echo "ERROR: ZERO scenarios were found across the opened fixtures." >&2
+  echo "       The rung above is vacuously green over an empty population." >&2
+  exit 1
+fi
+if [ "$SCENARIO_REPLAYED" -lt "$MIN_SCENARIOS" ]; then
+  echo "ERROR: only $SCENARIO_REPLAYED distinct scenarios were REPLAYED, expected >= $MIN_SCENARIOS." >&2
+  echo "       A scenario dispatch stopped matching, or the ledger detached." >&2
+  echo "       Do not lower MIN_SCENARIOS to fix this." >&2
+  exit 1
+fi
+
 echo "scenario coverage OK: $SCENARIO_REPLAYED/$SCENARIO_TOTAL scenarios of those fixtures REPLAYED" \
      "(${#SCENARIO_EXCUSES[@]} excused; runtime ledger — recorded at the point of replay)"
 
