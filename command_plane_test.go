@@ -327,7 +327,7 @@ func runMessagePassingFixture(t *testing.T, name string) {
 	// nothing the corpus carries, so recording it would be evidence of a replay
 	// the fixture never asked for.
 	for index, sc := range fixture.Scenarios {
-		recordScenario(filepath.Join("message-passing", name), scenarioKey("", sc.Name, index))
+		recordScenarioAt(filepath.Join("message-passing", name), index, "", sc.Name)
 	}
 	if len(scenarios) == 0 {
 		// Bare frames+expect at the top level: wrap in a single scenario.

@@ -206,23 +206,24 @@ fi
 REPLAYED="$(sort -u "$SCENARIOS")"
 
 # scenario_ids prints a fixture's scenario ids in the ONE resolution order every
-# binding uses: `id`, else `name`, else the 0-based position spelled `#<n>`. The
-# runtime ledger resolves identically (scenarioKey in
-# conformance_scenario_ledger_test.go); if the two ever drifted apart, every
+# binding uses: `id`, else `name`. There is no third step (#lzspecscenarioids) --
+# a positional `#<n>` id silently rebinds to a different scenario when the corpus
+# array is reordered, so an unidentified scenario is marked and reported rather
+# than given an invented id. The runtime ledger resolves identically (scenarioKey
+# in conformance_scenario_ledger_test.go); if the two ever drifted apart, every
 # scenario of the affected fixture would read as unreplayed at once.
 scenario_ids() {
   jq -r '
     if (.scenarios | type) == "array" then
       .scenarios | to_entries[] |
-        if ((.value.id? // "") | tostring) != "" then (.value.id | tostring)
-        elif ((.value.name? // "") | tostring) != "" then (.value.name | tostring)
-        else "#\(.key)" end
+        if ((.value.id? // "") | tostring | gsub("\\s"; "")) != "" then (.value.id | tostring)
+        elif ((.value.name? // "") | tostring | gsub("\\s"; "")) != "" then (.value.name | tostring)
+        else "!UNIDENTIFIED!\(.key)" end
     else empty end' "$SPEC_DIR/$1"
 }
 
 SCENARIO_TOTAL=0
 SCENARIO_REPLAYED=0
-POSITIONAL_ONLY=()
 
 while IFS= read -r fixture; do
   # Only fixtures the manifest says were OPENED. A fixture nobody opened is
@@ -232,8 +233,18 @@ while IFS= read -r fixture; do
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     SCENARIO_TOTAL=$((SCENARIO_TOTAL + 1))
+    # An unidentified scenario is a corpus defect, not an id to invent
+    # (#lzspecscenarioids). Booking it by POSITION would silently rebind that
+    # ledger entry to a different scenario on any corpus reorder.
     case "$id" in
-      '#'*) POSITIONAL_ONLY+=("$fixture [$id]") ;;
+      '!UNIDENTIFIED!'*)
+        echo "ERROR: '$fixture' scenario at index ${id#!UNIDENTIFIED!} carries neither" >&2
+        echo "       \`id\` nor \`name\`. The ledger would record it by POSITION, which" >&2
+        echo "       silently rebinds on a corpus reorder. Give it a stable id upstream" >&2
+        echo "       in lazily-spec (#lzspecscenarioids)." >&2
+        missing=$((missing + 1))
+        continue
+        ;;
     esac
     key="$(printf '%s\t%s' "$fixture" "$id")"
     if grep -qxF "$key" <<< "$REPLAYED"; then
@@ -360,14 +371,3 @@ fi
 echo "scenario coverage OK: $SCENARIO_REPLAYED/$SCENARIO_TOTAL scenarios of those fixtures REPLAYED" \
      "(${#SCENARIO_EXCUSES[@]} excused; runtime ledger — recorded at the point of replay)"
 
-# The positional fallback is reported, never silently accepted. Each line names a
-# corpus fixture whose scenarios carry neither an identifier nor a name, so this
-# binding can only tell them apart by position — stable only until someone
-# reorders the array upstream. Fixing that is a shared-corpus change and belongs
-# in lazily-spec, not here.
-if [ "${#POSITIONAL_ONLY[@]}" -gt 0 ]; then
-  echo "scenario coverage NOTE: ${#POSITIONAL_ONLY[@]} scenario(s) identified by POSITION only:"
-  for entry in "${POSITIONAL_ONLY[@]}"; do
-    echo "  $entry"
-  done
-fi

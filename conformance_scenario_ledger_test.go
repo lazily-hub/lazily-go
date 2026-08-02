@@ -1,6 +1,7 @@
 package lazily
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -44,22 +45,35 @@ var (
 )
 
 // scenarioKey resolves a scenario's identity in the one order every binding
-// uses: `id`, else `name`, else the 0-based positional index spelled `#<n>`.
+// uses: `id`, else `name`. There is no third option.
 //
-// The corpus is not uniform — the three stdlib fixtures carry `id`, 28 others
-// carry `name`, and collections/mergecell_algebra.json carries neither, its
-// scenarios distinguished only by `policy`. The positional fallback exists so
-// this guard is not blocked on a shared-corpus edit; it is reported by the
-// verifier rather than silently accepted, and that visibility is what makes the
-// corpus gap fixable upstream later.
-func scenarioKey(id, name string, index int) string {
+// The positional `#<n>` fallback is GONE (#lzspecscenarioids). It let the ledger
+// record a scenario BY POSITION, where inserting one ahead of it silently rebinds
+// that entry — and any excuse naming it — to a different scenario, with nothing
+// turning red: the verifier compares "index 1 was replayed" against whatever now
+// sits at index 1 and agrees with itself.
+//
+// It was load-bearing for exactly one fixture,
+// collections/mergecell_algebra.json, whose scenarios were distinguished only by
+// `policy`. They carry ids now, and lazily-spec's scenario-identity-check keeps
+// every scenario identified — so this is a hole with no users, which is one
+// waiting to become load-bearing again.
+//
+// A blank identifier is refused for the same reason: it would file every
+// blank-id scenario under one ledger entry, which reads as "replayed" the moment
+// any one of them runs.
+//
+// `ok` is false for an unidentified scenario. The caller turns that into a
+// failure rather than inventing an id — a test helper cannot panic usefully from
+// inside a subtest, so refusal is a return value here rather than a panic.
+func scenarioKey(id, name string, index int) (string, bool) {
 	if s := strings.TrimSpace(id); s != "" {
-		return s
+		return s, true
 	}
 	if s := strings.TrimSpace(name); s != "" {
-		return s
+		return s, true
 	}
-	return "#" + strconv.Itoa(index)
+	return "#" + strconv.Itoa(index), false
 }
 
 // recordScenario records that the run replayed `id` of `fixture`.
@@ -87,7 +101,15 @@ func recordScenario(fixture, id string) {
 // from the scenario's own fields and its position, record it, and hand it back
 // for use as a subtest label.
 func recordScenarioAt(fixture string, index int, id, name string) string {
-	key := scenarioKey(id, name, index)
+	key, ok := scenarioKey(id, name, index)
+	if !ok {
+		panic(fmt.Sprintf(
+			"%s: scenario at index %d carries neither `id` nor `name`. The replay "+
+				"ledger would have to record it by POSITION, where inserting a scenario "+
+				"ahead of it silently rebinds that entry to a different scenario. Give it "+
+				"a stable id upstream in lazily-spec (#lzspecscenarioids).",
+			fixture, index))
+	}
 	recordScenario(fixture, key)
 	return key
 }
@@ -155,18 +177,38 @@ func flushConformanceScenarios() {
 // unreplayed and the diagnosis points at the runner instead of at this
 // function.
 func TestScenarioKeyResolutionOrder(t *testing.T) {
-	if got := scenarioKey("fires_at_deadline", "ignored name", 3); got != "fires_at_deadline" {
-		t.Fatalf("id must win: %q", got)
+	if got, ok := scenarioKey("fires_at_deadline", "ignored name", 3); got != "fires_at_deadline" || !ok {
+		t.Fatalf("id must win: %q (ok=%v)", got, ok)
 	}
-	if got := scenarioKey("", "repair_converges", 3); got != "repair_converges" {
-		t.Fatalf("name must be the fallback: %q", got)
+	if got, ok := scenarioKey("", "repair_converges", 3); got != "repair_converges" || !ok {
+		t.Fatalf("name must be the fallback: %q (ok=%v)", got, ok)
 	}
-	if got := scenarioKey("", "", 3); got != "#3" {
-		t.Fatalf("positional fallback must be #<index>: %q", got)
+	// #lzspecscenarioids: there is no third rung. A positional id silently
+	// rebinds to a different scenario on a corpus reorder, so an unidentified
+	// scenario is refused rather than booked.
+	if _, ok := scenarioKey("", "", 3); ok {
+		t.Fatal("an unidentified scenario must be refused, not booked by position")
 	}
-	if got := scenarioKey("  ", "  ", 0); got != "#0" {
-		t.Fatalf("blank id/name must fall through to the position: %q", got)
+	if _, ok := scenarioKey("  ", "  ", 0); ok {
+		t.Fatal("a blank id/name must be refused, not booked by position")
 	}
+}
+
+// TestRecordScenarioAtPanicsOnAnUnidentifiedScenario pins the refusal at the
+// call site runners actually use. Returning an id here would put the whole
+// fixture's ledger back on POSITION, which is the drift #lzspecscenarioids
+// closed.
+func TestRecordScenarioAtPanicsOnAnUnidentifiedScenario(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("recordScenarioAt accepted a scenario with neither `id` nor `name`")
+		}
+		if !strings.Contains(fmt.Sprint(r), "carries neither `id` nor `name`") {
+			t.Fatalf("panic does not name the defect: %v", r)
+		}
+	}()
+	recordScenarioAt("conformance-ledger-self-test/probe.json", 1, "", "")
 }
 
 // TestConformanceFixtureIDNormalization pins the join key between the ledger and

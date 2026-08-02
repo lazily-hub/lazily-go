@@ -140,6 +140,7 @@ func TestIdempotentMergeNoOpsViaGuard(t *testing.T) {
 }
 
 type mergeScenario struct {
+	ID     string `json:"id"`
 	Policy string `json:"policy"`
 	Flags  struct {
 		Commutative bool `json:"commutative"`
@@ -180,12 +181,13 @@ func TestMergeCellAlgebraFixture(t *testing.T) {
 	}
 	seen := 0
 	for index, sc := range fixture.Scenarios {
-		// Rung 4 (#lzscenariocoverage). This is the one fixture in the corpus
-		// whose scenarios carry neither `id` nor `name` — they are distinguished
-		// only by `policy` — so every entry it contributes lands on the
-		// positional fallback and the verifier reports it as such. Recording
-		// `policy` instead would be a private id no other binding shares.
-		recordScenarioAt("collections/mergecell_algebra.json", index, "", "")
+		// Rung 4 (#lzscenariocoverage). This was the last fixture in the corpus
+		// whose scenarios carried neither `id` nor `name` — they were
+		// distinguished only by `policy`, so every entry it contributed landed on
+		// the positional fallback. lazily-spec now gives them `keep_latest`/
+		// `sum`/`max` and the fallback is gone (#lzspecscenarioids), so the id
+		// comes from the fixture like every other binding reads it.
+		recordScenarioAt("collections/mergecell_algebra.json", index, sc.ID, "")
 		p := policies[sc.Policy]
 		if p.Commutative != sc.Flags.Commutative || p.Idempotent != sc.Flags.Idempotent {
 			t.Fatalf("%s flags mismatch", sc.Policy)

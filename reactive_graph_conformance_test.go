@@ -1429,7 +1429,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 							// of replay. The corpus is replayed once per
 							// execution model, so each id records twice; the
 							// ledger deduplicates.
-							recordScenario(filepath.Join(reactiveGraphSpecDir, name), scenarioKey("", sc.Name, index))
+							recordScenarioAt(filepath.Join(reactiveGraphSpecDir, name), index, "", sc.Name)
 							m := mdl.make()
 							e := newReplayEngine(t, m, name, "["+sc.Name+"]")
 							e.replay(sc.Steps)
