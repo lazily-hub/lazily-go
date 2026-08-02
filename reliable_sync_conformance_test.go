@@ -151,6 +151,7 @@ func assertUnitFoldEquivalent(t *testing.T, from Epoch, span rsWireDelta, fold [
 // actually asserts.
 type rsScenarioHead struct {
 	conformanceDoc
+	Id   string `json:"id"`
 	Name string `json:"name"`
 }
 
@@ -175,15 +176,19 @@ func (fx rsFixture) scenario(t *testing.T, name string) json.RawMessage {
 	t.Helper()
 	for index, sc := range fx.Scenarios {
 		var head struct {
+			Id   string `json:"id"`
 			Name string `json:"name"`
 		}
 		if err := json.Unmarshal(sc, &head); err != nil {
 			t.Fatalf("decode scenario head: %v", err)
 		}
-		if head.Name != name {
+		// Matched on `id`, the canonical scenario identity
+		// (#recommendedconformanceco). `name` is a prose label, so matching on
+		// it means a copy-edit upstream silently stops resolving.
+		if head.Id != name {
 			continue
 		}
-		recordScenarioAt(fx.fixtureID, index, "", head.Name)
+		recordScenarioAt(fx.fixtureID, index, head.Id, head.Name)
 		return sc
 	}
 	t.Fatalf("scenario %q not found", name)

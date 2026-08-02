@@ -708,6 +708,7 @@ type reactiveGraphStep struct {
 }
 
 type reactiveGraphScenario struct {
+	Id    string              `json:"id"`
 	Name  string              `json:"name"`
 	Steps []reactiveGraphStep `json:"steps"`
 }
@@ -1429,7 +1430,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 							// of replay. The corpus is replayed once per
 							// execution model, so each id records twice; the
 							// ledger deduplicates.
-							recordScenarioAt(filepath.Join(reactiveGraphSpecDir, name), index, "", sc.Name)
+							recordScenarioAt(filepath.Join(reactiveGraphSpecDir, name), index, sc.Id, sc.Name)
 							m := mdl.make()
 							e := newReplayEngine(t, m, name, "["+sc.Name+"]")
 							e.replay(sc.Steps)

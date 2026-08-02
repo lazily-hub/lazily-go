@@ -92,6 +92,7 @@ type familyFixture struct {
 	ValueType string `json:"value_type"`
 	Scenarios []struct {
 		conformanceDoc
+		Id         string `json:"id"`
 		Name       string `json:"name"`
 		OriginPeer PeerId `json:"origin_peer"`
 		TargetPeer PeerId `json:"target_peer"`
@@ -123,7 +124,7 @@ func TestFamilySyncMaterializeOnIngestConformance(t *testing.T) {
 
 	for index, sc := range fx.Scenarios {
 		// Rung 4 (#lzscenariocoverage): record at the point of replay.
-		label := recordScenarioAt("familysync/materialize_on_ingest.json", index, "", sc.Name)
+		label := recordScenarioAt("familysync/materialize_on_ingest.json", index, sc.Id, sc.Name)
 		t.Run(label, func(t *testing.T) {
 			origin := NewCrdtPlaneRuntime(sc.OriginPeer)
 			defer origin.Close()

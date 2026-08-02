@@ -107,6 +107,7 @@ type ltExpect struct {
 }
 
 type ltScenario struct {
+	Id     string   `json:"id"`
 	Name   string   `json:"name"`
 	Seed   ltSeed   `json:"seed"`
 	Steps  []ltStep `json:"steps"`
@@ -268,7 +269,7 @@ func runLosslessTreeFixture(t *testing.T, name string) {
 	mustStrictJSON(t, name, raw, &fixture)
 	for i, scenario := range fixture.Scenarios {
 		// Rung 4 (#lzscenariocoverage): record at the point of replay.
-		id := recordScenarioAt(filepath.Join("lossless-tree", name), i, "", scenario.Name)
+		id := recordScenarioAt(filepath.Join("lossless-tree", name), i, scenario.Id, scenario.Name)
 		label := name + "[" + id + "]"
 		t.Run(label, func(t *testing.T) {
 			world := newLtWorld()

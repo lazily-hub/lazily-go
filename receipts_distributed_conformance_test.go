@@ -166,6 +166,7 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 		ProtocolVersion int `json:"protocol_version"`
 		Scenarios       []struct {
 			conformanceDoc
+			Id                     string   `json:"id"`
 			Name                   string   `json:"name"`
 			Ops                    []CrdtOp `json:"ops"`
 			Redeliver              bool     `json:"redeliver"`
@@ -193,7 +194,7 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 	for index, scenario := range fixture.Scenarios {
 		scenario := scenario
 		// Rung 4 (#lzscenariocoverage): record at the point of replay.
-		label := recordScenarioAt("distributed/anti_entropy_converge.json", index, "", scenario.Name)
+		label := recordScenarioAt("distributed/anti_entropy_converge.json", index, scenario.Id, scenario.Name)
 		t.Run(label, func(t *testing.T) {
 			runtime := NewCrdtPlaneRuntime(1)
 			defer runtime.Close()

@@ -25,6 +25,7 @@ type crdtTreeFixture struct {
 	Kind      string `json:"kind"`
 	Scenarios []struct {
 		conformanceDoc
+		Id   string `json:"id"`
 		Name string `json:"name"`
 		Seed struct {
 			Peer PeerId `json:"peer"`
@@ -57,6 +58,7 @@ func loadCrdtTreeFixture(t *testing.T) crdtTreeFixture {
 
 func crdtTreeScenario(t *testing.T, fixture crdtTreeFixture, name string) (out struct {
 	conformanceDoc
+	Id   string `json:"id"`
 	Name string `json:"name"`
 	Seed struct {
 		Peer PeerId `json:"peer"`
@@ -76,12 +78,12 @@ func crdtTreeScenario(t *testing.T, fixture crdtTreeFixture, name string) (out s
 }) {
 	t.Helper()
 	for index, scenario := range fixture.Scenarios {
-		if scenario.Name != name {
+		if scenario.Id != name {
 			continue
 		}
 		// Rung 4 (#lzscenariocoverage): this lookup IS the replay point for
 		// this fixture — a scenario nobody asks for is never recorded.
-		recordScenarioAt("crdt-tree/algebra.json", index, "", scenario.Name)
+		recordScenarioAt("crdt-tree/algebra.json", index, scenario.Id, scenario.Name)
 		return scenario
 	}
 	t.Fatalf("missing scenario %q", name)
@@ -96,7 +98,7 @@ func sortedTextOps(ops []TextOp) []TextOp {
 
 func TestCrdtTreeMergeAlgebra(t *testing.T) {
 	fixture := loadCrdtTreeFixture(t)
-	scenario := crdtTreeScenario(t, fixture, "merge algebra is order and duplication independent")
+	scenario := crdtTreeScenario(t, fixture, "merge_is_order_and_duplication_independent")
 	base := TextCrdtFromStr(scenario.Seed.Peer, scenario.Seed.Text)
 	replicas := map[string]*TextCrdt{}
 	for _, edit := range scenario.Replicas {
@@ -141,7 +143,7 @@ func TestCrdtTreeMergeAlgebra(t *testing.T) {
 
 func TestCrdtTreeSnapshotPreservesLineage(t *testing.T) {
 	fixture := loadCrdtTreeFixture(t)
-	scenario := crdtTreeScenario(t, fixture, "empty frontier snapshot preserves lineage")
+	scenario := crdtTreeScenario(t, fixture, "empty_frontier_snapshot_preserves_lineage")
 	if scenario.Snapshot != "delta_since({})" {
 		t.Fatalf("unsupported snapshot form %q", scenario.Snapshot)
 	}
@@ -189,7 +191,7 @@ func TestCrdtTreeSnapshotPreservesLineage(t *testing.T) {
 
 func TestCrdtTreeOwnFrontierIsEmpty(t *testing.T) {
 	fixture := loadCrdtTreeFixture(t)
-	scenario := crdtTreeScenario(t, fixture, "own frontier emits an empty delta")
+	scenario := crdtTreeScenario(t, fixture, "own_frontier_emits_empty_delta")
 	if scenario.Frontier != "version_vector()" {
 		t.Fatalf("unsupported frontier form %q", scenario.Frontier)
 	}

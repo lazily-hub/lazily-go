@@ -78,6 +78,7 @@ type mpRpcExpect struct {
 }
 
 type mpScenario struct {
+	Id     string    `json:"id"`
 	Name   string    `json:"name"`
 	Frames []mpFrame `json:"frames"`
 	Expect mpExpect  `json:"expect"`
@@ -327,7 +328,7 @@ func runMessagePassingFixture(t *testing.T, name string) {
 	// nothing the corpus carries, so recording it would be evidence of a replay
 	// the fixture never asked for.
 	for index, sc := range fixture.Scenarios {
-		recordScenarioAt(filepath.Join("message-passing", name), index, "", sc.Name)
+		recordScenarioAt(filepath.Join("message-passing", name), index, sc.Id, sc.Name)
 	}
 	if len(scenarios) == 0 {
 		// Bare frames+expect at the top level: wrap in a single scenario.

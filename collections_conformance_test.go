@@ -420,8 +420,8 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 		label := recordScenarioMap("collections/"+name, index, scenario)
 		t.Run(label, func(t *testing.T) {
 			consumeKeys(t, name+" scenario", scenario,
-				"name", "fold", "tree", "expect_initial", "expect_after", "edit", "remove_child")
-			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+				"id", "name", "fold", "tree", "expect_initial", "expect_after", "edit", "remove_child")
+			excuseKeys(t, scenario, "identity: `id` is the canonical scenario key this run records in the replay ledger and `name` is its prose label; neither states anything the replay must observe (#recommendedconformanceco)", "id", "name")
 			excuseKey(t, scenario, "fold", "discriminator: selects which fold is built; what the fold computes is asserted through expect_initial and expect_after")
 			excuseKey(t, scenario, "tree", "replay input: the tree the fold is built over; the derived values it produces are asserted through expect_initial")
 			excuseKeys(t, scenario, "replay input: the mutation whose effect expect_after asserts", "edit", "remove_child")
@@ -555,11 +555,11 @@ func TestCollectionsSeqCrdtConvergence(t *testing.T) {
 		// scenario this loop stops reaching stops being recorded.
 		label := recordScenarioMap("collections/"+name, index, scenario)
 		t.Run(label, func(t *testing.T) {
-			consumeKeys(t, name+" scenario", scenario, "name", "replica", "seed", "steps", "expect")
+			consumeKeys(t, name+" scenario", scenario, "id", "name", "replica", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"orders_equal", "order_on", "order", "len", "get", "get_on",
 				"contains_all", "not_contains_on")
-			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "identity: `id` is the canonical scenario key this run records in the replay ledger and `name` is its prose label; neither states anything the replay must observe (#recommendedconformanceco)", "id", "name")
 			excuseKeys(t, scenario, "replay input: seeds the replicas and drives the ops; what they produce is asserted through the expect block",
 				"replica", "seed", "steps")
 			excuseKey(t, scenario, "expect", "container: asserted key-by-key in checkSeqCrdtExpect")
@@ -730,10 +730,10 @@ func TestCollectionsTextCrdtConvergence(t *testing.T) {
 		// scenario this loop stops reaching stops being recorded.
 		label := recordScenarioMap("collections/"+name, index, scenario)
 		t.Run(label, func(t *testing.T) {
-			consumeKeys(t, name+" scenario", scenario, "name", "replica", "seed", "steps", "expect")
+			consumeKeys(t, name+" scenario", scenario, "id", "name", "replica", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"text", "len", "texts_equal", "a_starts_with", "a_ends_with", "tombstone_count")
-			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "identity: `id` is the canonical scenario key this run records in the replay ledger and `name` is its prose label; neither states anything the replay must observe (#recommendedconformanceco)", "id", "name")
 			excuseKeys(t, scenario, "replay input: seeds the replicas and drives the ops; what they produce is asserted through the expect block",
 				"replica", "seed", "steps")
 			excuseKey(t, scenario, "expect", "container: asserted key-by-key in checkTextCrdtExpect")
@@ -866,10 +866,10 @@ func TestCollectionsTextCrdtDeltaSync(t *testing.T) {
 		// scenario this loop stops reaching stops being recorded.
 		label := recordScenarioMap("collections/"+name, index, scenario)
 		t.Run(label, func(t *testing.T) {
-			consumeKeys(t, name+" scenario", scenario, "name", "seed", "steps", "expect")
+			consumeKeys(t, name+" scenario", scenario, "id", "name", "seed", "steps", "expect")
 			consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"texts_equal", "text_on", "version_vector_on")
-			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "identity: `id` is the canonical scenario key this run records in the replay ledger and `name` is its prose label; neither states anything the replay must observe (#recommendedconformanceco)", "id", "name")
 			excuseKeys(t, scenario, "replay input: seeds the replicas and drives the delta exchange; what it produces is asserted through the expect block",
 				"seed", "steps")
 			excuseKey(t, scenario, "expect", "container: asserted key-by-key in checkTextCrdtDeltaExpect")
@@ -1009,11 +1009,11 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 		// scenario this loop stops reaching stops being recorded.
 		label := recordScenarioMap("collections/"+name, index, scenario)
 		t.Run(label, func(t *testing.T) {
-			consumeKeys(t, name+" scenario", scenario, "name", "blocks", "old", "new", "expect")
+			consumeKeys(t, name+" scenario", scenario, "id", "name", "blocks", "old", "new", "expect")
 			expect := consumeKeys(t, name+" scenario expect", jsMap(scenario["expect"]),
 				"key_equal", "key_not_equal", "matches", "removed", "similarity_min",
 				"new_key_equals_old_key")
-			excuseKey(t, scenario, "name", "subtest label: names the scenario, states nothing the replay must observe")
+			excuseKeys(t, scenario, "identity: `id` is the canonical scenario key this run records in the replay ledger and `name` is its prose label; neither states anything the replay must observe (#recommendedconformanceco)", "id", "name")
 			excuseKeys(t, scenario, "replay input: the block lists the keys and the alignment are computed FROM; what they produce is asserted through the expect block",
 				"blocks", "old", "new")
 			excuseKey(t, scenario, "expect", "container: asserted key-by-key against the expect block below")

@@ -10,6 +10,7 @@ type outboxStoreFixture struct {
 	ProtocolVersion int `json:"protocol_version"`
 	Scenarios       []struct {
 		conformanceDoc
+		Id         string  `json:"id"`
 		Name       string  `json:"name"`
 		PutEpochs  []Epoch `json:"put_epochs"`
 		ScanAfter  Epoch   `json:"scan_after"`
@@ -54,6 +55,7 @@ func loadOutboxStoreFixture(t *testing.T) outboxStoreFixture {
 
 func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) (out struct {
 	conformanceDoc
+	Id         string  `json:"id"`
 	Name       string  `json:"name"`
 	PutEpochs  []Epoch `json:"put_epochs"`
 	ScanAfter  Epoch   `json:"scan_after"`
@@ -85,12 +87,12 @@ func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) 
 }) {
 	t.Helper()
 	for index, scenario := range fixture.Scenarios {
-		if scenario.Name != name {
+		if scenario.Id != name {
 			continue
 		}
 		// Rung 4 (#lzscenariocoverage): this lookup IS the replay point for
 		// this fixture — a scenario nobody asks for is never recorded.
-		recordScenarioAt("reliable-sync/outbox_store_protocol.json", index, "", scenario.Name)
+		recordScenarioAt("reliable-sync/outbox_store_protocol.json", index, scenario.Id, scenario.Name)
 		return scenario
 	}
 	t.Fatalf("missing scenario %q", name)
@@ -111,7 +113,7 @@ func replayEpochs(entries []OutboxEntry) []Epoch {
 
 func TestOutboxStoreProtocol(t *testing.T) {
 	fixture := loadOutboxStoreFixture(t)
-	ordered := outboxStoreScenario(t, fixture, "unordered puts replay in ascending epoch order")
+	ordered := outboxStoreScenario(t, fixture, "unordered_puts_replay_in_epoch_order")
 	store := NewInMemoryStore()
 	for _, epoch := range ordered.PutEpochs {
 		store.Put(epoch, []byte{byte(epoch)})
@@ -125,7 +127,7 @@ func TestOutboxStoreProtocol(t *testing.T) {
 		t.Fatalf("ordered scan = %v", got)
 	}
 
-	monotone := outboxStoreScenario(t, fixture, "ack cursor is monotone and prune-safe")
+	monotone := outboxStoreScenario(t, fixture, "ack_cursor_is_monotone_and_prune_safe")
 	outbox := NewDurableStoreOutbox(NewInMemoryStore())
 	for _, epoch := range monotone.PutEpochs {
 		outbox.Append(epoch, protocolMessage(epoch))
@@ -139,7 +141,7 @@ func TestOutboxStoreProtocol(t *testing.T) {
 		t.Fatal("monotonic ack/prune/replay contract diverged")
 	}
 
-	restart := outboxStoreScenario(t, fixture, "restart reloads cursor and unacked suffix")
+	restart := outboxStoreScenario(t, fixture, "restart_reloads_cursor_and_unacked_suffix")
 	path := filepath.Join(t.TempDir(), "outbox.jsonl")
 	first, err := NewFileOutbox(path)
 	if err != nil {
@@ -169,7 +171,7 @@ func TestOutboxStoreProtocol(t *testing.T) {
 
 func TestFileOutboxCursorRecordsAreSerializedMonotone(t *testing.T) {
 	fixture := loadOutboxStoreFixture(t)
-	scenario := outboxStoreScenario(t, fixture, "stale handle cannot regress serialized cursor")
+	scenario := outboxStoreScenario(t, fixture, "stale_handle_cannot_regress_cursor")
 	path := filepath.Join(t.TempDir(), "cursor.jsonl")
 	staleStore, err := NewFileOutboxStore(path)
 	if err != nil {
