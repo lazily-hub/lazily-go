@@ -87,6 +87,12 @@ func reencodedNodeFields(t *testing.T, scenario map[string]any, msg IpcMessage) 
 			t.Fatalf("msgpack re-decode: %v", err)
 		}
 		generic = value.(map[string]any)
+	default:
+		// Fail closed (#lzscenariobodyskip). Without this the switch fell
+		// through leaving `generic` nil, so a fixture naming a codec this
+		// runner does not implement replayed nothing and still reported the
+		// scenario as covered.
+		t.Fatalf("unknown codec %v", scenario["codec"])
 	}
 	switch scenario["field"].(string) {
 	case "snapshot":
