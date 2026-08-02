@@ -267,11 +267,14 @@ func runLosslessTreeFixture(t *testing.T, name string) {
 	raw := loadLosslessTreeFixture(t, name)
 	var fixture ltFixture
 	mustStrictJSON(t, name, raw, &fixture)
-	for i, scenario := range fixture.Scenarios {
-		// Rung 4 (#lzscenariocoverage): record at the point of replay.
-		id := recordScenarioAt(filepath.Join("lossless-tree", name), i, scenario.Id, scenario.Name)
-		label := name + "[" + id + "]"
+	for _, sv := range typedScenarioViews(filepath.Join("lossless-tree", name), fixture.Scenarios,
+		func(s ltScenario) (string, string) { return s.Id, s.Name }) {
+		label := name + "[" + sv.Label() + "]"
 		t.Run(label, func(t *testing.T) {
+			// Rung 4 books HERE (#lzscenariobodyskip), on the payload handoff
+			// inside the subtest — never at the loop header, which cannot tell a
+			// body that replayed from one that returned early.
+			scenario := sv.Value()
 			world := newLtWorld()
 			world.replicas["a"] = NewLosslessTreeCrdt(scenario.Seed.Peer)
 			world.buildChildren(scenario.Seed.Tree, TreeRoot, world.replicas["a"])

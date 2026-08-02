@@ -20,43 +20,11 @@ type crdtTreeExpect struct {
 	ApplyChanged         *bool    `json:"apply_changed"`
 }
 
-type crdtTreeFixture struct {
-	conformanceMeta
-	Kind      string `json:"kind"`
-	Scenarios []struct {
-		conformanceDoc
-		Id   string `json:"id"`
-		Name string `json:"name"`
-		Seed struct {
-			Peer PeerId `json:"peer"`
-			Text string `json:"text"`
-		} `json:"seed"`
-		Replicas []struct {
-			Name   string `json:"name"`
-			Peer   PeerId `json:"peer"`
-			Insert string `json:"insert"`
-		} `json:"replicas"`
-		MergeOrders        [][]string     `json:"merge_orders"`
-		RestorePeer        PeerId         `json:"restore_peer"`
-		Snapshot           string         `json:"snapshot"`
-		Frontier           string         `json:"frontier"`
-		ThenConcurrentEdit bool           `json:"then_concurrent_edit"`
-		Expect             crdtTreeExpect `json:"expect"`
-	} `json:"scenarios"`
-}
-
-func loadCrdtTreeFixture(t *testing.T) crdtTreeFixture {
-	t.Helper()
-	raw, err := specReadFile("../lazily-spec/conformance/crdt-tree/algebra.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixture crdtTreeFixture
-	mustStrictJSON(t, "crdt-tree/algebra.json", raw, &fixture)
-	return fixture
-}
-
-func crdtTreeScenario(t *testing.T, fixture crdtTreeFixture, name string) (out struct {
+// crdtTreeScenarioT is named rather than inline so the fixture struct and the
+// lookup helper share ONE definition. They used to carry byte-identical
+// anonymous copies, where a field added to one and not the other silently
+// stopped being decoded at the other site.
+type crdtTreeScenarioT struct {
 	conformanceDoc
 	Id   string `json:"id"`
 	Name string `json:"name"`
@@ -75,16 +43,36 @@ func crdtTreeScenario(t *testing.T, fixture crdtTreeFixture, name string) (out s
 	Frontier           string         `json:"frontier"`
 	ThenConcurrentEdit bool           `json:"then_concurrent_edit"`
 	Expect             crdtTreeExpect `json:"expect"`
-}) {
+}
+
+type crdtTreeFixture struct {
+	conformanceMeta
+	Kind      string              `json:"kind"`
+	Scenarios []crdtTreeScenarioT `json:"scenarios"`
+}
+
+func loadCrdtTreeFixture(t *testing.T) crdtTreeFixture {
 	t.Helper()
-	for index, scenario := range fixture.Scenarios {
-		if scenario.Id != name {
+	raw, err := specReadFile("../lazily-spec/conformance/crdt-tree/algebra.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture crdtTreeFixture
+	mustStrictJSON(t, "crdt-tree/algebra.json", raw, &fixture)
+	return fixture
+}
+
+func crdtTreeScenario(t *testing.T, fixture crdtTreeFixture, name string) (out crdtTreeScenarioT) {
+	t.Helper()
+	// Selecting is not replaying (#lzscenariobodyskip): the lookup walks past
+	// every scenario ahead of the match, and a caller could select one and then
+	// return. Booking rides on Value() below, which is the payload handoff.
+	for _, sv := range typedScenarioViews("crdt-tree/algebra.json", fixture.Scenarios,
+		func(s crdtTreeScenarioT) (string, string) { return s.Id, s.Name }) {
+		if sv.ID() != name {
 			continue
 		}
-		// Rung 4 (#lzscenariocoverage): this lookup IS the replay point for
-		// this fixture — a scenario nobody asks for is never recorded.
-		recordScenarioAt("crdt-tree/algebra.json", index, scenario.Id, scenario.Name)
-		return scenario
+		return sv.Value()
 	}
 	t.Fatalf("missing scenario %q", name)
 	return out

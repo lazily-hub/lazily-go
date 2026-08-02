@@ -322,24 +322,29 @@ func runMessagePassingFixture(t *testing.T, name string) {
 	raw := loadMessagePassingFixture(t, name)
 	var fixture mpFixture
 	mustStrictJSON(t, name, raw, &fixture)
-	scenarios := fixture.Scenarios
-	// Rung 4 (#lzscenariocoverage): record the fixture's OWN scenarios, before
-	// the bare-frames wrapper below invents one. A synthetic scenario names
-	// nothing the corpus carries, so recording it would be evidence of a replay
-	// the fixture never asked for.
-	for index, sc := range fixture.Scenarios {
-		recordScenarioAt(filepath.Join("message-passing", name), index, sc.Id, sc.Name)
+	// Rung 4 (#lzscenariocoverage) records the fixture's OWN scenarios, never
+	// the bare-frames wrapper below: a synthetic scenario names nothing the
+	// corpus carries, so booking it would claim a replay the fixture never
+	// asked for. Booking rides on Value() (#lzscenariobodyskip), so a subtest
+	// that returns before taking the payload books nothing.
+	views := typedScenarioViews(filepath.Join("message-passing", name), fixture.Scenarios,
+		func(s mpScenario) (string, string) { return s.Id, s.Name })
+	if len(views) == 0 {
+		// Bare frames+expect at the top level: wrap in a single scenario that
+		// belongs to no fixture, so it is deliberately given no ledger identity.
+		views = []*typedScenarioView[mpScenario]{{
+			fixture:  "",
+			name:     name,
+			scenario: mpScenario{Name: name, Frames: fixture.Frames, Expect: fixture.Expect},
+		}}
 	}
-	if len(scenarios) == 0 {
-		// Bare frames+expect at the top level: wrap in a single scenario.
-		scenarios = []mpScenario{{Name: name, Frames: fixture.Frames, Expect: fixture.Expect}}
-	}
-	for _, sc := range scenarios {
+	for _, sv := range views {
 		label := name
-		if sc.Name != "" {
-			label = name + "[" + sc.Name + "]"
+		if sv.Label() != "" {
+			label = name + "[" + sv.Label() + "]"
 		}
 		t.Run(label, func(t *testing.T) {
+			sc := sv.Value()
 			runMessagePassingScenario(t, label, sc.Frames, sc.Expect)
 		})
 	}

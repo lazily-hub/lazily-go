@@ -1,6 +1,7 @@
 package lazily
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -244,4 +245,239 @@ func TestRecordScenarioLedgersByFixture(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("ledger holds %d ids, want 2 (deduplicated)", n)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Yielding is not replaying (#lzscenariobodyskip)
+// ---------------------------------------------------------------------------
+//
+// Everything above books a scenario at the moment a runner is HANDED one. That
+// cannot tell a loop body that ran from one that skipped: `continue`, an
+// unmatched dispatch arm, an early `return` inside `t.Run`, and a body someone
+// commented out all look identical from here — the loop simply comes back for
+// the next item. So a skipped scenario booked itself and rung 4 stayed silent
+// about the exact defect it exists for. lazily-py proved that against the
+// contract's own probe; lazily-js, lazily-rs, lazily-cs and lazily-kt carry the
+// fix. This is the Go seam.
+//
+// The rule is the same in every binding: book on the first read of the
+// scenario's PAYLOAD, and stay silent for its LABEL. A dispatch chain that reads
+// `id`, matches no arm, and falls through has replayed nothing, so reading `id`
+// must not book. Decoding the steps/ops/frames/expect a replay is about to run
+// is only ever done by a runner about to run it, so that read books.
+//
+// Go has no property interception, so the seam is explicit and comes in two
+// shapes, one per decode style already in use here:
+//
+//   - scenarioView, for the runners that decode into map[string]any. Label() and
+//     ID() are silent; Map() books and hands over the payload. Call Map() at the
+//     point of replay — inside the subtest, inside the matched dispatch arm —
+//     not next to the loop header.
+//   - rawScenarioView, for the runners that decode into typed structs. Its
+//     Decode is the booking read, which is exactly the operation only a runner
+//     about to replay performs.
+//
+// Peek() is the escape hatch for a runner that legitimately needs to look
+// without replaying. It is deliberately ugly to reach for.
+
+// scenarioLabelKeys are the keys that IDENTIFY or narrate a scenario rather than
+// drive one. Reading only these is looking at the label, not replaying. The list
+// is shared with every other binding.
+var scenarioLabelKeys = []string{
+	"comment", "description", "id", "label", "name", "note", "notes", "reason", "why",
+}
+
+// scenarioView is one scenario, handed over unbooked.
+type scenarioView struct {
+	fixture string
+	index   int
+	id      string
+	name    string
+	raw     any
+	booked  bool
+}
+
+// Label is the ledger key, for use as a subtest name. Reading it does NOT book:
+// naming a scenario in test output is not replaying it.
+func (v *scenarioView) Label() string {
+	key, ok := scenarioKey(v.id, v.name, v.index)
+	if !ok {
+		panic(fmt.Sprintf(
+			"%s: scenario at index %d carries neither `id` nor `name`. The replay "+
+				"ledger would have to record it by POSITION, where inserting a scenario "+
+				"ahead of it silently rebinds that entry to a different scenario. Give it "+
+				"a stable id upstream in lazily-spec (#lzspecscenarioids).",
+			v.fixture, v.index))
+	}
+	return key
+}
+
+// ID is the canonical scenario identity, for dispatch. Silent, by design: a
+// chain that reads it and matches no arm has replayed nothing.
+func (v *scenarioView) ID() string { return v.id }
+
+// Map books this scenario as REPLAYED and hands over its payload.
+func (v *scenarioView) Map() map[string]any {
+	v.book()
+	return jsMap(v.raw)
+}
+
+// Peek hands over the payload WITHOUT booking. For a runner that must inspect a
+// scenario it is not replaying.
+func (v *scenarioView) Peek() map[string]any { return jsMap(v.raw) }
+
+func (v *scenarioView) book() {
+	if v.booked {
+		return
+	}
+	v.booked = true
+	recordScenario(v.fixture, v.Label())
+}
+
+// scenarioViews wraps a fixture's decoded `scenarios` array. Iterating does not
+// book; each view books when its payload is read.
+func scenarioViews(fixture string, list []any) []*scenarioView {
+	out := make([]*scenarioView, 0, len(list))
+	for index, raw := range list {
+		scenario, _ := raw.(map[string]any)
+		out = append(out, &scenarioView{
+			fixture: fixture,
+			index:   index,
+			id:      scenarioField(scenario, "id"),
+			name:    scenarioField(scenario, "name"),
+			raw:     raw,
+		})
+	}
+	return out
+}
+
+// rawScenarioView is scenarioView for the typed-struct runners: the scenario
+// stays as undecoded bytes until a runner decodes it, and THAT is the booking
+// read. A scenario the loop skips is never decoded and so never booked.
+type rawScenarioView struct {
+	fixture string
+	index   int
+	id      string
+	name    string
+	raw     json.RawMessage
+	booked  bool
+}
+
+func (v *rawScenarioView) Label() string {
+	key, ok := scenarioKey(v.id, v.name, v.index)
+	if !ok {
+		panic(fmt.Sprintf(
+			"%s: scenario at index %d carries neither `id` nor `name` (#lzspecscenarioids).",
+			v.fixture, v.index))
+	}
+	return key
+}
+
+func (v *rawScenarioView) ID() string { return v.id }
+
+// Decode books this scenario as REPLAYED and decodes its payload into target.
+func (v *rawScenarioView) Decode(t *testing.T, target any) {
+	t.Helper()
+	v.book()
+	if err := json.Unmarshal(v.raw, target); err != nil {
+		t.Fatalf("%s: decode scenario %s: %v", v.fixture, v.Label(), err)
+	}
+}
+
+// Peek decodes WITHOUT booking.
+func (v *rawScenarioView) Peek(t *testing.T, target any) {
+	t.Helper()
+	if err := json.Unmarshal(v.raw, target); err != nil {
+		t.Fatalf("%s: decode scenario %s: %v", v.fixture, v.Label(), err)
+	}
+}
+
+func (v *rawScenarioView) book() {
+	if v.booked {
+		return
+	}
+	v.booked = true
+	recordScenario(v.fixture, v.Label())
+}
+
+// rawScenarioViews wraps a fixture's undecoded `scenarios` array. The label is
+// read out of each element up front — that is a label read, which never books.
+func rawScenarioViews(t *testing.T, fixture string, list []json.RawMessage) []*rawScenarioView {
+	t.Helper()
+	out := make([]*rawScenarioView, 0, len(list))
+	for index, raw := range list {
+		var head struct {
+			Id   string `json:"id"`
+			Name string `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &head); err != nil {
+			t.Fatalf("%s: decode scenario head at index %d: %v", fixture, index, err)
+		}
+		out = append(out, &rawScenarioView{
+			fixture: fixture,
+			index:   index,
+			id:      head.Id,
+			name:    head.Name,
+			raw:     raw,
+		})
+	}
+	return out
+}
+
+// typedScenarioView is scenarioView for the runners that decode the WHOLE
+// fixture into typed structs up front (mustStrictJSON, which is what keeps
+// their unknown-field strictness). Those cannot defer the decode without giving
+// up that strictness, so the booking rides on the handoff instead: Value() is
+// the payload read, Label()/ID() are label reads and stay silent.
+//
+// A subtest that returns before calling Value() books nothing, which is the
+// no-op-body case the loop header could not see.
+type typedScenarioView[T any] struct {
+	fixture  string
+	index    int
+	id       string
+	name     string
+	scenario T
+	booked   bool
+}
+
+func (v *typedScenarioView[T]) Label() string {
+	key, ok := scenarioKey(v.id, v.name, v.index)
+	if !ok {
+		panic(fmt.Sprintf(
+			"%s: scenario at index %d carries neither `id` nor `name` (#lzspecscenarioids).",
+			v.fixture, v.index))
+	}
+	return key
+}
+
+func (v *typedScenarioView[T]) ID() string { return v.id }
+
+// Value books this scenario as REPLAYED and hands over its payload.
+func (v *typedScenarioView[T]) Value() T {
+	if !v.booked {
+		v.booked = true
+		recordScenario(v.fixture, v.Label())
+	}
+	return v.scenario
+}
+
+// Peek hands over the payload WITHOUT booking.
+func (v *typedScenarioView[T]) Peek() T { return v.scenario }
+
+// typedScenarioViews wraps a decoded scenario slice. `identity` reads the label
+// off each element — a label read, which never books.
+func typedScenarioViews[T any](fixture string, list []T, identity func(T) (string, string)) []*typedScenarioView[T] {
+	out := make([]*typedScenarioView[T], 0, len(list))
+	for index, scenario := range list {
+		id, name := identity(scenario)
+		out = append(out, &typedScenarioView[T]{
+			fixture:  fixture,
+			index:    index,
+			id:       id,
+			name:     name,
+			scenario: scenario,
+		})
+	}
+	return out
 }

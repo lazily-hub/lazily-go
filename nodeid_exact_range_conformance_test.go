@@ -98,9 +98,11 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 	// Go's int64 range implies rather than "at least one".
 	accepted := 0
 
-	for index, entry := range scenarios {
-		scenario := entry.(map[string]any)
-		id := recordScenarioMap(nodeIDExactRangeFixture, index, scenario)
+	for _, sv := range scenarioViews(nodeIDExactRangeFixture, scenarios) {
+		id := sv.Label()
+		// Rung 4 books on the first PAYLOAD read (#lzscenariobodyskip), not on
+		// the label: a loop that reads `id` and skips has replayed nothing.
+		scenario := sv.Map()
 
 		consumeKeys(t, id, scenario,
 			"id", "name", "codec", "variant", "description", "expect",

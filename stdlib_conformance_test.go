@@ -16,17 +16,19 @@ type stdlibFixture struct {
 	// guards, and this runner used to drop all three on the floor: the fixture
 	// stated a minimum scenario, assertion, and mutation count, and the replay
 	// reported green without ever comparing itself against any of them.
-	ScenarioFloor  int `json:"scenario_floor"`
-	AssertionFloor int `json:"assertion_floor"`
-	MutationFloor  int `json:"mutation_floor"`
-	Scenarios      []struct {
-		ID    string       `json:"id"`
-		Steps []stdlibStep `json:"steps"`
-	} `json:"scenarios"`
-	Mutations []struct {
+	ScenarioFloor  int              `json:"scenario_floor"`
+	AssertionFloor int              `json:"assertion_floor"`
+	MutationFloor  int              `json:"mutation_floor"`
+	Scenarios      []stdlibScenario `json:"scenarios"`
+	Mutations      []struct {
 		Operator string   `json:"operator"`
 		MustFail []string `json:"must_fail"`
 	} `json:"mutations"`
+}
+
+type stdlibScenario struct {
+	ID    string       `json:"id"`
+	Steps []stdlibStep `json:"steps"`
 }
 
 // stdlibFixtureVersion is the fixture shape this runner understands.
@@ -75,15 +77,19 @@ func TestStdlibConformance(t *testing.T) {
 					t.Fatalf("duplicate scenario id %q", scenario.ID)
 				}
 				scenarios[scenario.ID] = true
-				// Rung 4 (#lzscenariocoverage): record at the point of replay.
-				// These three fixtures carry the corpus's only `id`-keyed
-				// scenarios, so they exercise the first arm of the resolution
-				// order the other 28 never reach.
-				recordScenarioAt(filepath.Join("stdlib", name), index, scenario.ID, "")
+				// Rung 4 books at the point of replay, on the payload handed to
+				// the replay helper (#lzscenariobodyskip) — never before the
+				// duplicate-id check above, which can `t.Fatalf` past it.
+				//
 				// The floor counts assertions this runner performed, so the
 				// replay has to happen inline rather than in a subtest whose
 				// tally the parent never sees.
-				assertions += replayStdlibScenario(t, scenario.ID, fixture.Feature, scenario.Steps)
+				sv := &typedScenarioView[stdlibScenario]{
+					fixture: filepath.Join("stdlib", name), index: index,
+					id: scenario.ID, scenario: scenario,
+				}
+				replayed := sv.Value()
+				assertions += replayStdlibScenario(t, replayed.ID, fixture.Feature, replayed.Steps)
 			}
 			for _, mutation := range fixture.Mutations {
 				if len(mutation.MustFail) == 0 {

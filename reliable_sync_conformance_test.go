@@ -188,11 +188,24 @@ func (fx rsFixture) scenario(t *testing.T, name string) json.RawMessage {
 		if head.Id != name {
 			continue
 		}
-		recordScenarioAt(fx.fixtureID, index, head.Id, head.Name)
+		_ = index
 		return sc
 	}
 	t.Fatalf("scenario %q not found", name)
 	return nil
+}
+
+// replay selects a scenario, BOOKS it, and strictly decodes it into target.
+//
+// Selecting is not replaying (#lzscenariobodyskip): `scenario` above walks past
+// every scenario ahead of its match and hands back undecoded bytes, and a caller
+// could select one and never decode it. The decode is the operation only a
+// runner about to replay performs, so that is where the ledger books.
+func (fx rsFixture) replay(t *testing.T, name string, target any) {
+	t.Helper()
+	raw := fx.scenario(t, name)
+	recordScenario(fx.fixtureID, name)
+	mustStrictJSON(t, "reliable-sync scenario "+name, raw, target)
 }
 
 func mustMessage(t *testing.T, raw json.RawMessage) IpcMessage {
@@ -282,7 +295,7 @@ func TestReliableSyncMultiEpochDelta(t *testing.T) {
 			FoldEquivalent         bool   `json:"fold_equivalent"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario span_3_applies_equal_to_unit_fold", fx.scenario(t, "span_3_applies_equal_to_unit_fold"), &span)
+	fx.replay(t, "span_3_applies_equal_to_unit_fold", &span)
 	if !(span.Delta.Epoch > span.Delta.BaseEpoch+1) {
 		t.Fatalf("fixture must pin a multi-epoch span")
 	}
@@ -333,7 +346,7 @@ func TestReliableSyncMultiEpochDelta(t *testing.T) {
 			ReceiverLastEpochAfter Epoch  `json:"receiver_last_epoch_after"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario gap_rule_unchanged_under_span", fx.scenario(t, "gap_rule_unchanged_under_span"), &gap)
+	fx.replay(t, "gap_rule_unchanged_under_span", &gap)
 	gc := NewResyncCoordinatorWithEpoch(gap.ReceiverLastEpoch)
 	gapAction, from := gc.IngestDelta(Delta{BaseEpoch: gap.Delta.BaseEpoch, Epoch: gap.Delta.Epoch})
 	if got := gapAction.String(); got != gap.Expect.Action {
@@ -429,7 +442,7 @@ func TestReliableSyncResyncGapConverge(t *testing.T) {
 			EqualsNoDropReceiver *bool             `json:"equals_no_drop_receiver"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario drop_suffix_then_resync_converges", fx.scenario(t, "drop_suffix_then_resync_converges"), &sc)
+	fx.replay(t, "drop_suffix_then_resync_converges", &sc)
 	coord := NewResyncCoordinatorWithEpoch(sc.StartLastEpoch)
 	requests := 0
 	// receiver A's graph, and the authoritative graph a receiver that dropped
@@ -503,7 +516,7 @@ func TestReliableSyncResyncGapConverge(t *testing.T) {
 			ResyncRequestsEmitted int   `json:"resync_requests_emitted"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario single_request_per_gap", fx.scenario(t, "single_request_per_gap"), &single)
+	fx.replay(t, "single_request_per_gap", &single)
 	c2 := NewResyncCoordinatorWithEpoch(single.StartLastEpoch)
 	req2 := 0
 	for i, frame := range single.Inbound {
@@ -550,7 +563,7 @@ func TestReliableSyncIdempotentRedelivery(t *testing.T) {
 				NetEffectUnchanged *bool             `json:"net_effect_unchanged"`
 			} `json:"expect"`
 		}
-		mustStrictJSON(t, "reliable-sync scenario "+name, fx.scenario(t, name), &sc)
+		fx.replay(t, name, &sc)
 		coord := NewResyncCoordinatorWithEpoch(sc.StartLastEpoch)
 		graph := map[NodeId][]byte{}
 		for id, payload := range sc.StateBefore {
@@ -727,7 +740,7 @@ func TestReliableSyncOutboxReplayAfterCrash(t *testing.T) {
 			ExactlyOnceEffect      *bool   `json:"exactly_once_effect"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario crash_between_append_and_ack_replays_on_reconnect", fx.scenario(t, "crash_between_append_and_ack_replays_on_reconnect"), &sc)
+	fx.replay(t, "crash_between_append_and_ack_replays_on_reconnect", &sc)
 
 	path := filepath.Join(t.TempDir(), "outbox.jsonl")
 	mem := NewInMemoryOutbox()
@@ -833,7 +846,7 @@ func TestReliableSyncOutboxReplayAfterCrash(t *testing.T) {
 			PermanentGap                 *bool   `json:"permanent_gap"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario send_failure_retains_frame_for_next_tick", fx.scenario(t, "send_failure_retains_frame_for_next_tick"), &sc2)
+	fx.replay(t, "send_failure_retains_frame_for_next_tick", &sc2)
 	if !sc2.SendFailsFirstAttempt {
 		t.Fatal("send_fails_first_attempt must be set for this scenario to mean anything")
 	}
@@ -1096,7 +1109,7 @@ func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 			RedeliverAppliedCount *int   `json:"redeliver_applied_count"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario open_set_add_wins_over_stale_remove", fx.scenario(t, "open_set_add_wins_over_stale_remove"), &add)
+	fx.replay(t, "open_set_add_wins_over_stale_remove", &add)
 	rsRequireRegisterKind(t, "open_set_add_wins_over_stale_remove", add.RegisterKind, "orset")
 	parsePid(t, add.Key) // the key must name a real doc/peer pair
 	replayOrSet := func(ops []int) *OrSet {
@@ -1162,7 +1175,7 @@ func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 			OrderIndependent *bool  `json:"order_independent"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario lww_alive_highest_stamp_wins", fx.scenario(t, "lww_alive_highest_stamp_wins"), &lww)
+	fx.replay(t, "lww_alive_highest_stamp_wins", &lww)
 	rsRequireRegisterKind(t, "lww_alive_highest_stamp_wins", lww.RegisterKind, "lww")
 	parsePid(t, lww.Key)
 	replayLww := func(order []int) bool {
@@ -1225,7 +1238,7 @@ func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 			Note           string   `json:"note"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario whole_editor_death_cascades", fx.scenario(t, "whole_editor_death_cascades"), &death)
+	fx.replay(t, "whole_editor_death_cascades", &death)
 	type openEntry struct {
 		doc string
 		pid PeerId
@@ -1332,8 +1345,7 @@ func TestReliableSyncLivenessOrSetLww(t *testing.T) {
 			PerDocIsolation       *bool    `json:"per_doc_isolation"`
 		} `json:"expect"`
 	}
-	mustStrictJSON(t, "reliable-sync scenario derived_live_doc_aggregate_converges_under_retry",
-		fx.scenario(t, "derived_live_doc_aggregate_converges_under_retry"), &derived)
+	fx.replay(t, "derived_live_doc_aggregate_converges_under_retry", &derived)
 	if len(derived.Replicas) != 2 {
 		t.Fatalf("derived_live_doc_aggregate: %d replicas, this replay drives exactly 2 (forward and reverse)",
 			len(derived.Replicas))

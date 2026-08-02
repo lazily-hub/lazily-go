@@ -88,29 +88,31 @@ func TestFamilySyncMaterializesRemoteKeysOnIngest(t *testing.T) {
 
 type familyFixture struct {
 	conformanceMeta
-	Namespace string `json:"namespace"`
-	ValueType string `json:"value_type"`
-	Scenarios []struct {
-		conformanceDoc
-		Id         string `json:"id"`
-		Name       string `json:"name"`
-		OriginPeer PeerId `json:"origin_peer"`
-		TargetPeer PeerId `json:"target_peer"`
-		OriginSets []struct {
-			Key   string `json:"key"`
-			Value bool   `json:"value"`
-			Now   int64  `json:"now"`
-		} `json:"origin_sets"`
-		Reingest bool `json:"reingest"`
-		Expect   struct {
-			TargetKeys         []string        `json:"target_keys"`
-			TargetValues       map[string]bool `json:"target_values"`
-			TargetPresentCount int             `json:"target_present_count"`
-			TargetCountTrue    int             `json:"target_count_true"`
-			TargetEpochBumped  bool            `json:"target_epoch_bumped"`
-			ReingestApplied    int             `json:"reingest_applied"`
-		} `json:"expect"`
-	} `json:"scenarios"`
+	Namespace string       `json:"namespace"`
+	ValueType string       `json:"value_type"`
+	Scenarios []fsScenario `json:"scenarios"`
+}
+
+type fsScenario struct {
+	conformanceDoc
+	Id         string `json:"id"`
+	Name       string `json:"name"`
+	OriginPeer PeerId `json:"origin_peer"`
+	TargetPeer PeerId `json:"target_peer"`
+	OriginSets []struct {
+		Key   string `json:"key"`
+		Value bool   `json:"value"`
+		Now   int64  `json:"now"`
+	} `json:"origin_sets"`
+	Reingest bool `json:"reingest"`
+	Expect   struct {
+		TargetKeys         []string        `json:"target_keys"`
+		TargetValues       map[string]bool `json:"target_values"`
+		TargetPresentCount int             `json:"target_present_count"`
+		TargetCountTrue    int             `json:"target_count_true"`
+		TargetEpochBumped  bool            `json:"target_epoch_bumped"`
+		ReingestApplied    int             `json:"reingest_applied"`
+	} `json:"expect"`
 }
 
 func TestFamilySyncMaterializeOnIngestConformance(t *testing.T) {
@@ -122,10 +124,13 @@ func TestFamilySyncMaterializeOnIngestConformance(t *testing.T) {
 	}
 	ns := fx.Namespace
 
-	for index, sc := range fx.Scenarios {
-		// Rung 4 (#lzscenariocoverage): record at the point of replay.
-		label := recordScenarioAt("familysync/materialize_on_ingest.json", index, sc.Id, sc.Name)
-		t.Run(label, func(t *testing.T) {
+	for _, sv := range typedScenarioViews("familysync/materialize_on_ingest.json", fx.Scenarios,
+		func(s fsScenario) (string, string) { return s.Id, s.Name }) {
+		t.Run(sv.Label(), func(t *testing.T) {
+			// Rung 4 books HERE (#lzscenariobodyskip), on the payload handoff
+			// inside the subtest — never at the loop header, which cannot tell a
+			// body that replayed from one that returned early.
+			sc := sv.Value()
 			origin := NewCrdtPlaneRuntime(sc.OriginPeer)
 			defer origin.Close()
 			origin.RegisterFamilyLww(ns)

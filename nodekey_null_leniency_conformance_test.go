@@ -156,9 +156,11 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 	// `present` count is what only a real decode can produce.
 	keysDecoded := 0
 
-	for index, entry := range scenarios {
-		scenario := entry.(map[string]any)
-		id := recordScenarioMap(nodeKeyNullFixture, index, scenario)
+	for _, sv := range scenarioViews(nodeKeyNullFixture, scenarios) {
+		id := sv.Label()
+		// Rung 4 books on the first PAYLOAD read (#lzscenariobodyskip), not on
+		// the label: a loop that reads `id` and skips has replayed nothing.
+		scenario := sv.Map()
 
 		consumeKeys(t, id, scenario,
 			"id", "name", "codec", "field", "key_form", "variant", "description",

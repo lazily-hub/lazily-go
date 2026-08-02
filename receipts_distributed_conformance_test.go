@@ -152,6 +152,28 @@ func TestReceiptsConformance(t *testing.T) {
 // Distributed anti-entropy
 // ---------------------------------------------------------------------------
 
+type antiEntropyScenario struct {
+	conformanceDoc
+	Id                     string   `json:"id"`
+	Name                   string   `json:"name"`
+	Ops                    []CrdtOp `json:"ops"`
+	Redeliver              bool     `json:"redeliver"`
+	ReverseOrderEquivalent bool     `json:"reverse_order_equivalent"`
+	Expect                 struct {
+		AppliedCount          int               `json:"applied_count"`
+		RedeliverAppliedCount int               `json:"redeliver_applied_count"`
+		Converged             []convergedExpect `json:"converged"`
+		// `resolution` names the conflict rule the winners must follow and
+		// `order_independent` states the convergence claim outright. Both fell
+		// through unread: the runner compared winners to a literal list, which
+		// is true of any rule that happens to produce that list, and ran the
+		// reverse-order replay without ever reporting it as the property the
+		// scenario asserts.
+		Resolution       string `json:"resolution"`
+		OrderIndependent *bool  `json:"order_independent"`
+	} `json:"expect"`
+}
+
 type convergedExpect struct {
 	Node  NodeId          `json:"node"`
 	Key   *string         `json:"key"`
@@ -163,39 +185,21 @@ func TestDistributedAntiEntropyConformance(t *testing.T) {
 
 	var fixture struct {
 		conformanceMeta
-		ProtocolVersion int `json:"protocol_version"`
-		Scenarios       []struct {
-			conformanceDoc
-			Id                     string   `json:"id"`
-			Name                   string   `json:"name"`
-			Ops                    []CrdtOp `json:"ops"`
-			Redeliver              bool     `json:"redeliver"`
-			ReverseOrderEquivalent bool     `json:"reverse_order_equivalent"`
-			Expect                 struct {
-				AppliedCount          int               `json:"applied_count"`
-				RedeliverAppliedCount int               `json:"redeliver_applied_count"`
-				Converged             []convergedExpect `json:"converged"`
-				// `resolution` names the conflict rule the winners must follow
-				// and `order_independent` states the convergence claim outright.
-				// Both fell through unread: the runner compared winners to a
-				// literal list, which is true of any rule that happens to produce
-				// that list, and ran the reverse-order replay without ever
-				// reporting it as the property the scenario asserts.
-				Resolution       string `json:"resolution"`
-				OrderIndependent *bool  `json:"order_independent"`
-			} `json:"expect"`
-		} `json:"scenarios"`
+		ProtocolVersion int                   `json:"protocol_version"`
+		Scenarios       []antiEntropyScenario `json:"scenarios"`
 	}
 	mustStrictJSON(t, "distributed/anti_entropy_converge.json", raw, &fixture)
 	if len(fixture.Scenarios) == 0 {
 		t.Fatal("anti_entropy fixture has no scenarios")
 	}
 
-	for index, scenario := range fixture.Scenarios {
-		scenario := scenario
-		// Rung 4 (#lzscenariocoverage): record at the point of replay.
-		label := recordScenarioAt("distributed/anti_entropy_converge.json", index, scenario.Id, scenario.Name)
-		t.Run(label, func(t *testing.T) {
+	for _, sv := range typedScenarioViews("distributed/anti_entropy_converge.json", fixture.Scenarios,
+		func(s antiEntropyScenario) (string, string) { return s.Id, s.Name }) {
+		t.Run(sv.Label(), func(t *testing.T) {
+			// Rung 4 books HERE (#lzscenariobodyskip), on the payload handoff
+			// inside the subtest — never at the loop header, which cannot tell a
+			// body that replayed from one that returned early.
+			scenario := sv.Value()
 			runtime := NewCrdtPlaneRuntime(1)
 			defer runtime.Close()
 

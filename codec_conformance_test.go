@@ -262,12 +262,12 @@ func TestCodecJSONFramesRoundTrip(t *testing.T) {
 	excuseKey(t, fixtureBlock, "note", "prose: documents the reference-vs-byte-canonical distinction, states nothing the replay observes")
 
 	replayed := 0
-	for index, rawScenario := range jsList(fixture["scenarios"]) {
-		scenario := jsMap(rawScenario)
-		// Rung 4 (#lzscenariocoverage): record at the point of replay, so a
-		// scenario this loop stops reaching stops being recorded.
-		label := recordScenarioMap(codecJSONFixture, index, scenario)
-		t.Run(label, func(t *testing.T) {
+	for _, sv := range scenarioViews(codecJSONFixture, jsList(fixture["scenarios"])) {
+		t.Run(sv.Label(), func(t *testing.T) {
+			// Rung 4 books HERE (#lzscenariobodyskip), on the first read of the
+			// PAYLOAD inside the subtest — never at the loop header, which
+			// cannot tell a body that replayed from one that returned early.
+			scenario := sv.Map()
 			consumeKeys(t, codecJSONFixture+" scenario", scenario, "id", "name", "description", "variant", "expect", "wire")
 			excuseKeys(t, scenario, "narration: names and describes the scenario, states nothing the replay must observe", "id", "name", "description")
 			excuseKey(t, scenario, "wire", "replay input: the frame fed through the codec; what survives is asserted through the expect block")
@@ -467,12 +467,12 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 	excuseKey(t, fixtureBlock, "note", "prose: restates why the fixture pins decoded values and named field lists rather than golden bytes")
 
 	replayed := 0
-	for index, rawScenario := range jsList(fixture["scenarios"]) {
-		scenario := jsMap(rawScenario)
-		// Rung 4 (#lzscenariocoverage): record at the point of replay, so a
-		// scenario this loop stops reaching stops being recorded.
-		label := recordScenarioMap(codecMsgpackFixture, index, scenario)
-		t.Run(label, func(t *testing.T) {
+	for _, sv := range scenarioViews(codecMsgpackFixture, jsList(fixture["scenarios"])) {
+		t.Run(sv.Label(), func(t *testing.T) {
+			// Rung 4 books HERE (#lzscenariobodyskip), on the first read of the
+			// PAYLOAD inside the subtest — never at the loop header, which
+			// cannot tell a body that replayed from one that returned early.
+			scenario := sv.Map()
 			consumeKeys(t, codecMsgpackFixture+" scenario", scenario, "id", "name", "description", "variant", "expect", "wire")
 			excuseKeys(t, scenario, "narration: names and describes the scenario, states nothing the replay must observe", "id", "name", "description")
 			excuseKey(t, scenario, "wire", "replay input: the frame fed through the codec; what survives is asserted through the expect block")
@@ -501,7 +501,7 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatalf("msgpack encode: %v", err)
 			}
-			block := consumeKeys(t, codecMsgpackFixture+" "+label+" expect", jsMap(scenario["expect"]), codecMsgpackExpectKeys...)
+			block := consumeKeys(t, codecMsgpackFixture+" "+sv.Label()+" expect", jsMap(scenario["expect"]), codecMsgpackExpectKeys...)
 
 			// SHAPE of the bytes first, then their meaning. A binding whose
 			// codec is positional on both ends round-trips every value

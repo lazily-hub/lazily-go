@@ -5,55 +5,11 @@ import (
 	"testing"
 )
 
-type outboxStoreFixture struct {
-	conformanceMeta
-	ProtocolVersion int `json:"protocol_version"`
-	Scenarios       []struct {
-		conformanceDoc
-		Id         string  `json:"id"`
-		Name       string  `json:"name"`
-		PutEpochs  []Epoch `json:"put_epochs"`
-		ScanAfter  Epoch   `json:"scan_after"`
-		AckThrough []Epoch `json:"ack_through"`
-		// `restart` and `open_handles` are the scenario's setup. They were
-		// decoded and dropped: the runner always reopened from disk and always
-		// opened exactly the two handles named "stale" and "current", so a
-		// fixture that stopped asking for a restart, or renamed a handle, would
-		// have gone on passing against the runner's own hardcoded setup.
-		//
-		// ReopensFromDisk is spelled unlike its json key on purpose:
-		// TestConformanceStructFieldsAreRead resolves reads by name, and Topic
-		// already has a Restart() method, so a field named `Restart` reads as
-		// consumed whether or not anything here ever touches it.
-		ReopensFromDisk bool     `json:"restart"`
-		OpenHandles     []string `json:"open_handles"`
-		SaveCursor      []struct {
-			Handle string `json:"handle"`
-			Epoch  Epoch  `json:"epoch"`
-		} `json:"save_cursor"`
-		Expect struct {
-			Epochs         []Epoch `json:"epochs"`
-			Cursor         Epoch   `json:"cursor"`
-			Retained       []Epoch `json:"retained"`
-			ReplayFromZero []Epoch `json:"replay_from_zero"`
-			LoadedCursor   Epoch   `json:"loaded_cursor"`
-			Replay         []Epoch `json:"replay"`
-		} `json:"expect"`
-	} `json:"scenarios"`
-}
-
-func loadOutboxStoreFixture(t *testing.T) outboxStoreFixture {
-	t.Helper()
-	raw, err := specReadFile("../lazily-spec/conformance/reliable-sync/outbox_store_protocol.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var fixture outboxStoreFixture
-	mustStrictJSON(t, "reliable-sync/outbox_store_protocol.json", raw, &fixture)
-	return fixture
-}
-
-func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) (out struct {
+// outboxStoreScenarioT is named rather than inline so the fixture struct and
+// the lookup helper share ONE definition. They used to carry byte-identical
+// anonymous copies, where a field added to one and not the other silently
+// stopped being decoded at the other site.
+type outboxStoreScenarioT struct {
 	conformanceDoc
 	Id         string  `json:"id"`
 	Name       string  `json:"name"`
@@ -84,16 +40,35 @@ func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) 
 		LoadedCursor   Epoch   `json:"loaded_cursor"`
 		Replay         []Epoch `json:"replay"`
 	} `json:"expect"`
-}) {
+}
+
+type outboxStoreFixture struct {
+	conformanceMeta
+	ProtocolVersion int                    `json:"protocol_version"`
+	Scenarios       []outboxStoreScenarioT `json:"scenarios"`
+}
+
+func loadOutboxStoreFixture(t *testing.T) outboxStoreFixture {
 	t.Helper()
-	for index, scenario := range fixture.Scenarios {
-		if scenario.Id != name {
+	raw, err := specReadFile("../lazily-spec/conformance/reliable-sync/outbox_store_protocol.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture outboxStoreFixture
+	mustStrictJSON(t, "reliable-sync/outbox_store_protocol.json", raw, &fixture)
+	return fixture
+}
+
+func outboxStoreScenario(t *testing.T, fixture outboxStoreFixture, name string) (out outboxStoreScenarioT) {
+	t.Helper()
+	// Selecting is not replaying (#lzscenariobodyskip): booking rides on the
+	// payload handoff, not on the scan that found it.
+	for _, sv := range typedScenarioViews("reliable-sync/outbox_store_protocol.json", fixture.Scenarios,
+		func(s outboxStoreScenarioT) (string, string) { return s.Id, s.Name }) {
+		if sv.ID() != name {
 			continue
 		}
-		// Rung 4 (#lzscenariocoverage): this lookup IS the replay point for
-		// this fixture — a scenario nobody asks for is never recorded.
-		recordScenarioAt("reliable-sync/outbox_store_protocol.json", index, scenario.Id, scenario.Name)
-		return scenario
+		return sv.Value()
 	}
 	t.Fatalf("missing scenario %q", name)
 	return out

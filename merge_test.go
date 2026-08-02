@@ -180,14 +180,17 @@ func TestMergeCellAlgebraFixture(t *testing.T) {
 		"Max":        Max[int](),
 	}
 	seen := 0
-	for index, sc := range fixture.Scenarios {
-		// Rung 4 (#lzscenariocoverage). This was the last fixture in the corpus
-		// whose scenarios carried neither `id` nor `name` — they were
-		// distinguished only by `policy`, so every entry it contributed landed on
-		// the positional fallback. lazily-spec now gives them `keep_latest`/
-		// `sum`/`max` and the fallback is gone (#lzspecscenarioids), so the id
-		// comes from the fixture like every other binding reads it.
-		recordScenarioAt("collections/mergecell_algebra.json", index, sc.ID, "")
+	for _, sv := range typedScenarioViews("collections/mergecell_algebra.json", fixture.Scenarios,
+		func(s mergeScenario) (string, string) { return s.ID, "" }) {
+		// Rung 4 books on the payload handoff (#lzscenariobodyskip), not at the
+		// loop header. This was also the last fixture in the corpus whose
+		// scenarios carried neither `id` nor `name` — they were distinguished
+		// only by `policy`, so every entry it contributed landed on the
+		// positional fallback. lazily-spec now gives them
+		// `keep_latest`/`sum`/`max` and the fallback is gone
+		// (#lzspecscenarioids), so the id comes from the fixture like every
+		// other binding reads it.
+		sc := sv.Value()
 		p := policies[sc.Policy]
 		if p.Commutative != sc.Flags.Commutative || p.Idempotent != sc.Flags.Idempotent {
 			t.Fatalf("%s flags mismatch", sc.Policy)
