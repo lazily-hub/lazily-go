@@ -64,6 +64,36 @@ func loadCodecFixture(t *testing.T, name string) (map[string]any, bool) {
 	return nil, false
 }
 
+// scenarioWireCodec reports which codec a scenario's frame is REALLY carried in,
+// read off the raw carriage rather than restated from the scenario's own `codec`
+// label (#lznullformblind).
+//
+// The three codec/* runners each used to consume `codec` with
+// `assertKeyWith(scenario, "codec", func(want) { want != scenario["codec"] })`
+// — the key compared against itself, through a local that had just been read out
+// of the same slot. It could not fail for any reason: a scenario labelled `json`
+// that ships only `wire_msgpack_hex` passed it and then died on a nil type
+// assertion several frames deeper, where nothing says the LABEL was the thing
+// that was wrong. Which wire field the scenario actually carries is the one
+// witness to the label that does not come from the label. This is the same
+// read-it-off-the-raw-frame control `nodeKeyWireForm` applies to `key`.
+func scenarioWireCodec(t *testing.T, scenario map[string]any) string {
+	t.Helper()
+	_, hasJSON := scenario["wire_json"]
+	_, hasMsgpack := scenario["wire_msgpack_hex"]
+	switch {
+	case hasJSON && hasMsgpack:
+		t.Fatalf("%v: the scenario carries BOTH wire_json and wire_msgpack_hex, so its "+
+			"`codec` label has no independent witness in the frame it ships", scenario["id"])
+	case hasJSON:
+		return "json"
+	case hasMsgpack:
+		return "msgpack"
+	}
+	t.Fatalf("%v: the scenario carries neither wire_json nor wire_msgpack_hex", scenario["id"])
+	return ""
+}
+
 // codecVariant names the IpcMessage arm, matching the fixture's `variant`.
 func codecVariant(t *testing.T, m IpcMessage) string {
 	t.Helper()
@@ -260,12 +290,25 @@ func TestCodecJSONFramesRoundTrip(t *testing.T) {
 	fixtureBlock := consumeKeys(t, codecJSONFixture+" assertions", jsMap(fixture["assertions"]),
 		"prose", "codec", "self_describing", "byte_canonical", "required_of_binding", "role",
 		"scenario_count", "note")
+	// CORPUS DECLARATIONS, pinned by agreement rather than derived from the run
+	// (#lznullformblind). Each is fixture-vs-literal on purpose: `codec`, `role`
+	// and `required_of_binding` state what the corpus obliges, `self_describing`
+	// and `byte_canonical` state properties of the FORMAT — `byte_canonical` in
+	// particular is a claim about what any two conforming bindings may emit for
+	// one message, which no single binding's run can produce a comparable value
+	// for. Making them run-derived would replace a real cross-binding agreement
+	// with a same-binding tautology; the vacuity #lznullformblind names is the
+	// key that LOOKS like a summary of the replay, which these are not.
 	assertKey(t, fixtureBlock, "codec", "json")
 	assertKey(t, fixtureBlock, "self_describing", true)
 	assertKey(t, fixtureBlock, "byte_canonical", true)
 	assertKey(t, fixtureBlock, "required_of_binding", "MUST")
 	assertKey(t, fixtureBlock, "role", "reference")
-	assertKey(t, fixtureBlock, "scenario_count", float64(len(jsList(fixture["scenarios"]))))
+	// `scenario_count`, by contrast, DOES claim to summarize the replay, so it is
+	// asserted after the loop against the count the replay produced
+	// (#lznullformblind). Against `len(fixture["scenarios"])` it restated the
+	// fixture's own array length back to itself and was green over a runner that
+	// decodes nothing.
 	// `note` is a declared prose key here, not a reserved annotation: it states
 	// the obligation to keep `role` and `byte_canonical` apart, and both are
 	// pinned, so it is discharged by naming them (#lzprosekeyconvention).
@@ -278,6 +321,10 @@ func TestCodecJSONFramesRoundTrip(t *testing.T) {
 			// PAYLOAD inside the subtest — never at the loop header, which
 			// cannot tell a body that replayed from one that returned early.
 			scenario := sv.Map()
+			// Booked on the same PAYLOAD read, and inside the subtest, so a body
+			// that returns early is not counted. Incrementing after `t.Run`
+			// returns would count a scenario whose body never ran.
+			replayed++
 			consumeKeys(t, codecJSONFixture+" scenario", scenario, "id", "name", "description", "variant", "expect", "wire")
 			excuseKeys(t, scenario, "narration: names and describes the scenario, states nothing the replay must observe", "id", "name", "description")
 			excuseKey(t, scenario, "wire", "replay input: the frame fed through the codec; what survives is asserted through the expect block")
@@ -312,8 +359,12 @@ func TestCodecJSONFramesRoundTrip(t *testing.T) {
 			assertKey(t, block, "round_trip_equals_source", reflect.DeepEqual(roundTripped, source))
 			assertCodecValues(t, block, roundTripped)
 		})
-		replayed++
 	}
+	// The count the replay produced, not the length of the array it read
+	// (#lznullformblind). Asserted BEFORE the variant-coverage gate below, so a
+	// short replay is reported against the corpus's own number rather than
+	// swallowed by a runner-side literal that fatals first.
+	assertKey(t, fixtureBlock, "scenario_count", float64(replayed))
 	if replayed != 3 {
 		t.Fatalf("replayed %d scenarios, want one per IpcMessage variant", replayed)
 	}
@@ -483,12 +534,20 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 	// sorted field names instead of a golden byte string.
 	fixtureBlock := consumeKeys(t, codecMsgpackFixture+" assertions", jsMap(fixture["assertions"]),
 		"prose", "codec", "self_describing", "byte_canonical", "required_of_binding", "role", "scenario_count", "note")
+	// CORPUS DECLARATIONS, pinned by agreement rather than derived from the run
+	// (#lznullformblind). `byte_canonical: false` is the clearest case: it says
+	// two conforming bindings MAY emit different bytes for one message, and a run
+	// inside a single binding — whose own encoder is deterministic either way —
+	// has no value to compare it against. Left fixture-vs-literal deliberately.
 	assertKey(t, fixtureBlock, "codec", "msgpack")
 	assertKey(t, fixtureBlock, "self_describing", true)
 	assertKey(t, fixtureBlock, "byte_canonical", false)
 	assertKey(t, fixtureBlock, "required_of_binding", "MUST")
 	assertKey(t, fixtureBlock, "role", "cross_language_binary_default")
-	assertKey(t, fixtureBlock, "scenario_count", float64(len(jsList(fixture["scenarios"]))))
+	// `scenario_count`, by contrast, DOES claim to summarize the replay, so it is
+	// asserted after the loop against the count the replay produced
+	// (#lznullformblind). Against `len(fixture["scenarios"])` it was green over a
+	// runner that decodes nothing.
 	// `note` is a declared prose key here, not a reserved annotation: it states
 	// WHY this fixture pins decoded values and named field lists rather than
 	// golden bytes, and the executable form of that is `byte_canonical: false`
@@ -505,6 +564,10 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 			// PAYLOAD inside the subtest — never at the loop header, which
 			// cannot tell a body that replayed from one that returned early.
 			scenario := sv.Map()
+			// Booked on the same PAYLOAD read, and inside the subtest, so a body
+			// that returns early is not counted. Incrementing after `t.Run`
+			// returns would count a scenario whose body never ran.
+			replayed++
 			consumeKeys(t, codecMsgpackFixture+" scenario", scenario, "id", "name", "description", "variant", "expect", "wire")
 			excuseKeys(t, scenario, "narration: names and describes the scenario, states nothing the replay must observe", "id", "name", "description")
 			excuseKey(t, scenario, "wire", "replay input: the frame fed through the codec; what survives is asserted through the expect block")
@@ -548,8 +611,12 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 			assertKey(t, block, "round_trip_equals_source", reflect.DeepEqual(roundTripped, source))
 			assertCodecValues(t, block, roundTripped)
 		})
-		replayed++
 	}
+	// The count the replay produced, not the length of the array it read
+	// (#lznullformblind). Asserted BEFORE the variant-coverage gate below, so a
+	// short replay is reported against the corpus's own number rather than
+	// swallowed by a runner-side literal that fatals first.
+	assertKey(t, fixtureBlock, "scenario_count", float64(replayed))
 	if replayed != 3 {
 		t.Fatalf("replayed %d scenarios, want one per IpcMessage variant", replayed)
 	}

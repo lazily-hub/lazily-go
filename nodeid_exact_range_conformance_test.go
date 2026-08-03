@@ -38,13 +38,10 @@ const maxExactNodeID = uint64(1)<<63 - 1
 // decides, because that split is the whole point of the fixture.
 func decodeNodeIDScenario(t *testing.T, scenario map[string]any) (IpcMessage, error) {
 	t.Helper()
-	codec := scenario["codec"].(string)
-	assertKeyWith(t, scenario, "codec", func(want any) {
-		t.Helper()
-		if want != codec {
-			t.Errorf("codec = %v, want %v", codec, want)
-		}
-	})
+	// Read off the raw carriage, never restated from the label itself
+	// (#lznullformblind).
+	codec := scenarioWireCodec(t, scenario)
+	assertKey(t, scenario, "codec", codec)
 	switch codec {
 	case "json":
 		excuseKey(t, scenario, "wire_json",
@@ -117,28 +114,32 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		// The two `exact` scenarios are the control: a runner that never decodes
 		// satisfies `exact_or_reject` alone. `node_id_decimal` and
 		// `root_id_decimal` are rendered from the decoded frame, so they are the
-		// keys only a real decode can produce.
-		"outcome", "outcomes", "node_id_decimal", "root_id_decimal")
+		// keys only a real decode can produce. `scenario_count` joins them now
+		// that it counts the scenarios this run really replayed rather than the
+		// length of the fixture's own array (#lznullformblind) — as a
+		// self-comparison it was exactly the runner-that-decodes-nothing pass the
+		// paragraph names, so naming it discharged nothing.
+		"outcome", "outcomes", "node_id_decimal", "root_id_decimal", "scenario_count")
 
 	scenarios := fixture["scenarios"].([]any)
-	// Asserted because every key owes a disposition, but deliberately NOT named
-	// in any discharge above: it compares the fixture's own count to the length
-	// of the fixture's own array, so it is green over a runner that decodes
-	// nothing. Rung 4's replay ledger is what actually holds the scenarios in
-	// place.
-	assertKey(t, assertions, "scenario_count", float64(len(scenarios)))
 
 	// Anti-vacuity: a runner that treats every frame as rejected satisfies the
 	// `exact_or_reject` scenarios trivially. `accepted` is what proves this one
 	// decoded anything at all, and the assertion at the end pins the exact count
 	// Go's int64 range implies rather than "at least one".
 	accepted := 0
+	// `scenario_count` is asserted AFTER the loop, against the scenarios this
+	// run really replayed (#lznullformblind). It used to compare the fixture's
+	// own count to the length of the fixture's own array — green over a runner
+	// that decodes nothing, which is the vacuity `anti_vacuity` exists to name.
+	scenariosReplayed := 0
 
 	for _, sv := range scenarioViews(nodeIDExactRangeFixture, scenarios) {
 		id := sv.Label()
 		// Rung 4 books on the first PAYLOAD read (#lzscenariobodyskip), not on
 		// the label: a loop that reads `id` and skips has replayed nothing.
 		scenario := sv.Map()
+		scenariosReplayed++
 
 		consumeKeys(t, id, scenario,
 			"id", "name", "codec", "variant", "description", "expect",
@@ -233,6 +234,12 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 	// Four of the six scenarios (2^53-1 and 2^53+1, in both codecs) are inside
 	// int64; the two u64::MAX ones are not. A change to either half of that
 	// split is a real behaviour change and has to be read here, not absorbed.
+	// The count the replay produced, not the length of the array it read
+	// (#lznullformblind). Asserted BEFORE the accept-count gate below, so a short
+	// replay is reported against the corpus's own number rather than swallowed by
+	// a runner-side literal that fatals first.
+	assertKey(t, assertions, "scenario_count", float64(scenariosReplayed))
+
 	if accepted != 4 {
 		t.Fatalf("accepted %d scenarios, want 4: lazily-go's exact range is [0, 2^63)", accepted)
 	}

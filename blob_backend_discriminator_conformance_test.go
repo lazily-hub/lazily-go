@@ -314,8 +314,14 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		// Two different numbers from two different places.
 		"frame_epoch", "blob_epoch")
 	proseKey(t, assertions, "anti_vacuity",
-		// The four controls, in the order the paragraph states them.
-		"backend_forms", "backends", "reencoded_backend_field_present", "outcomes")
+		// The four controls, in the order the paragraph states them, plus
+		// `scenario_count` — which joins them only now that it counts the
+		// scenarios this run really replayed instead of restating the fixture's
+		// own array length (#lznullformblind). As a self-comparison it was
+		// itself an instance of the pass-without-implementing the paragraph
+		// names, so naming it here would have discharged nothing.
+		"backend_forms", "backends", "reencoded_backend_field_present", "outcomes",
+		"scenario_count")
 	proseKey(t, assertions, "theorem",
 		// PROXY. `resolve_wrong_backend` is a Lean theorem in lazily-formal; a
 		// run in this repository cannot prove it, only its CONSEQUENCE — that an
@@ -324,11 +330,14 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		"rejected", "rejection_kind")
 
 	scenarios := fixture["scenarios"].([]any)
-	assertKey(t, assertions, "scenario_count", float64(len(scenarios)))
 
 	// Anti-vacuity counters, each defeating a different way to pass without
-	// implementing the clause. They are asserted after the loop.
+	// implementing the clause. They are asserted after the loop. `replayed`
+	// carries `scenario_count`, which used to compare the fixture's own count to
+	// the length of the fixture's own array (#lznullformblind) — green over a
+	// runner that decodes nothing, which is what `anti_vacuity` exists to name.
 	var (
+		replayed          int
 		codecsReplayed    = map[string]bool{}
 		outcomesReplayed  = map[string]bool{}
 		formsReplayed     = map[string]bool{}
@@ -348,6 +357,7 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		// Rung 4 books on the first PAYLOAD read (#lzscenariobodyskip), not on
 		// the label: a loop that reads `id` and skips has replayed nothing.
 		scenario := sv.Map()
+		replayed++
 
 		consumeKeys(t, id, scenario,
 			"id", "name", "codec", "backend_form", "outcome", "variant", "description",
@@ -358,14 +368,11 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		excuseKey(t, scenario, "expect",
 			"container: asserted key-by-key against the DECODED frame, the REJECTION, and the RE-ENCODED frame below")
 
-		codec := scenario["codec"].(string)
+		// Read off the raw carriage, never restated from the label itself
+		// (#lznullformblind).
+		codec := scenarioWireCodec(t, scenario)
 		codecsReplayed[codec] = true
-		assertKeyWith(t, scenario, "codec", func(want any) {
-			t.Helper()
-			if want != codec {
-				t.Errorf("%s: codec = %v, want %v", id, codec, want)
-			}
-		})
+		assertKey(t, scenario, "codec", codec)
 		switch codec {
 		case "json":
 			excuseKey(t, scenario, "wire_json",
@@ -549,6 +556,12 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 			t.Fatalf("%s: unknown outcome %q", id, outcome)
 		}
 	}
+
+	// The count the replay produced, not the length of the array it read
+	// (#lznullformblind). Asserted BEFORE the accept/reject-split gate below, so
+	// a short replay is reported against the corpus's own number rather than
+	// swallowed by a runner-side literal that fatals first.
+	assertKey(t, assertions, "scenario_count", float64(replayed))
 
 	// `codecs`, `outcomes`, `backend_forms` and `rejection_kinds` are asserted
 	// against what the loop ACTUALLY dispatched — and the forms come off the raw

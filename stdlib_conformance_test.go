@@ -91,6 +91,13 @@ func TestStdlibConformance(t *testing.T) {
 				replayed := sv.Value()
 				assertions += replayStdlibScenario(t, replayed.ID, fixture.Feature, replayed.Steps)
 			}
+			// A mutation counts toward the floor only once every scenario it
+			// claims to kill has actually been REPLAYED above. Counted rather
+			// than assumed (#lznullformblind): `len(fixture.Mutations)` is the
+			// fixture's own array length, so comparing it to the fixture's own
+			// `mutation_floor` stays green with the replay loop deleted, and a
+			// mutation bound to nothing kills nothing.
+			mutationsBound := 0
 			for _, mutation := range fixture.Mutations {
 				if len(mutation.MustFail) == 0 {
 					t.Fatalf("mutation %q has no required kill", mutation.Operator)
@@ -100,6 +107,7 @@ func TestStdlibConformance(t *testing.T) {
 						t.Fatalf("mutation %q references missing scenario %q", mutation.Operator, id)
 					}
 				}
+				mutationsBound++
 			}
 			if got := len(scenarios); got < fixture.ScenarioFloor {
 				t.Fatalf("replayed %d scenarios, below scenario_floor %d", got, fixture.ScenarioFloor)
@@ -107,8 +115,9 @@ func TestStdlibConformance(t *testing.T) {
 			if assertions < fixture.AssertionFloor {
 				t.Fatalf("performed %d assertions, below assertion_floor %d", assertions, fixture.AssertionFloor)
 			}
-			if got := len(fixture.Mutations); got < fixture.MutationFloor {
-				t.Fatalf("declared %d mutations, below mutation_floor %d", got, fixture.MutationFloor)
+			if mutationsBound < fixture.MutationFloor {
+				t.Fatalf("%d mutations are bound to scenarios this run replayed, below "+
+					"mutation_floor %d", mutationsBound, fixture.MutationFloor)
 			}
 		})
 	}

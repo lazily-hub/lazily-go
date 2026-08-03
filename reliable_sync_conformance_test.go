@@ -47,13 +47,25 @@ type rsFixture struct {
 	fixtureID string
 }
 
-// assertRootDelta cross-checks the fixture's root `assertions` against the
-// decoded root `wire` Delta, failing on any key it cannot evaluate.
+// assertRootDelta cross-checks the fixture's root `assertions` against the root
+// `wire` frame AS THE LIBRARY DECODES IT, failing on any key it cannot evaluate.
+//
+// The values come from `IpcMessageFromWire`, never from a re-parse of the
+// fixture's own `wire` object (#lznullformblind). They used to come from an
+// ad-hoc struct filled by `mustStrictJSON` on that same object, which made
+// `base_epoch`, `epoch` and `op_count` a comparison of the fixture against
+// itself: `assertions.base_epoch` versus `wire.Delta.base_epoch`, with the
+// library never consulted. Delete the decoder entirely and those three stayed
+// green — the vacuity this repo's `anti_vacuity` keys exist to name, in a file
+// whose whole point is the span arithmetic over a decoded Delta.
 func (fx rsFixture) assertRootDelta(t *testing.T, name string) {
 	t.Helper()
 	if len(fx.Assertions) == 0 {
 		return
 	}
+	// The strict parse stays as a CORPUS-SHAPE precondition — it is what rejects
+	// an unknown field or a non-Delta root before the decode — but nothing
+	// asserted below is read out of it.
 	var wire struct {
 		Delta *struct {
 			BaseEpoch Epoch             `json:"base_epoch"`
@@ -67,7 +79,16 @@ func (fx rsFixture) assertRootDelta(t *testing.T, name string) {
 	if wire.Delta == nil {
 		t.Fatalf("%s: root assertions require a root Delta wire frame", name)
 	}
-	d := Delta{BaseEpoch: wire.Delta.BaseEpoch, Epoch: wire.Delta.Epoch}
+
+	message, err := IpcMessageFromWire(fx.Wire)
+	if err != nil {
+		t.Fatalf("%s: decode root wire frame: %v", name, err)
+	}
+	decoded, ok := message.(IpcMessageDelta)
+	if !ok {
+		t.Fatalf("%s: the root wire frame decoded to %T, want a Delta", name, message)
+	}
+	d := decoded.Value
 	for key, raw := range fx.Assertions {
 		var actual any
 		switch key {
@@ -80,7 +101,7 @@ func (fx rsFixture) assertRootDelta(t *testing.T, name string) {
 		case "is_multi_epoch":
 			actual = d.Span() > 1
 		case "op_count":
-			actual = len(wire.Delta.Ops)
+			actual = len(d.Ops)
 		default:
 			t.Fatalf("%s: unknown root assertion key %q", name, key)
 		}
