@@ -27,7 +27,7 @@ import (
 
 const nodeKeyNullFixture = "codec/nodekey_null_leniency.json"
 
-func decodeNodeKeyScenario(t *testing.T, scenario map[string]any) IpcMessage {
+func decodeNodeKeyScenario(t *testing.T, scenario, expect map[string]any) IpcMessage {
 	t.Helper()
 	// Read off the raw carriage, never restated from the label itself
 	// (#lznullformblind).
@@ -41,7 +41,9 @@ func decodeNodeKeyScenario(t *testing.T, scenario map[string]any) IpcMessage {
 	case "json":
 		excuseKey(t, scenario, "wire_json",
 			"the frame under test: the runner's INPUT, proven by the decoded values asserted below")
-		msg, err = DecodeIpcMessageJSON([]byte(scenario["wire_json"].(string)))
+		raw := []byte(scenario["wire_json"].(string))
+		assertKey(t, expect, "wire_input_fnv1a64", wireInputFNV1a64(raw))
+		msg, err = DecodeIpcMessageJSON(raw)
 	case "msgpack":
 		excuseKey(t, scenario, "wire_msgpack_hex",
 			"the frame under test: the runner's INPUT, proven by the decoded values asserted below")
@@ -50,6 +52,7 @@ func decodeNodeKeyScenario(t *testing.T, scenario map[string]any) IpcMessage {
 		if err != nil {
 			t.Fatalf("wire_msgpack_hex is not hex: %v", err)
 		}
+		assertKey(t, expect, "wire_input_fnv1a64", wireInputFNV1a64(raw))
 		msg, err = DecodeIpcMessageMsgpack(raw)
 	default:
 		t.Fatalf("unknown codec %q", codec)
@@ -261,14 +264,9 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 		// `decoded_key` is what proves they arrive the same.
 		"key_form", "decoded_key", "fields")
 	proseKey(t, assertions, "wire_encoding",
-		// PROXY. The paragraph is a claim about how the CORPUS carries its bytes
-		// — raw text and lowercase hex rather than a pre-parsed object — and no
-		// assertion a run makes can observe that choice directly. The honest
-		// proxy is the control that reads the raw `key` slot before the decoder
-		// runs: if the carriage had collapsed absent-entry and explicit-nil, the
-		// three-way `key_form` split could not survive into the runner at all,
-		// in either codec.
-		"key_form", "key_forms", "codecs")
+		// Executable proof that the exact raw text / decoded-hex byte slice
+		// reaches the library decoder rather than a reconstructed proxy.
+		"wire_input_fnv1a64")
 	proseKey(t, assertions, "reencode_obligation",
 		// The half a decode assertion cannot reach: the encoder must still emit
 		// the OMITTED form.
@@ -323,9 +321,10 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 
 		expect := scenario["expect"].(map[string]any)
 		consumeKeys(t, id+".expect", expect,
-			"decoded_key", "reencoded_key_field_present", "node", "type_tag", "payload", "epoch")
+			"decoded_key", "reencoded_key_field_present", "node", "type_tag", "payload", "epoch",
+			"wire_input_fnv1a64")
 
-		msg := decodeNodeKeyScenario(t, scenario)
+		msg := decodeNodeKeyScenario(t, scenario, expect)
 		assertKey(t, scenario, "variant", codecVariant(t, msg))
 
 		key := decodedNodeKey(t, scenario, msg)

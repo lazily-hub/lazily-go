@@ -119,7 +119,7 @@ type blobBackendOutcome struct {
 
 // blobBackendDecode runs the scenario's raw wire through the library's decoder
 // for its own codec. Both are exercised: msgpack is a MUST-level codec here.
-func blobBackendDecode(t *testing.T, scenario map[string]any) (out blobBackendOutcome) {
+func blobBackendDecode(t *testing.T, scenario, expect map[string]any) (out blobBackendOutcome) {
 	t.Helper()
 	var raw []byte
 	var decode func([]byte) (IpcMessage, error)
@@ -136,6 +136,7 @@ func blobBackendDecode(t *testing.T, scenario map[string]any) (out blobBackendOu
 		t.Fatalf("unknown codec %v", scenario["codec"])
 		return
 	}
+	assertKey(t, expect, "wire_input_fnv1a64", wireInputFNV1a64(raw))
 	defer func() {
 		if r := recover(); r != nil {
 			out.panicked = r
@@ -286,15 +287,9 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		// decode-error family and never normalized.
 		"decoded_backend", "rejected", "rejection_kind", "rejection_is_decode_error")
 	proseKey(t, assertions, "wire_encoding",
-		// PROXY. The paragraph is a claim about how the CORPUS carries its bytes
-		// — raw text and lowercase hex rather than a pre-parsed object, because
-		// `schemas/defs.json` closes `backend` to an enum and the reject frames
-		// could not survive as structured JSON — and no assertion a run makes
-		// can observe that choice directly. The honest proxy is `backend_form`,
-		// read back OFF THE RAW FRAME rather than taken on the fixture's word:
-		// a carriage that had normalized the seven shapes could not produce the
-		// vocabulary `backend_forms` pins, in either codec.
-		"backend_form", "backend_forms", "codecs")
+		// Executable proof that the exact raw text / decoded-hex byte slice
+		// reaches the library decoder rather than a reconstructed proxy.
+		"wire_input_fnv1a64")
 	proseKey(t, assertions, "backend_form_vocabulary",
 		// "every backend in `backends` is the `decoded_backend` of some accept
 		// scenario" — the assertion that would have caught v1's missing
@@ -401,9 +396,10 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		consumeKeys(t, id+".expect", expect,
 			"decoded_backend", "reencoded_backend_field_present",
 			"node", "offset", "len", "generation", "frame_epoch", "blob_epoch", "checksum",
-			"rejected", "rejection_kind", "rejection_is_decode_error", "error_names_token")
+			"rejected", "rejection_kind", "rejection_is_decode_error", "error_names_token",
+			"wire_input_fnv1a64")
 
-		out := blobBackendDecode(t, scenario)
+		out := blobBackendDecode(t, scenario, expect)
 
 		// THE RUN CHOOSES THE ARM, not the fixture's label (#lznullformblind).
 		//

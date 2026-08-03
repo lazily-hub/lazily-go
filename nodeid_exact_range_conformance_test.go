@@ -34,7 +34,7 @@ const maxExactNodeID = uint64(1)<<63 - 1
 // decodeNodeIDScenario decodes a scenario's wire frame with the codec it names.
 // An error is a conforming outcome for an over-range identifier; the caller
 // decides, because that split is the whole point of the fixture.
-func decodeNodeIDScenario(t *testing.T, scenario map[string]any) (IpcMessage, error) {
+func decodeNodeIDScenario(t *testing.T, scenario, expect map[string]any) (IpcMessage, error) {
 	t.Helper()
 	// Read off the raw carriage, never restated from the label itself
 	// (#lznullformblind).
@@ -45,7 +45,9 @@ func decodeNodeIDScenario(t *testing.T, scenario map[string]any) (IpcMessage, er
 		excuseKey(t, scenario, "wire_json",
 			"the frame under test, not an expectation: it is the runner's INPUT and is "+
 				"proven by the decoded values asserted below")
-		return DecodeIpcMessageJSON([]byte(scenario["wire_json"].(string)))
+		raw := []byte(scenario["wire_json"].(string))
+		assertKey(t, expect, "wire_input_fnv1a64", wireInputFNV1a64(raw))
+		return DecodeIpcMessageJSON(raw)
 	case "msgpack":
 		excuseKey(t, scenario, "wire_msgpack_hex",
 			"the frame under test, not an expectation: it is the runner's INPUT and is "+
@@ -54,6 +56,7 @@ func decodeNodeIDScenario(t *testing.T, scenario map[string]any) (IpcMessage, er
 		if err != nil {
 			t.Fatalf("wire_msgpack_hex is not hex: %v", err)
 		}
+		assertKey(t, expect, "wire_input_fnv1a64", wireInputFNV1a64(raw))
 		return DecodeIpcMessageMsgpack(raw)
 	default:
 		t.Fatalf("unknown codec %q", codec)
@@ -100,14 +103,9 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		// rendering is the only comparison that sees a neighbouring identifier.
 		"node_id_decimal", "root_id_decimal", "outcome")
 	proseKey(t, assertions, "wire_encoding",
-		// PROXY. The paragraph is a claim about how the CORPUS carries its bytes
-		// and its expectation — raw text, lowercase hex, and a decimal STRING —
-		// which no assertion a run makes can observe directly. The honest proxy
-		// is `node_id_decimal`: it is compared as a decimal rendering of the
-		// DECODED identifier, in both codecs, which is precisely the comparison
-		// that a double-backed JSON parse of the expectation would have
-		// destroyed before the test could make it.
-		"node_id_decimal", "codecs")
+		// Executable proof that the exact raw text / decoded-hex byte slice
+		// reaches the library decoder rather than a reconstructed proxy.
+		"wire_input_fnv1a64")
 	proseKey(t, assertions, "anti_vacuity",
 		// The two `exact` scenarios are the control: a runner that never decodes
 		// satisfies `exact_or_reject` alone. `node_id_decimal` and
@@ -150,7 +148,7 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		expect := scenario["expect"].(map[string]any)
 		consumeKeys(t, id+".expect", expect,
 			"outcome", "node_id_decimal", "root_id_decimal", "epoch",
-			"node_count", "type_tag", "payload")
+			"node_count", "type_tag", "payload", "wire_input_fnv1a64")
 
 		expected, err := strconv.ParseUint(expect["node_id_decimal"].(string), 10, 64)
 		if err != nil {
@@ -176,7 +174,7 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 			}
 		})
 
-		message, err := decodeNodeIDScenario(t, scenario)
+		message, err := decodeNodeIDScenario(t, scenario, expect)
 		if err != nil {
 			if representable {
 				t.Fatalf("%s: lazily-go represents %d exactly, so this frame must decode; got %v",
