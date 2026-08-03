@@ -204,6 +204,10 @@ type assertionBlock struct {
 	mu       sync.Mutex
 	asserted map[string]bool
 	excused  map[string]string
+	// keySetChecked records the object-valued keys that reached a KEY-SET
+	// comparison rather than a hand-picked list of sub-fields
+	// (#lzsubblockkeyset). See the rung-6 section below.
+	keySetChecked map[string]bool
 }
 
 var (
@@ -246,11 +250,12 @@ func trackAssertions(t *testing.T, label string, obj map[string]any, declared []
 		return
 	}
 	blk := &assertionBlock{
-		label:    label,
-		obj:      obj,
-		declared: append([]string{}, declared...),
-		asserted: map[string]bool{},
-		excused:  map[string]string{},
+		label:         label,
+		obj:           obj,
+		declared:      append([]string{}, declared...),
+		asserted:      map[string]bool{},
+		excused:       map[string]string{},
+		keySetChecked: map[string]bool{},
 	}
 	assertionBlocksMu.Lock()
 	assertionBlocks[id] = append(assertionBlocks[id], blk)
@@ -342,12 +347,20 @@ func (b *assertionBlock) problems() []string {
 			continue
 		}
 		reason, excused := b.excused[key]
+		// Rung 6: a key whose fixture VALUE is a JSON object owes a check of its
+		// KEY SET, not of five sub-fields somebody remembered (#lzsubblockkeyset).
+		_, objectValued := b.obj[key].(map[string]any)
 		switch {
 		case b.asserted[key] && excused:
 			out = append(out, fmt.Sprintf("%s: key %q is both asserted and excused (%q) — the excuse has gone stale and now hides nothing; delete it",
 				b.label, key, reason))
 		case excused && strings.TrimSpace(reason) == "":
 			out = append(out, fmt.Sprintf("%s: key %q is excused with an empty reason — an excuse without a reason is a silent skip", b.label, key))
+		case b.asserted[key] && objectValued && !b.keySetChecked[key]:
+			out = append(out, fmt.Sprintf("%s: object-valued key %q was consumed without a key-set check — the sub-keys "+
+				"beneath it are compared by nothing, so a field added upstream lands unasserted with the suite still green. "+
+				"Descend into it with assertKeySub, walk every sub-key with assertKeyEach, or compare its KEY SET "+
+				"against what the run produced with assertKeySet (#lzsubblockkeyset)", b.label, key))
 		case b.asserted[key] || excused:
 			// dispositioned
 		default:
@@ -399,6 +412,18 @@ func assertKey(t *testing.T, block map[string]any, key string, actual any) {
 		t.Helper()
 		if !jsonValueEqual(want, actual) {
 			t.Errorf("%s: %s = %v, want %v (the fixture's value)", assertionLabel(block), key, actual, want)
+		}
+		// An object compared WHOLE has had its key set compared: jsonEquivalent
+		// rejects a size difference before it looks at a single value, so a
+		// sub-key added upstream reddens here without anyone naming it. That is
+		// the rung-6 obligation discharged by construction, so record it
+		// (#lzsubblockkeyset). The shape the rung exists to catch is the
+		// hand-picked sub-field walk inside an assertKeyWith callback, which
+		// never sees the sixth field at all.
+		if _, objectValued := want.(map[string]any); objectValued {
+			if blk := lookupAssertionBlock(block); blk != nil {
+				blk.markKeySetChecked(key)
+			}
 		}
 	})
 }
@@ -452,6 +477,168 @@ func excuseKeys(t *testing.T, block map[string]any, reason string, keys ...strin
 	for _, key := range keys {
 		excuseKey(t, block, key, reason)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Rung 6: an OBJECT-VALUED assertion key is checked by its KEY SET
+// (#lzsubblockkeyset)
+// ---------------------------------------------------------------------------
+//
+// Rung 2 (consumeKeys) proves that every key a BLOCK carries is named. It says
+// nothing about the keys one level DOWN, inside an assertion key whose value is
+// itself a JSON object. A runner that reads five named sub-fields of such a key
+// is comparing the sixth against nothing: a field added upstream lands
+// unasserted and the suite stays green. That is the null form of rung 2,
+// relocated inside an assertion key instead of beside one — found by planting a
+// key in `arena_blob.json`'s `descriptor` object, which reddened not one binding
+// while every scalar sibling reddened all nine.
+//
+// The cheap fix is a per-call-site field count, and it is the wrong one: it
+// relies on each site remembering, which is the same thing that failed. So the
+// obligation lives in the TRACKER. An object-valued key must be consumed through
+// one of exactly two entry points:
+//
+//	assertKeySub — DESCEND. The child object becomes a tracked block of its own,
+//	   so an unrecognised sub-key fails exactly the way an unrecognised top-level
+//	   key does, and every sub-key then owes its own assertion or excuse.
+//	assertKeySet — KEY SET. The object's key set is compared, in BOTH directions,
+//	   against the set the run really produced. A token the fixture declares and
+//	   nothing replayed, and a token the run produced that the fixture omits, are
+//	   both failures. This is the entry point for a VOCABULARY whose values are
+//	   glosses rather than expectations.
+//	assertKeyEach — WALK. The TRACKER drives the iteration and hands every sub-key
+//	   the fixture carries to the caller's comparison, so a field added upstream
+//	   reaches a check by construction. This is the entry point for the keyed
+//	   expectation blocks — `expected.reads`, `expected.scopes`, `initial.values` —
+//	   where the sub-keys are a per-entry expectation rather than a fixed schema.
+//	   It is `assertKeySub` with the consumed list derived from the object instead
+//	   of restated, which is exactly the restatement that rots.
+//
+// A fourth path discharges the obligation without a new entry point: plain
+// assertKey on an object value compares the object WHOLE, and jsonEquivalent
+// rejects a size difference before it compares a single field, so the key set is
+// compared by construction there too.
+//
+// `assertionBlock.problems` above then fails any object-valued key that was
+// asserted through neither. That guard is the point of the rung: a call site
+// that reaches for plain `assertKey`/`assertKeyWith` on an object value gets a
+// red suite instead of a silent hole, so the NEXT object-valued key the corpus
+// grows cannot land unnoticed. The excuse and prose channels stay open for a key
+// that genuinely carries no obligation — both already demand a recorded reason.
+
+// assertKeySub consumes an object-valued key by DESCENDING into it. It marks the
+// key asserted on the parent block, then opens a tracked block on the child, so
+// `consumed` carries the same promise the parent's list does: a sub-key the
+// fixture holds and this list omits fails, and a sub-key named here still owes an
+// assertKey or an excuseKey of its own.
+//
+// A JSON `null` returns nil rather than failing: the corpus writes an absent
+// sub-block that way, its key set is empty, and the caller still has to say what
+// absence means. Anything else that is not an object is a fixture the runner
+// cannot descend into and fails here.
+func assertKeySub(t *testing.T, block map[string]any, key string, consumed ...string) map[string]any {
+	t.Helper()
+	label := assertionLabel(block)
+	// Recorded BEFORE the comparison runs. A t.Fatalf inside the check aborts the
+	// goroutine, and a rung-6 mark applied afterwards would never land — the
+	// teardown would then report "consumed without a key-set check" on top of the
+	// real failure and point at the wrong bug.
+	if blk := lookupAssertionBlock(block); blk != nil {
+		blk.markKeySetChecked(key)
+	}
+	var child map[string]any
+	assertKeyWith(t, block, key, func(want any) {
+		t.Helper()
+		if want == nil {
+			return
+		}
+		sub, ok := want.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: key %q is %T, want a JSON object to descend into", label, key, want)
+			return
+		}
+		child = sub
+	})
+	if child == nil {
+		return nil
+	}
+	return consumeKeys(t, label+"."+key, child, consumed...)
+}
+
+// assertKeySet consumes an object-valued key by comparing its KEY SET against
+// the set the run really produced — for a vocabulary, the tokens the replay loop
+// really dispatched on. The comparison is set equality in both directions, so a
+// declared token nothing replayed and a replayed token the fixture omits both
+// fail.
+//
+// inspect, when non-nil, is called once per declared entry with its value, for
+// the checks that are about the VALUES rather than the key set (a gloss that is
+// present but blank, say). It is not what discharges the key.
+func assertKeySet(t *testing.T, block map[string]any, key string, observed map[string]bool, inspect func(name string, value any)) {
+	t.Helper()
+	label := assertionLabel(block)
+	if blk := lookupAssertionBlock(block); blk != nil {
+		blk.markKeySetChecked(key)
+	}
+	assertKeyWith(t, block, key, func(want any) {
+		t.Helper()
+		sub, ok := want.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: key %q is %T, want a JSON object whose KEY SET is the assertion", label, key, want)
+			return
+		}
+		declared := make([]string, 0, len(sub))
+		for name := range sub {
+			declared = append(declared, name)
+		}
+		assertSameStringSet(t, label+"."+key, declared, observed)
+		if inspect != nil {
+			sort.Strings(declared)
+			for _, name := range declared {
+				inspect(name, sub[name])
+			}
+		}
+	})
+}
+
+// assertKeyEach consumes an object-valued key by WALKING it: every sub-key the
+// fixture carries is handed to check, in sorted order so a failure is the same
+// one on every run. The iteration lives here rather than in the call site, which
+// is what makes it a key-set check — a sub-key added upstream reaches the
+// caller's comparison without anyone naming it, and the hand-picked walk that
+// stops at five fields cannot be written through this entry point.
+func assertKeyEach(t *testing.T, block map[string]any, key string, check func(name string, value any)) {
+	t.Helper()
+	label := assertionLabel(block)
+	if blk := lookupAssertionBlock(block); blk != nil {
+		blk.markKeySetChecked(key)
+	}
+	assertKeyWith(t, block, key, func(want any) {
+		t.Helper()
+		sub, ok := want.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: key %q is %T, want a JSON object to walk", label, key, want)
+			return
+		}
+		names := make([]string, 0, len(sub))
+		for name := range sub {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			check(name, sub[name])
+		}
+	})
+}
+
+// markKeySetChecked records that key reached one of the two rung-6 entry points.
+func (b *assertionBlock) markKeySetChecked(key string) {
+	b.mu.Lock()
+	if b.keySetChecked == nil {
+		b.keySetChecked = map[string]bool{}
+	}
+	b.keySetChecked[key] = true
+	b.mu.Unlock()
 }
 
 // ---------------------------------------------------------------------------
@@ -1308,6 +1495,83 @@ func TestAssertionBlockVerifiesDisposition(t *testing.T) {
 	blk.asserted["held"] = true
 	if problems := blk.problems(); len(problems) != 0 {
 		t.Fatalf("prose or absent key reported: %v", problems)
+	}
+}
+
+// TestAssertionBlockRejectsUncheckedObjectValuedKey is the mutation check for
+// rung 6 (#lzsubblockkeyset). Without the arm it names, an assertion key whose
+// value is a JSON object satisfies the tracker by being asserted at all, and the
+// sub-keys beneath it are compared by nothing.
+func TestAssertionBlockRejectsUncheckedObjectValuedKey(t *testing.T) {
+	newBlock := func() *assertionBlock {
+		return &assertionBlock{
+			label: "fake.json assertions",
+			obj: map[string]any{
+				"descriptor": map[string]any{"offset": 0.0, "len": 8.0},
+				"held":       true,
+			},
+			declared:      []string{"descriptor", "held"},
+			asserted:      map[string]bool{"held": true},
+			excused:       map[string]string{},
+			keySetChecked: map[string]bool{},
+		}
+	}
+
+	// Asserted through a plain callback: the object's key set reached nothing.
+	blk := newBlock()
+	blk.asserted["descriptor"] = true
+	problems := blk.problems()
+	if len(problems) != 1 || !strings.Contains(problems[0], `"descriptor"`) ||
+		!strings.Contains(problems[0], "without a key-set check") {
+		t.Fatalf("unchecked object-valued key not reported: %v", problems)
+	}
+
+	// A key-set entry point discharges it.
+	blk = newBlock()
+	blk.asserted["descriptor"] = true
+	blk.keySetChecked["descriptor"] = true
+	if problems := blk.problems(); len(problems) != 0 {
+		t.Fatalf("key-set-checked object key reported: %v", problems)
+	}
+
+	// The excuse channel stays open — with a reason, as it already demands.
+	blk = newBlock()
+	blk.excused["descriptor"] = "container: asserted key-by-key by the loop below"
+	if problems := blk.problems(); len(problems) != 0 {
+		t.Fatalf("reasoned excuse on an object-valued key reported: %v", problems)
+	}
+
+	// A SCALAR key asserted the plain way is untouched by the rung: this arm is
+	// what keeps the guard from degenerating into "every key needs a key set".
+	blk = newBlock()
+	blk.asserted["descriptor"] = true
+	blk.keySetChecked["descriptor"] = true
+	blk.obj["held"] = "scalar"
+	if problems := blk.problems(); len(problems) != 0 {
+		t.Fatalf("scalar key reported by the object-valued guard: %v", problems)
+	}
+}
+
+// TestAssertKeyOnObjectComparesKeySet pins the fourth discharge path: assertKey
+// compares an object WHOLE, so a sub-key the live value lacks is a failure and
+// the rung-6 obligation is met by construction. Without this, the allowance
+// assertKey makes for object values would be an untested hole.
+func TestAssertKeyOnObjectComparesKeySet(t *testing.T) {
+	fixture := map[string]any{"descriptor": map[string]any{"offset": 1.0, "len": 8.0}}
+	consumeKeys(t, "fake.json assertions", fixture, "descriptor")
+
+	// A live value missing one of the fixture's sub-keys must NOT compare equal.
+	if jsonValueEqual(fixture["descriptor"], map[string]int{"offset": 1}) {
+		t.Fatal("a partial object compared equal — assertKey would not see an added sub-key")
+	}
+	if !jsonValueEqual(fixture["descriptor"], map[string]int{"offset": 1, "len": 8}) {
+		t.Fatal("the whole object did not compare equal")
+	}
+
+	assertKey(t, fixture, "descriptor", map[string]int{"offset": 1, "len": 8})
+	blk := lookupAssertionBlock(fixture)
+	if blk == nil || !blk.keySetChecked["descriptor"] {
+		t.Fatal("assertKey on an object value did not record the key-set check")
 	}
 }
 

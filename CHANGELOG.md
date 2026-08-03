@@ -8,6 +8,35 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Added
 
+- Conformance rung 6 — an OBJECT-VALUED assertion key is checked by its KEY SET
+  (`#lzsubblockkeyset`). Rung 2 proved every key a BLOCK carries is named; it
+  said nothing about the keys one level down, inside an assertion key whose value
+  is itself a JSON object. A runner that reads four named sub-fields of such a key
+  compares the fifth against nothing, so a field added upstream lands unasserted
+  with the suite still green — the null form of rung 2, relocated inside an
+  assertion key instead of beside one. The obligation now lives in the TRACKER
+  rather than in a per-call-site field count, which is the fix that relies on each
+  site remembering. Three entry points discharge an object-valued key:
+  `assertKeySub` DESCENDS, making the child object a tracked block of its own so
+  an unrecognised sub-key fails the way an unrecognised top-level key does;
+  `assertKeySet` compares the object's KEY SET in BOTH directions against the set
+  the run really produced, for a vocabulary whose values are glosses;
+  `assertKeyEach` WALKS, with the tracker driving the iteration so every sub-key
+  reaches the caller's comparison by construction. Plain `assertKey` on an object
+  value discharges it too, because it compares the object whole and
+  `jsonEquivalent` rejects a size difference before it looks at a single field.
+  `assertionBlock.problems` then fails any object-valued key asserted through none
+  of them, so a call site that reaches for `assertKeyWith` on an object value gets
+  a red suite instead of a silent hole. The excuse and prose channels stay open —
+  both already demand a recorded reason. Twenty-six call sites moved onto the new
+  entry points across the collections, collections-family, ingress-family,
+  queue-family and nodeid-exact-range runners. Three of them were real holes,
+  proven by planting a sub-key in a scratch copy of the corpus and watching the
+  pre-change suite stay green: `expected.reads` in the work-queue runner (a fixed
+  list of four read names), and `initial` and `initial.values` in the SourceMap
+  runner (seeding iterated `initial.order`, so a value the order did not name was
+  compared by nothing).
+
 - Conformance rung 5 — a PROSE key is DISCHARGED, never asserted and never
   excused (`#lzprosekeyconvention`). Five codec fixtures now declare which of
   their `assertions` keys are English paragraphs, in `assertions.prose`; a

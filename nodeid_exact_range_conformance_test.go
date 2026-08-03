@@ -21,8 +21,6 @@ package lazily
 
 import (
 	"encoding/hex"
-	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -252,27 +250,16 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 	// The vocabulary, asserted as a SET against the outcomes the loop really
 	// dispatched on. The glosses are prose nested inside a data key, so the
 	// parent key's own assertion discharges them (#lzprosekeyconvention).
-	assertKeyWith(t, assertions, "outcomes", func(want any) {
+	//
+	// Routed through the tracker's key-set entry point rather than a hand-rolled
+	// comparison here (#lzsubblockkeyset): the set difference is the same one, but
+	// the tracker now RECORDS that this object-valued key got one, so a future site
+	// that reaches for plain assertKeyWith on an object value fails at teardown
+	// instead of silently comparing sub-fields it happened to name.
+	assertKeySet(t, assertions, "outcomes", outcomesReplayed, func(name string, gloss any) {
 		t.Helper()
-		glosses, ok := want.(map[string]any)
-		if !ok {
-			t.Fatalf("assertions.outcomes is %T, want an object mapping outcome to gloss", want)
-		}
-		declared := make([]string, 0, len(glosses))
-		for name, gloss := range glosses {
-			declared = append(declared, name)
-			if text, _ := gloss.(string); strings.TrimSpace(text) == "" {
-				t.Errorf("assertions.outcomes[%q] carries no gloss", name)
-			}
-		}
-		sort.Strings(declared)
-		observed := make([]string, 0, len(outcomesReplayed))
-		for name := range outcomesReplayed {
-			observed = append(observed, name)
-		}
-		sort.Strings(observed)
-		if !reflect.DeepEqual(declared, observed) {
-			t.Errorf("assertions.outcomes declares %v, but the replay dispatched on %v", declared, observed)
+		if text, _ := gloss.(string); strings.TrimSpace(text) == "" {
+			t.Errorf("assertions.outcomes[%q] carries no gloss", name)
 		}
 	})
 

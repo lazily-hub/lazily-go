@@ -313,33 +313,33 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 	// Seeding is also an assertion: this flavor must actually hold the state the
 	// fixture says the replay starts from, or every step below measures a
 	// different graph than the corpus describes.
-	assertKeyWith(t, fixture, "initial", func(want any) {
-		initial, _ := want.(map[string]any)
-		if initial == nil {
-			t.Fatalf("%s: fixture has no initial state", flavor.name())
+	// Descended into rather than walked field-by-field (#lzsubblockkeyset): the
+	// child block owns the same unconsumed-key check the fixture root has, so a
+	// third key inside `initial` fails here instead of seeding nothing in silence.
+	initial := assertKeySub(t, fixture, "initial", "order", "values")
+	seed := stringSlice(initial["order"])
+	if len(seed) == 0 {
+		t.Fatalf("%s: fixture %s seeds no keys", flavor.name(), name)
+	}
+	initialValues, _ := initial["values"].(map[string]any)
+	for _, key := range seed {
+		v, present := initialValues[key]
+		if !present {
+			t.Fatalf("%s: no initial value for key %s", flavor.name(), key)
 		}
-		seed := stringSlice(initial["order"])
-		if len(seed) == 0 {
-			t.Fatalf("%s: fixture %s seeds no keys", flavor.name(), name)
+		num, _ := v.(float64)
+		flavor.insert(key, int(num))
+	}
+	assertKeyWith(t, initial, "order", func(want any) {
+		if got := flavor.keysUntracked(); !sameOrder(stringSlice(want), got) {
+			t.Fatalf("%s: seeded order = %v, want %v", flavor.name(), got, stringSlice(want))
 		}
-		values, _ := initial["values"].(map[string]any)
-		for _, key := range seed {
-			v, present := values[key]
-			if !present {
-				t.Fatalf("%s: no initial value for key %s", flavor.name(), key)
-			}
-			num, _ := v.(float64)
-			flavor.insert(key, int(num))
-		}
-		if got := flavor.keysUntracked(); !sameOrder(seed, got) {
-			t.Fatalf("%s: seeded order = %v, want %v", flavor.name(), got, seed)
-		}
-		for _, key := range seed {
-			num, _ := values[key].(float64)
-			got, present := flavor.valueUntracked(key)
-			if !present || got != int(num) {
-				t.Fatalf("%s: seeded value for %s = %d (present=%v), want %d", flavor.name(), key, got, present, int(num))
-			}
+	})
+	assertKeyEach(t, initial, "values", func(key string, raw any) {
+		num, _ := raw.(float64)
+		got, present := flavor.valueUntracked(key)
+		if !present || got != int(num) {
+			t.Fatalf("%s: seeded value for %s = %d (present=%v), want %d", flavor.name(), key, got, present, int(num))
 		}
 	})
 
@@ -463,17 +463,14 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		}
 
 		if _, stated := expected["values"]; stated {
-			assertKeyWith(t, expected, "values", func(want any) {
-				wantValues, _ := want.(map[string]any)
-				for key, raw := range wantValues {
-					num, _ := raw.(float64)
-					got, present := flavor.valueUntracked(key)
-					if !present {
-						t.Fatalf("%s: value for %s is absent", where(i), key)
-					}
-					if got != int(num) {
-						t.Fatalf("%s: value for %s = %d, want %d", where(i), key, got, int(num))
-					}
+			assertKeyEach(t, expected, "values", func(key string, raw any) {
+				num, _ := raw.(float64)
+				got, present := flavor.valueUntracked(key)
+				if !present {
+					t.Fatalf("%s: value for %s is absent", where(i), key)
+				}
+				if got != int(num) {
+					t.Fatalf("%s: value for %s = %d, want %d", where(i), key, got, int(num))
 				}
 			})
 		}
@@ -528,20 +525,17 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		// re-mint. A reorder keeps the entry's node, so dependents and lineage
 		// survive.
 		if _, stated := expected["handle_stable"]; stated {
-			assertKeyWith(t, expected, "handle_stable", func(raw any) {
-				stable, _ := raw.(map[string]any)
-				for key, rawWant := range stable {
-					want, _ := rawWant.(bool)
-					after, present := flavor.entryID(key)
-					before, had := idsBefore[key]
-					if want {
-						if !had || !present || before != after {
-							t.Fatalf("%s: entry identity for %s must survive the move - a reorder that re-mints is a remove + insert",
-								where(i), key)
-						}
-					} else if had && present && before == after {
-						t.Fatalf("%s: entry identity for %s should have changed", where(i), key)
+			assertKeyEach(t, expected, "handle_stable", func(key string, rawWant any) {
+				want, _ := rawWant.(bool)
+				after, present := flavor.entryID(key)
+				before, had := idsBefore[key]
+				if want {
+					if !had || !present || before != after {
+						t.Fatalf("%s: entry identity for %s must survive the move - a reorder that re-mints is a remove + insert",
+							where(i), key)
 					}
+				} else if had && present && before == after {
+					t.Fatalf("%s: entry identity for %s should have changed", where(i), key)
 				}
 			})
 		}

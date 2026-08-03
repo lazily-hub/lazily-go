@@ -120,8 +120,8 @@ func loadQueueFamilyFixture(t *testing.T, name string) map[string]any {
 		"config", "initial")
 	excuseKey(t, fixture, "steps", "replay input: the step list drives the loop, and each step's own `expected` block is asserted there")
 	if _, stated := fixture["invariants"]; stated {
-		assertKeyWith(t, fixture, "invariants", func(want any) {
-			assertQueueInvariantsDocumented(t, name, jsMap(want))
+		assertKeyEach(t, fixture, "invariants", func(key string, value any) {
+			assertQueueInvariantDocumented(t, name, key, value)
 		})
 	}
 	for i, raw := range jsList(fixture["steps"]) {
@@ -138,7 +138,8 @@ func loadQueueFamilyFixture(t *testing.T, name string) map[string]any {
 	return fixture
 }
 
-// assertQueueInvariantsDocumented consumes the fixture's `invariants` block.
+// assertQueueInvariantDocumented consumes ONE entry of the fixture's
+// `invariants` block.
 //
 // Unlike every other assertion key in this corpus, its values are prose — one
 // sentence naming the behaviour the *steps* are constructed to exercise ("pop on
@@ -147,14 +148,14 @@ func loadQueueFamilyFixture(t *testing.T, name string) map[string]any {
 // evaluate it, so this is a declared exception rather than an unimplemented
 // assertion: the block is consumed, and it is held to being real prose so an
 // empty or non-string entry cannot pass itself off as documentation.
-func assertQueueInvariantsDocumented(t *testing.T, name string, invariants map[string]any) {
+// The walk over the block lives in assertKeyEach rather than here
+// (#lzsubblockkeyset), so an invariant added upstream reaches this check.
+func assertQueueInvariantDocumented(t *testing.T, name, key string, value any) {
 	t.Helper()
-	for key, value := range invariants {
-		text, ok := value.(string)
-		if !ok || strings.TrimSpace(text) == "" {
-			t.Fatalf("%s: invariant %q must be prose describing what the steps exercise, got %v",
-				name, key, value)
-		}
+	text, ok := value.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		t.Fatalf("%s: invariant %q must be prose describing what the steps exercise, got %v",
+			name, key, value)
 	}
 }
 
@@ -853,29 +854,24 @@ func assertTopicState(
 			t.Errorf("%s elements=%v, want %v", label, got, want)
 		}
 	})
-	assertKeyWith(t, expected, "subscriptions", func(rawSubscriptions any) {
-		wantSubscriptions := jsMap(rawSubscriptions)
-		for id, raw := range wantSubscriptions {
-			want := jsMap(raw)
-			got, ok := model.subscription(id)
-			if !ok {
-				t.Errorf("%s subscription %q missing", label, id)
-				continue
-			}
-			if got.Cursor != jsInt(want["cursor"]) ||
-				got.Durability != TopicDurability(jsStr(want["durability"])) ||
-				got.Connected != (want["connected"] == true) {
-				t.Errorf("%s subscription %q=%+v, want %v", label, id, got, want)
-			}
+	assertKeyEach(t, expected, "subscriptions", func(id string, raw any) {
+		want := jsMap(raw)
+		got, ok := model.subscription(id)
+		if !ok {
+			t.Errorf("%s subscription %q missing", label, id)
+			return
+		}
+		if got.Cursor != jsInt(want["cursor"]) ||
+			got.Durability != TopicDurability(jsStr(want["durability"])) ||
+			got.Connected != (want["connected"] == true) {
+			t.Errorf("%s subscription %q=%+v, want %v", label, id, got, want)
 		}
 	})
-	assertKeyWith(t, expected, "reads", func(rawReads any) {
-		for id, raw := range jsMap(rawReads) {
-			got, exists := model.read(id)
-			want := jsStrList(raw)
-			if !exists || !slices.Equal(got, want) {
-				t.Errorf("%s read %q=(%v,%v), want %v", label, id, got, exists, want)
-			}
+	assertKeyEach(t, expected, "reads", func(id string, raw any) {
+		got, exists := model.read(id)
+		want := jsStrList(raw)
+		if !exists || !slices.Equal(got, want) {
+			t.Errorf("%s read %q=(%v,%v), want %v", label, id, got, exists, want)
 		}
 	})
 }
@@ -932,11 +928,21 @@ func replayTopicFixture(t *testing.T, name string, model topicFixtureModel) int 
 		// Keyed by the fixture's own subscriber vocabulary rather than a fixed
 		// list, so the claim is read out of the block itself. An empty block is
 		// a real claim too: no subscriber, nothing to invalidate.
-		assertKeyWith(t, expected, "invalidates", func(want any) {
-			for id, reader := range readers {
-				assertInvalidationDelta(t, label+" invalidates."+id, reader, before[id], jsMap(want)[id] == true)
+		// Both directions (#lzsubblockkeyset). The tracker walks the block, so a
+		// subscriber the fixture names but this replay never created is a failure
+		// rather than a claim compared against nothing; the reader loop then still
+		// holds every reader that EXISTS to the block's statement, defaulting to
+		// "must not have invalidated" for the ones it does not name.
+		stated := jsMap(expected["invalidates"])
+		assertKeyEach(t, expected, "invalidates", func(id string, _ any) {
+			if _, known := readers[id]; !known {
+				t.Errorf("%s: expected.invalidates names subscriber %q, which this replay never created — "+
+					"the claim is compared against nothing", label, id)
 			}
 		})
+		for id, reader := range readers {
+			assertInvalidationDelta(t, label+" invalidates."+id, reader, before[id], stated[id] == true)
+		}
 		if want, ok := step["returns"]; ok && want != nil {
 			switch want := want.(type) {
 			case float64:
@@ -1234,24 +1240,28 @@ func assertWorkQueueState(
 			}
 		}
 	})
-	assertKeyWith(t, expected, "reads", func(rawReads any) {
-		reads := jsMap(rawReads)
-		gotReads := model.reads()
-		kinds := []string{"pending_len", "is_empty", "in_flight_len", "dead_letter_len"}
-		for i, kind := range kinds {
+	// DESCENDED into rather than read by a fixed list of four names
+	// (#lzsubblockkeyset): the child block owns the unconsumed-key check, so a
+	// fifth read added upstream fails here instead of being walked past.
+	kinds := []string{"pending_len", "is_empty", "in_flight_len", "dead_letter_len"}
+	reads := assertKeySub(t, expected, "reads", kinds...)
+	gotReads := model.reads()
+	for i, kind := range kinds {
+		index := i
+		assertKeyWith(t, reads, kind, func(raw any) {
 			want := 0
 			if kind == "is_empty" {
-				if reads[kind] == true {
+				if raw == true {
 					want = 1
 				}
 			} else {
-				want = jsInt(reads[kind])
+				want = jsInt(raw)
 			}
-			if gotReads[i] != want {
-				t.Errorf("%s reads.%s=%d, want %d", label, kind, gotReads[i], want)
+			if gotReads[index] != want {
+				t.Errorf("%s reads.%s=%d, want %d", label, kind, gotReads[index], want)
 			}
-		}
-	})
+		})
+	}
 }
 
 func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureModel) int {

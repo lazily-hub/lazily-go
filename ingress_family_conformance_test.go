@@ -947,45 +947,44 @@ func replayIngressFixture(
 		// expecting false FAILS if the shell invalidated anyway.
 		invalidates := consumeKeys(t, label+" expected.invalidates",
 			jsMap(expected["invalidates"]), "scopes", "receipts")
-		assertKeyWith(t, invalidates, "scopes", func(rawScopes any) {
-			scopeWants := jsMap(rawScopes)
-			if len(scopeWants) == 0 {
-				t.Fatalf("%s: expected.invalidates.scopes is empty", label)
+		// Walked by the tracker rather than by a loop written here
+		// (#lzsubblockkeyset): every scope the block names reaches the probe below,
+		// so a scope added upstream cannot go unread.
+		scopesSeen := 0
+		assertKeyEach(t, invalidates, "scopes", func(key string, rawWant any) {
+			scopesSeen++
+			want := consumeKeys(t, label+" expected.invalidates.scopes."+key,
+				jsMap(rawWant), ingressScopeReaderKinds...)
+			if _, probed := beforeScope[key]; !probed {
+				t.Fatalf("%s: invalidates names unprobed scope %q", label, key)
 			}
-			for key, rawWant := range scopeWants {
-				want := consumeKeys(t, label+" expected.invalidates.scopes."+key,
-					jsMap(rawWant), ingressScopeReaderKinds...)
-				if _, probed := beforeScope[key]; !probed {
-					t.Fatalf("%s: invalidates names unprobed scope %q", label, key)
+			for _, kind := range ingressScopeReaderKinds {
+				if _, ok := want[kind]; !ok {
+					t.Fatalf("%s: invalidates.scopes.%s.%s is missing", label, key, kind)
 				}
-				for _, kind := range ingressScopeReaderKinds {
-					if _, ok := want[kind]; !ok {
-						t.Fatalf("%s: invalidates.scopes.%s.%s is missing", label, key, kind)
-					}
-					scopeKey, readerKind := key, kind
-					assertKeyWith(t, want, kind, func(flag any) {
-						assertInvalidationDelta(t,
-							label+" invalidates.scopes."+scopeKey+"."+readerKind,
-							model.scopeProbe(scopeKey, readerKind), beforeScope[scopeKey][readerKind], flag == true)
-					})
-				}
-			}
-		})
-		assertKeyWith(t, invalidates, "receipts", func(rawReceipts any) {
-			receiptWants := consumeKeys(t, label+" expected.invalidates.receipts",
-				jsMap(rawReceipts), ingressReceiptChannels...)
-			for _, channel := range ingressReceiptChannels {
-				if _, ok := receiptWants[channel]; !ok {
-					t.Fatalf("%s: invalidates.receipts.%s is missing", label, channel)
-				}
-				receiptChannel := channel
-				assertKeyWith(t, receiptWants, channel, func(flag any) {
+				scopeKey, readerKind := key, kind
+				assertKeyWith(t, want, kind, func(flag any) {
 					assertInvalidationDelta(t,
-						label+" invalidates.receipts."+receiptChannel,
-						model.receiptProbe(receiptChannel), beforeReceipts[receiptChannel], flag == true)
+						label+" invalidates.scopes."+scopeKey+"."+readerKind,
+						model.scopeProbe(scopeKey, readerKind), beforeScope[scopeKey][readerKind], flag == true)
 				})
 			}
 		})
+		if scopesSeen == 0 {
+			t.Fatalf("%s: expected.invalidates.scopes is empty", label)
+		}
+		receiptWants := assertKeySub(t, invalidates, "receipts", ingressReceiptChannels...)
+		for _, channel := range ingressReceiptChannels {
+			if _, ok := receiptWants[channel]; !ok {
+				t.Fatalf("%s: invalidates.receipts.%s is missing", label, channel)
+			}
+			receiptChannel := channel
+			assertKeyWith(t, receiptWants, channel, func(flag any) {
+				assertInvalidationDelta(t,
+					label+" invalidates.receipts."+receiptChannel,
+					model.receiptProbe(receiptChannel), beforeReceipts[receiptChannel], flag == true)
+			})
+		}
 
 		assertIngressState(t, model, expected, label)
 		materializeIngress(model, keys)
@@ -1001,19 +1000,14 @@ func assertIngressState(
 	label string,
 ) {
 	t.Helper()
-	assertKeyWith(t, expected, "scopes", func(rawScopes any) {
-		for key, rawWant := range jsMap(rawScopes) {
-			assertIngressScope(t, model, key, rawWant, label)
-		}
+	assertKeyEach(t, expected, "scopes", func(key string, rawWant any) {
+		assertIngressScope(t, model, key, rawWant, label)
 	})
 
-	assertKeyWith(t, expected, "receipts", func(rawReceipts any) {
-		receipts := consumeKeys(t, label+" expected.receipts", jsMap(rawReceipts),
-			"accepted", "dropped", "error")
-		assertKey(t, receipts, "accepted", model.acceptedLen())
-		assertKey(t, receipts, "dropped", model.droppedLen())
-		assertKey(t, receipts, "error", model.errorsLen())
-	})
+	receipts := assertKeySub(t, expected, "receipts", "accepted", "dropped", "error")
+	assertKey(t, receipts, "accepted", model.acceptedLen())
+	assertKey(t, receipts, "dropped", model.droppedLen())
+	assertKey(t, receipts, "error", model.errorsLen())
 }
 
 // assertIngressScope checks one scope's expected view against the live cell.
@@ -1062,51 +1056,49 @@ func assertIngressScope(
 		}
 	})
 
-	assertKeyWith(t, want, "authority", func(raw any) {
-		authority, hasAuthority := model.authority(key)
-		wantAuthority := consumeKeys(t, label+" expected.scopes."+key+".authority", jsMap(raw),
-			"generation", "delivered_through", "stamped_at")
-		if wantAuthority == nil {
-			if hasAuthority {
-				t.Errorf("%s: %s authority=%+v, want none", label, key, authority)
-			}
-			return
+	// `authority` and `retry` are DESCENDED into (#lzsubblockkeyset) rather than
+	// read field-by-field out of an assertKeyWith callback: the child block owns
+	// the unconsumed-key check, so a fourth field added to either one fails here
+	// instead of being folded into nothing.
+	authority, hasAuthority := model.authority(key)
+	wantAuthority := assertKeySub(t, want, "authority", "generation", "delivered_through", "stamped_at")
+	if wantAuthority == nil {
+		if hasAuthority {
+			t.Errorf("%s: %s authority=%+v, want none", label, key, authority)
 		}
-		expect := IngressAuthority{
+	} else {
+		expectAuthority := IngressAuthority{
 			Generation:       uint64(jsInt(wantAuthority["generation"])),
 			DeliveredThrough: jsOptU64(wantAuthority["delivered_through"]),
 			StampedAt:        uint64(jsInt(wantAuthority["stamped_at"])),
 		}
 		excuseKeys(t, wantAuthority, "folded into the expected IngressAuthority compared against the live one on the next line",
 			"generation", "delivered_through", "stamped_at")
-		if !hasAuthority || authority != expect {
+		if !hasAuthority || authority != expectAuthority {
 			t.Errorf("%s: %s authority=(%+v,%v), want %+v",
-				label, key, authority, hasAuthority, expect)
+				label, key, authority, hasAuthority, expectAuthority)
 		}
-	})
+	}
 
-	assertKeyWith(t, want, "retry", func(raw any) {
-		retry, hasRetry := model.retry(key)
-		wantRetry := consumeKeys(t, label+" expected.scopes."+key+".retry", jsMap(raw),
-			"attempt", "backoff", "resume_from")
-		if wantRetry == nil {
-			if hasRetry {
-				t.Errorf("%s: %s retry=%+v, want none", label, key, retry)
-			}
-			return
+	retry, hasRetry := model.retry(key)
+	wantRetry := assertKeySub(t, want, "retry", "attempt", "backoff", "resume_from")
+	if wantRetry == nil {
+		if hasRetry {
+			t.Errorf("%s: %s retry=%+v, want none", label, key, retry)
 		}
-		expect := IngressRetry{
-			Attempt:    uint32(jsInt(wantRetry["attempt"])),
-			Backoff:    uint64(jsInt(wantRetry["backoff"])),
-			ResumeFrom: uint64(jsInt(wantRetry["resume_from"])),
-		}
-		excuseKeys(t, wantRetry, "folded into the expected IngressRetry compared against the live one on the next line",
-			"attempt", "backoff", "resume_from")
-		if !hasRetry || retry != expect {
-			t.Errorf("%s: %s retry=(%+v,%v), want %+v",
-				label, key, retry, hasRetry, expect)
-		}
-	})
+		return
+	}
+	expectRetry := IngressRetry{
+		Attempt:    uint32(jsInt(wantRetry["attempt"])),
+		Backoff:    uint64(jsInt(wantRetry["backoff"])),
+		ResumeFrom: uint64(jsInt(wantRetry["resume_from"])),
+	}
+	excuseKeys(t, wantRetry, "folded into the expected IngressRetry compared against the live one on the next line",
+		"attempt", "backoff", "resume_from")
+	if !hasRetry || retry != expectRetry {
+		t.Errorf("%s: %s retry=(%+v,%v), want %+v",
+			label, key, retry, hasRetry, expectRetry)
+	}
 }
 
 func replayIngressCorpus(t *testing.T, build ingressModelBuilder) int {

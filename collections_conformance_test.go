@@ -156,23 +156,23 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 
 	consumeFixtureKeys(t, name, fixture, "initial", "steps")
 	excuseKey(t, fixture, "steps", "replay input: the step list drives the loop below, and each step's own `expected` block is asserted there")
-	assertKeyWith(t, fixture, "initial", func(want any) {
-		// Seeding is also an assertion: the map must actually hold the state the
-		// fixture says it starts from, or every step below measures a different
-		// graph than the corpus describes.
-		initial := jsMap(want)
-		values := jsMap(initial["values"])
-		order := jsStrList(initial["order"])
-		for _, k := range order {
-			m.Set(k, jsInt(values[k]))
+	// Seeding is also an assertion: the map must actually hold the state the
+	// fixture says it starts from, or every step below measures a different graph
+	// than the corpus describes. Descended into rather than read field-by-field
+	// (#lzsubblockkeyset), so a third key inside `initial` fails here.
+	initial := assertKeySub(t, fixture, "initial", "order", "values")
+	initialValues := jsMap(initial["values"])
+	for _, k := range jsStrList(initial["order"]) {
+		m.Set(k, jsInt(initialValues[k]))
+	}
+	assertKeyWith(t, initial, "order", func(want any) {
+		if got := m.Keys(ctx); !reflect.DeepEqual(got, jsStrList(want)) {
+			t.Fatalf("%s: seeded order = %v, want %v", name, got, jsStrList(want))
 		}
-		if got := m.Keys(ctx); !reflect.DeepEqual(got, order) {
-			t.Fatalf("%s: seeded order = %v, want %v", name, got, order)
-		}
-		for _, k := range order {
-			if got, _ := m.Get(k); got != jsInt(values[k]) {
-				t.Fatalf("%s: seeded value[%s] = %d, want %d", name, k, got, jsInt(values[k]))
-			}
+	})
+	assertKeyEach(t, initial, "values", func(k string, want any) {
+		if got, _ := m.Get(k); got != jsInt(want) {
+			t.Fatalf("%s: seeded value[%s] = %d, want %d", name, k, got, jsInt(want))
 		}
 	})
 
@@ -258,36 +258,32 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 			}
 		})
 		if _, stated := expected["values"]; stated {
-			assertKeyWith(t, expected, "values", func(want any) {
-				for k, v := range jsMap(want) {
-					if got, _ := m.Get(k); got != jsInt(v) {
-						t.Errorf("%s step %d %s: value[%s] = %d, want %d", name, i, op["type"], k, got, jsInt(v))
-					}
+			assertKeyEach(t, expected, "values", func(k string, v any) {
+				if got, _ := m.Get(k); got != jsInt(v) {
+					t.Errorf("%s step %d %s: value[%s] = %d, want %d", name, i, op["type"], k, got, jsInt(v))
 				}
 			})
 		}
 
 		// Handle stability: same *Cell identity before and after.
 		if _, stated := expected["handle_stable"]; stated {
-			assertKeyWith(t, expected, "handle_stable", func(want any) {
-				for k, raw := range jsMap(want) {
-					before, snapped := handlesBefore[k]
-					after := m.Cell(k)
-					if raw != true {
-						// The fixture claims this handle is NOT stable, so a
-						// surviving identity is the failure.
-						if !snapped {
-							t.Errorf("%s step %d: handle_stable names %q as re-minted, but it did not exist before the op", name, i, k)
-						} else if after != nil && before == after {
-							t.Errorf("%s step %d %s: handle %q stayed stable, want re-minted", name, i, op["type"], k)
-						}
-						continue
+			assertKeyEach(t, expected, "handle_stable", func(k string, raw any) {
+				before, snapped := handlesBefore[k]
+				after := m.Cell(k)
+				if raw != true {
+					// The fixture claims this handle is NOT stable, so a
+					// surviving identity is the failure.
+					if !snapped {
+						t.Errorf("%s step %d: handle_stable names %q as re-minted, but it did not exist before the op", name, i, k)
+					} else if after != nil && before == after {
+						t.Errorf("%s step %d %s: handle %q stayed stable, want re-minted", name, i, op["type"], k)
 					}
-					if after == nil {
-						t.Errorf("%s step %d: handle %q missing after op", name, i, k)
-					} else if !snapped || before != after {
-						t.Errorf("%s step %d %s: handle %q not stable", name, i, op["type"], k)
-					}
+					return
+				}
+				if after == nil {
+					t.Errorf("%s step %d: handle %q missing after op", name, i, k)
+				} else if !snapped || before != after {
+					t.Errorf("%s step %d %s: handle %q not stable", name, i, op["type"], k)
 				}
 			})
 		}
@@ -451,19 +447,17 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 			// be stated before there is an edit to re-run from, so a fixture
 			// that states it here is wrong rather than ignorable.
 			if _, stated := scenario["expect_initial"]; stated {
-				assertKeyWith(t, scenario, "expect_initial", func(want any) {
-					for id, value := range jsMap(want) {
-						switch id {
-						case "sibling_a_cached":
-							if got := tree.IsCached("a"); got != (value == true) {
-								t.Errorf("initial sibling_a_cached = %v, want %v", got, value)
-							}
-						case "downstream_consumer_reran":
-							t.Errorf("expect_initial states downstream_consumer_reran; there has been no edit to re-run from")
-						default:
-							if got, _ := tree.NodeValue(id); got != jsInt(value) {
-								t.Errorf("initial %s = %d, want %d", id, got, jsInt(value))
-							}
+				assertKeyEach(t, scenario, "expect_initial", func(id string, value any) {
+					switch id {
+					case "sibling_a_cached":
+						if got := tree.IsCached("a"); got != (value == true) {
+							t.Errorf("initial sibling_a_cached = %v, want %v", got, value)
+						}
+					case "downstream_consumer_reran":
+						t.Errorf("expect_initial states downstream_consumer_reran; there has been no edit to re-run from")
+					default:
+						if got, _ := tree.NodeValue(id); got != jsInt(value) {
+							t.Errorf("initial %s = %d, want %d", id, got, jsInt(value))
 						}
 					}
 				})
@@ -502,8 +496,8 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 					downstream.Get() // pull the consumer, as rs and js do
 				}
 				mutated = true
-				assertKeyWith(t, scenario, "expect_after", func(want any) {
-					checkSemTreeAfter(t, tree, jsMap(want), downstreamRuns > runsBefore)
+				assertKeyEach(t, scenario, "expect_after", func(id string, want any) {
+					checkSemTreeAfterEntry(t, tree, id, want, downstreamRuns > runsBefore)
 				})
 			}
 
@@ -515,8 +509,8 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 					downstream.Get() // pull the consumer, as rs and js do
 				}
 				mutated = true
-				assertKeyWith(t, scenario, "expect_after", func(want any) {
-					checkSemTreeAfter(t, tree, jsMap(want), downstreamRuns > runsBefore)
+				assertKeyEach(t, scenario, "expect_after", func(id string, want any) {
+					checkSemTreeAfterEntry(t, tree, id, want, downstreamRuns > runsBefore)
 				})
 			}
 			if !mutated {
@@ -526,26 +520,25 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 	}
 }
 
-func checkSemTreeAfter(t *testing.T, tree *SemTree[int, int], after map[string]any, didRerun bool) {
+// checkSemTreeAfterEntry asserts ONE entry of an `expect_after` block. The
+// iteration lives in assertKeyEach rather than here (#lzsubblockkeyset), so a
+// key added to the block upstream reaches this switch instead of being walked
+// past by a loop that only knows the names it was written with.
+func checkSemTreeAfterEntry(t *testing.T, tree *SemTree[int, int], id string, want any, didRerun bool) {
 	t.Helper()
-	if after == nil {
-		return
-	}
-	for id, want := range after {
-		switch id {
-		case "sibling_a_cached":
-			if got := tree.IsCached("a"); got != (want == true) {
-				t.Errorf("sibling_a_cached = %v, want %v", got, want)
-			}
-		case "downstream_consumer_reran":
-			if didRerun != (want == true) {
-				t.Errorf("downstream_consumer_reran = %v, want %v (memo guard)",
-					didRerun, want)
-			}
-		default:
-			if got, _ := tree.NodeValue(id); got != jsInt(want) {
-				t.Errorf("after %s = %d, want %d", id, got, jsInt(want))
-			}
+	switch id {
+	case "sibling_a_cached":
+		if got := tree.IsCached("a"); got != (want == true) {
+			t.Errorf("sibling_a_cached = %v, want %v", got, want)
+		}
+	case "downstream_consumer_reran":
+		if didRerun != (want == true) {
+			t.Errorf("downstream_consumer_reran = %v, want %v (memo guard)",
+				didRerun, want)
+		}
+	default:
+		if got, _ := tree.NodeValue(id); got != jsInt(want) {
+			t.Errorf("after %s = %d, want %d", id, got, jsInt(want))
 		}
 	}
 }
@@ -662,12 +655,10 @@ func checkSeqCrdtExpect(t *testing.T, replicas map[string]*SeqCrdt[string, any],
 		assertKey(t, expect, "len", replicas[primary].Len())
 	}
 	if _, stated := expect["get"]; stated {
-		assertKeyWith(t, expect, "get", func(want any) {
-			for id, value := range jsMap(want) {
-				got, _ := replicas[primary].Get(id)
-				if !reflect.DeepEqual(got, value) {
-					t.Errorf("get %s = %v, want %v", id, got, value)
-				}
+		assertKeyEach(t, expect, "get", func(id string, value any) {
+			got, _ := replicas[primary].Get(id)
+			if !reflect.DeepEqual(got, value) {
+				t.Errorf("get %s = %v, want %v", id, got, value)
 			}
 		})
 	}
@@ -692,33 +683,36 @@ func checkSeqCrdtExpect(t *testing.T, replicas map[string]*SeqCrdt[string, any],
 		})
 	}
 	if _, stated := expect["order_on"]; stated {
-		assertKeyWith(t, expect, "order_on", func(want any) {
-			for replica, order := range jsMap(want) {
-				if got := replicas[replica].Order(); !reflect.DeepEqual(got, jsStrList(order)) {
-					t.Errorf("order_on %s = %v, want %v", replica, got, jsStrList(order))
-				}
+		assertKeyEach(t, expect, "order_on", func(replica string, order any) {
+			if replicas[replica] == nil {
+				t.Fatalf("order_on names replica %q, which this scenario never created", replica)
+			}
+			if got := replicas[replica].Order(); !reflect.DeepEqual(got, jsStrList(order)) {
+				t.Errorf("order_on %s = %v, want %v", replica, got, jsStrList(order))
 			}
 		})
 	}
 	if _, stated := expect["get_on"]; stated {
-		assertKeyWith(t, expect, "get_on", func(want any) {
-			for replica, kvs := range jsMap(want) {
-				for id, value := range jsMap(kvs) {
-					got, _ := replicas[replica].Get(id)
-					if !reflect.DeepEqual(got, value) {
-						t.Errorf("get_on %s/%s = %v, want %v", replica, id, got, value)
-					}
+		assertKeyEach(t, expect, "get_on", func(replica string, kvs any) {
+			if replicas[replica] == nil {
+				t.Fatalf("get_on names replica %q, which this scenario never created", replica)
+			}
+			for id, value := range jsMap(kvs) {
+				got, _ := replicas[replica].Get(id)
+				if !reflect.DeepEqual(got, value) {
+					t.Errorf("get_on %s/%s = %v, want %v", replica, id, got, value)
 				}
 			}
 		})
 	}
 	if _, stated := expect["not_contains_on"]; stated {
-		assertKeyWith(t, expect, "not_contains_on", func(want any) {
-			for replica, ids := range jsMap(want) {
-				for _, id := range jsList(ids) {
-					if replicas[replica].Contains(jsStr(id)) {
-						t.Errorf("not_contains_on %s: still contains %v", replica, id)
-					}
+		assertKeyEach(t, expect, "not_contains_on", func(replica string, ids any) {
+			if replicas[replica] == nil {
+				t.Fatalf("not_contains_on names replica %q, which this scenario never created", replica)
+			}
+			for _, id := range jsList(ids) {
+				if replicas[replica].Contains(jsStr(id)) {
+					t.Errorf("not_contains_on %s: still contains %v", replica, id)
 				}
 			}
 		})
@@ -975,30 +969,32 @@ func checkTextCrdtDeltaExpect(t *testing.T, replicas map[string]*TextCrdt, expec
 		})
 	}
 	if _, stated := expect["text_on"]; stated {
-		assertKeyWith(t, expect, "text_on", func(want any) {
-			for replica, text := range jsMap(want) {
-				if got := replicas[replica].Text(); got != jsStr(text) {
-					t.Errorf("text_on %s = %q, want %q", replica, got, jsStr(text))
-				}
+		assertKeyEach(t, expect, "text_on", func(replica string, text any) {
+			if replicas[replica] == nil {
+				t.Fatalf("text_on names replica %q, which this scenario never created", replica)
+			}
+			if got := replicas[replica].Text(); got != jsStr(text) {
+				t.Errorf("text_on %s = %q, want %q", replica, got, jsStr(text))
 			}
 		})
 	}
 	if _, stated := expect["version_vector_on"]; stated {
-		assertKeyWith(t, expect, "version_vector_on", func(want any) {
-			for replica, vector := range jsMap(want) {
-				got := replicas[replica].VersionVector()
-				wantMap := map[PeerId]int64{}
-				for k, v := range jsMap(vector) {
-					peer := int64(0)
-					// keys are decimal strings
-					for _, r := range k {
-						peer = peer*10 + int64(r-'0')
-					}
-					wantMap[peer] = int64(jsInt(v))
+		assertKeyEach(t, expect, "version_vector_on", func(replica string, vector any) {
+			if replicas[replica] == nil {
+				t.Fatalf("version_vector_on names replica %q, which this scenario never created", replica)
+			}
+			got := replicas[replica].VersionVector()
+			wantMap := map[PeerId]int64{}
+			for k, v := range jsMap(vector) {
+				peer := int64(0)
+				// keys are decimal strings
+				for _, r := range k {
+					peer = peer*10 + int64(r-'0')
 				}
-				if !reflect.DeepEqual(got, wantMap) {
-					t.Errorf("version_vector_on %s = %v, want %v", replica, got, wantMap)
-				}
+				wantMap[peer] = int64(jsInt(v))
+			}
+			if !reflect.DeepEqual(got, wantMap) {
+				t.Errorf("version_vector_on %s = %v, want %v", replica, got, wantMap)
 			}
 		})
 	}
