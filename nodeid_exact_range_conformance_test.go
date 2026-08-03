@@ -21,7 +21,10 @@ package lazily
 
 import (
 	"encoding/hex"
+	"reflect"
+	"sort"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -79,15 +82,33 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 
 	assertions := fixture["assertions"].(map[string]any)
 	consumeKeys(t, nodeIDExactRangeFixture+".assertions", assertions,
-		"clause", "required_of_binding", "codecs", "scenario_count",
+		"prose", "clause", "required_of_binding", "codecs", "scenario_count",
 		"wire_encoding", "outcomes", "anti_vacuity", "generator")
 	assertKey(t, assertions, "required_of_binding", "MUST")
 	assertKey(t, assertions, "codecs", []any{"json", "msgpack"})
-	for _, prose := range []string{"clause", "wire_encoding", "outcomes", "anti_vacuity", "generator"} {
-		excuseKey(t, assertions, prose,
-			"prose: it states WHY the fixture is shaped this way; the behaviour it "+
-				"describes is asserted by the per-scenario decode below")
-	}
+	excuseKey(t, assertions, "generator",
+		"provenance: the path of the script that emitted this file, not a statement "+
+			"about the decoder; the corpus does not declare it prose")
+
+	// `outcomes` is NOT prose (#lzprosekeyconvention): it maps a vocabulary to
+	// English glosses, and the assertion is the KEY SET, discharged by this key's
+	// own assertion against the outcomes the loop really dispatched on.
+	outcomesReplayed := map[string]bool{}
+
+	// The three paragraphs the corpus declares in `assertions.prose`. Each names
+	// the executable keys this run asserts that carry its obligation.
+	proseKey(t, assertions, "clause",
+		// "reject rather than round, truncate, saturate or wrap" — the decimal
+		// rendering is the only comparison that sees a neighbouring identifier.
+		"node_id_decimal", "root_id_decimal", "outcome")
+	proseKey(t, assertions, "wire_encoding",
+		// Raw text / lowercase hex in, decimal STRING out, in both codecs: a
+		// double-backed parser would have rounded the expectation itself.
+		"node_id_decimal", "codecs")
+	proseKey(t, assertions, "anti_vacuity",
+		// The two `exact` scenarios are the control: a runner that never decodes
+		// satisfies `exact_or_reject` alone.
+		"outcome", "outcomes", "node_id_decimal", "scenario_count")
 
 	scenarios := fixture["scenarios"].([]any)
 	assertKey(t, assertions, "scenario_count", float64(len(scenarios)))
@@ -128,6 +149,7 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		assertKeyWith(t, expect, "outcome", func(want any) {
 			t.Helper()
 			outcome := want.(string)
+			outcomesReplayed[outcome] = true
 			switch outcome {
 			case "exact":
 				if !representable {
@@ -198,4 +220,35 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 	if accepted != 4 {
 		t.Fatalf("accepted %d scenarios, want 4: lazily-go's exact range is [0, 2^63)", accepted)
 	}
+
+	// The vocabulary, asserted as a SET against the outcomes the loop really
+	// dispatched on. The glosses are prose nested inside a data key, so the
+	// parent key's own assertion discharges them (#lzprosekeyconvention).
+	assertKeyWith(t, assertions, "outcomes", func(want any) {
+		t.Helper()
+		glosses, ok := want.(map[string]any)
+		if !ok {
+			t.Fatalf("assertions.outcomes is %T, want an object mapping outcome to gloss", want)
+		}
+		declared := make([]string, 0, len(glosses))
+		for name, gloss := range glosses {
+			declared = append(declared, name)
+			if text, _ := gloss.(string); strings.TrimSpace(text) == "" {
+				t.Errorf("assertions.outcomes[%q] carries no gloss", name)
+			}
+		}
+		sort.Strings(declared)
+		observed := make([]string, 0, len(outcomesReplayed))
+		for name := range outcomesReplayed {
+			observed = append(observed, name)
+		}
+		sort.Strings(observed)
+		if !reflect.DeepEqual(declared, observed) {
+			t.Errorf("assertions.outcomes declares %v, but the replay dispatched on %v", declared, observed)
+		}
+	})
+
+	// The replay is finished, so every key a discharge names has either been
+	// asserted or has not (#lzprosekeyconvention).
+	verifyProse(t, nodeIDExactRangeFixture)
 }

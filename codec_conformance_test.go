@@ -257,14 +257,19 @@ func TestCodecJSONFramesRoundTrip(t *testing.T) {
 	// interop floor, `byte_canonical` = one deterministic byte form per
 	// message). Unread until now — an unread block is the drift
 	// #lzassertunknownkeys exists to catch.
-	fixtureBlock := jsMap(fixture["assertions"])
+	fixtureBlock := consumeKeys(t, codecJSONFixture+" assertions", jsMap(fixture["assertions"]),
+		"prose", "codec", "self_describing", "byte_canonical", "required_of_binding", "role",
+		"scenario_count", "note")
 	assertKey(t, fixtureBlock, "codec", "json")
 	assertKey(t, fixtureBlock, "self_describing", true)
 	assertKey(t, fixtureBlock, "byte_canonical", true)
 	assertKey(t, fixtureBlock, "required_of_binding", "MUST")
 	assertKey(t, fixtureBlock, "role", "reference")
 	assertKey(t, fixtureBlock, "scenario_count", float64(len(jsList(fixture["scenarios"]))))
-	excuseKey(t, fixtureBlock, "note", "prose: documents the reference-vs-byte-canonical distinction, states nothing the replay observes")
+	// `note` is a declared prose key here, not a reserved annotation: it states
+	// the obligation to keep `role` and `byte_canonical` apart, and both are
+	// pinned, so it is discharged by naming them (#lzprosekeyconvention).
+	proseKey(t, fixtureBlock, "note", "role", "byte_canonical")
 
 	replayed := 0
 	for _, sv := range scenarioViews(codecJSONFixture, jsList(fixture["scenarios"])) {
@@ -312,6 +317,10 @@ func TestCodecJSONFramesRoundTrip(t *testing.T) {
 	if replayed != 3 {
 		t.Fatalf("replayed %d scenarios, want one per IpcMessage variant", replayed)
 	}
+
+	// The replay is finished, so every key the `note` discharge names has either
+	// been asserted or has not (#lzprosekeyconvention).
+	verifyProse(t, codecJSONFixture)
 }
 
 // ---------------------------------------------------------------------------
@@ -473,14 +482,21 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 	// `byte_canonical: false` — the reason this fixture pins decoded values and
 	// sorted field names instead of a golden byte string.
 	fixtureBlock := consumeKeys(t, codecMsgpackFixture+" assertions", jsMap(fixture["assertions"]),
-		"codec", "self_describing", "byte_canonical", "required_of_binding", "role", "scenario_count", "note")
+		"prose", "codec", "self_describing", "byte_canonical", "required_of_binding", "role", "scenario_count", "note")
 	assertKey(t, fixtureBlock, "codec", "msgpack")
 	assertKey(t, fixtureBlock, "self_describing", true)
 	assertKey(t, fixtureBlock, "byte_canonical", false)
 	assertKey(t, fixtureBlock, "required_of_binding", "MUST")
 	assertKey(t, fixtureBlock, "role", "cross_language_binary_default")
 	assertKey(t, fixtureBlock, "scenario_count", float64(len(jsList(fixture["scenarios"]))))
-	excuseKey(t, fixtureBlock, "note", "prose: restates why the fixture pins decoded values and named field lists rather than golden bytes")
+	// `note` is a declared prose key here, not a reserved annotation: it states
+	// WHY this fixture pins decoded values and named field lists rather than
+	// golden bytes, and the executable form of that is `byte_canonical: false`
+	// plus the field names read back out of the encoded bytes
+	// (#lzprosekeyconvention). `encoded_body_field_names` is asserted per
+	// scenario, long after this block is finished — which is why the ledger is
+	// fixture-scoped rather than block-scoped.
+	proseKey(t, fixtureBlock, "note", "byte_canonical", "encoded_body_field_names", "encoded_envelope_key")
 
 	replayed := 0
 	for _, sv := range scenarioViews(codecMsgpackFixture, jsList(fixture["scenarios"])) {
@@ -537,6 +553,10 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 	if replayed != 3 {
 		t.Fatalf("replayed %d scenarios, want one per IpcMessage variant", replayed)
 	}
+
+	// The replay is finished, so every key the `note` discharge names has either
+	// been asserted or has not (#lzprosekeyconvention).
+	verifyProse(t, codecMsgpackFixture)
 }
 
 // TestMsgpackCodecRefusesBin pins the Go-specific trap in the wire itself: a

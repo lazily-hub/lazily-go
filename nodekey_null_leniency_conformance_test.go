@@ -142,17 +142,34 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 
 	assertions := fixture["assertions"].(map[string]any)
 	consumeKeys(t, nodeKeyNullFixture+".assertions", assertions,
-		"clause", "required_of_binding", "codecs", "fields", "key_forms",
+		"prose", "clause", "required_of_binding", "codecs", "fields", "key_forms",
 		"scenario_count", "wire_encoding", "reencode_obligation", "anti_vacuity", "generator")
 	assertKey(t, assertions, "required_of_binding", "MUST")
 	assertKey(t, assertions, "codecs", []any{"json", "msgpack"})
 	assertKey(t, assertions, "fields", []any{"snapshot", "node_add"})
 	assertKey(t, assertions, "key_forms", []any{"omitted", "null", "present"})
-	for _, prose := range []string{"clause", "wire_encoding", "reencode_obligation", "anti_vacuity", "generator"} {
-		excuseKey(t, assertions, prose,
-			"prose: it states WHY the fixture is shaped this way; the behaviour it "+
-				"describes is asserted by the per-scenario decode and re-encode below")
-	}
+	excuseKey(t, assertions, "generator",
+		"provenance: the path of the script that emitted this file, not a statement "+
+			"about the decoder; the corpus does not declare it prose")
+
+	// The four paragraphs the corpus declares in `assertions.prose`
+	// (#lzprosekeyconvention). Each names the executable keys this run asserts
+	// that carry its obligation.
+	proseKey(t, assertions, "clause",
+		// "accept both an omitted `key` and an explicit `key: null` and read
+		// both as absent, refusing neither and constructing a key from neither".
+		"decoded_key", "key_forms", "fields")
+	proseKey(t, assertions, "wire_encoding",
+		// Raw text / lowercase hex is what carries the ABSENT-entry versus
+		// explicit-nil distinction into the runner in both codecs.
+		"decoded_key", "codecs")
+	proseKey(t, assertions, "reencode_obligation",
+		// The half a decode assertion cannot reach: the encoder must still emit
+		// the OMITTED form.
+		"reencoded_key_field_present")
+	proseKey(t, assertions, "anti_vacuity",
+		// `omitted` forces a real decode and `present` forces a real key through.
+		"decoded_key", "key_forms", "scenario_count")
 
 	scenarios := fixture["scenarios"].([]any)
 	assertKey(t, assertions, "scenario_count", float64(len(scenarios)))
@@ -213,4 +230,8 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 		t.Fatalf("decoded %d keys, want 4: only the `present` scenarios carry one, so a "+
 			"runner reporting absent for everything satisfies the null cases trivially", keysDecoded)
 	}
+
+	// The replay is finished, so every key a discharge names has either been
+	// asserted or has not (#lzprosekeyconvention).
+	verifyProse(t, nodeKeyNullFixture)
 }

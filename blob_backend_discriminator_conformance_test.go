@@ -266,38 +266,54 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 
 	assertions := fixture["assertions"].(map[string]any)
 	consumeKeys(t, blobBackendFixture+".assertions", assertions,
-		"clause", "required_of_binding", "codecs", "backends", "backend_forms",
+		"prose", "clause", "required_of_binding", "codecs", "backends", "backend_forms",
 		"outcomes", "rejection_kinds", "scenario_count", "wire_encoding",
 		"backend_form_vocabulary", "null_form", "non_string_form",
 		"epoch_disambiguation", "reject_obligation", "anti_vacuity",
 		"theorem", "generator")
 	assertKey(t, assertions, "required_of_binding", "MUST")
-	for _, prose := range []string{
-		"clause", "wire_encoding", "reject_obligation", "anti_vacuity", "theorem", "generator",
-	} {
-		excuseKey(t, assertions, prose,
-			"prose: it states WHY the fixture is shaped this way; the behaviour it "+
-				"describes is asserted by the per-scenario decode, rejection and "+
-				"re-encode below")
-	}
-	excuseKey(t, assertions, "backend_form_vocabulary",
-		"prose: the obligation it states — every backend in `backends` is the "+
-			"`decoded_backend` of some ACCEPT scenario — is asserted after the loop, "+
-			"against `decodedBackends`, which the loop fills from real decodes")
-	excuseKey(t, assertions, "null_form",
-		"prose: the behaviour it states — an explicit null is the ABSENT form, decodes "+
-			"as shm, and does not survive the round trip — is asserted by the two "+
-			"`backend_null_*` scenarios, whose wire form is read back off the raw frame "+
-			"as \"null\" and whose `reencoded_backend_field_present` is false")
-	excuseKey(t, assertions, "non_string_form",
-		"prose: the behaviour it states — refused, through the decode-error family, "+
-			"naming no token — is asserted by the two `backend_non_string_*` scenarios "+
-			"via `rejection_kind` and `rejection_is_decode_error`")
-	excuseKey(t, assertions, "epoch_disambiguation",
-		"prose: the fact it states — the Delta's epoch and the descriptor's epoch are "+
-			"different numbers from different places — is asserted per accept scenario "+
-			"by `frame_epoch` against delta.Value.Epoch and `blob_epoch` against "+
-			"blob.Blob.Epoch, and by the epochsDistinct count after the loop")
+	excuseKey(t, assertions, "generator",
+		"provenance: the path of the script that emitted this file. It states where the "+
+			"fixture came from, not anything the replay observes, and the corpus does not "+
+			"declare it prose — there is no obligation here to discharge")
+
+	// The nine paragraphs the corpus declares in `assertions.prose`
+	// (#lzprosekeyconvention). Each names the executable keys THIS run asserts
+	// that carry its obligation; the tracker checks the naming at fixture end,
+	// which is what makes the claim falsifiable rather than merely well worded.
+	proseKey(t, assertions, "clause",
+		// omitted/null decode as shm; an unknown token is refused through the
+		// decode-error family and never normalized.
+		"decoded_backend", "rejected", "rejection_kind", "rejection_is_decode_error")
+	proseKey(t, assertions, "wire_encoding",
+		// The raw-text / lowercase-hex carriage is what lets the wire form be
+		// read back off the frame instead of taken on the fixture's word.
+		"backend_form", "backend_forms", "codecs")
+	proseKey(t, assertions, "backend_form_vocabulary",
+		// "every backend in `backends` is the `decoded_backend` of some accept
+		// scenario" — the assertion that would have caught v1's missing
+		// `in_process`.
+		"backends", "backend_forms", "decoded_backend")
+	proseKey(t, assertions, "reject_obligation",
+		// "refused for the STATED reason", not merely refused.
+		"error_names_token", "rejection_kind", "rejection_kinds")
+	proseKey(t, assertions, "null_form",
+		// null is the ABSENT form: decodes as shm and does not survive the round
+		// trip.
+		"backend_form", "decoded_backend", "reencoded_backend_field_present")
+	proseKey(t, assertions, "non_string_form",
+		// Refused through the same decode-error family, naming no token.
+		"rejection_kind", "rejection_is_decode_error")
+	proseKey(t, assertions, "epoch_disambiguation",
+		// Two different numbers from two different places.
+		"frame_epoch", "blob_epoch")
+	proseKey(t, assertions, "anti_vacuity",
+		// The four controls, in the order the paragraph states them.
+		"backend_forms", "backends", "reencoded_backend_field_present", "outcomes")
+	proseKey(t, assertions, "theorem",
+		// resolve_wrong_backend: an unknown kind is refused rather than routed,
+		// which is the refusal these keys pin.
+		"rejected", "rejection_kind")
 
 	scenarios := fixture["scenarios"].([]any)
 	assertKey(t, assertions, "scenario_count", float64(len(scenarios)))
@@ -620,6 +636,11 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 				"comment, do not delete this check", kind, sortedKeys(types))
 		}
 	}
+
+	// The replay is finished, so every key a discharge names has either been
+	// asserted or has not (#lzprosekeyconvention). Armed last so the check runs
+	// before the per-block rung-3 teardowns that read the `prose` key it consumes.
+	verifyProse(t, blobBackendFixture)
 }
 
 // assertSameStringSet compares a fixture-declared vocabulary against the one the

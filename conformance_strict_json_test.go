@@ -214,9 +214,17 @@ var (
 	assertionBlocks = map[uintptr][]*assertionBlock{}
 )
 
-// proseKeys are exempt from all three conditions: they document the fixture
-// rather than stating anything the replay must observe.
-var proseKeys = map[string]bool{
+// annotationKeys are the RESERVED ANNOTATION NAMES (#lzprosekeyconvention): a
+// key by one of these names inside a per-step or per-scenario block annotates
+// the block rather than stating anything the replay must observe, and is exempt
+// from all three conditions above.
+//
+// This is exemption BY NAME, and it is deliberately narrower than "any English
+// paragraph". A paragraph that states an OBLIGATION is a prose key, is declared
+// as such by the corpus in `assertions.prose`, and must be DISCHARGED — see the
+// rung-5 tracker below, whose demand for a discharge is driven by the corpus
+// declaration and therefore overrides this table.
+var annotationKeys = map[string]bool{
 	"description": true, "notes": true, "note": true, "comment": true,
 	"why": true, "kind": true, "model": true,
 }
@@ -246,6 +254,13 @@ func trackAssertions(t *testing.T, label string, obj map[string]any, declared []
 	assertionBlocksMu.Lock()
 	assertionBlocks[id] = append(assertionBlocks[id], blk)
 	assertionBlocksMu.Unlock()
+	// Rung 5 opens here, on the FIRST tracked block of the replay, so that a key
+	// asserted before the `prose`-carrying block is consumed still lands in the
+	// fixture-scoped asserted set a discharge is checked against.
+	ledger := openProseLedger(t)
+	if _, declares := obj["prose"]; declares {
+		ledger.declareBlock(t, label, obj, blk)
+	}
 	t.Cleanup(func() {
 		assertionBlocksMu.Lock()
 		stack := assertionBlocks[id]
@@ -298,7 +313,16 @@ func (b *assertionBlock) problems() []string {
 	defer b.mu.Unlock()
 	var out []string
 	for _, key := range b.declared {
-		if proseKeys[key] {
+		// A key the corpus declares prose is DISCHARGED, never asserted and
+		// never excused. Its disposition is the rung-5 tracker's business, and
+		// asserting or excusing it is a failure reported THERE — which is why
+		// the corpus declaration is consulted before the by-name exemption:
+		// `note` is a reserved annotation name and also, in the frame-codec
+		// fixtures, a declared prose key.
+		if b.declaresProse(key) {
+			continue
+		}
+		if annotationKeys[key] {
 			continue
 		}
 		if _, present := b.obj[key]; !present {
@@ -318,6 +342,38 @@ func (b *assertionBlock) problems() []string {
 		default:
 			out = append(out, fmt.Sprintf("%s: key %q is read by the runner but never reaches a comparison against the fixture's own value "+
 				"— assert it with assertKey/assertKeyWith, or say why it cannot be asserted here with excuseKey", b.label, key))
+		}
+	}
+	return out
+}
+
+// declaresProse reports whether the block's own `assertions.prose` array names
+// key. The corpus decides which keys are prose; a binding that decided for
+// itself is how one rule got four treatments (#lzprosekeyconvention).
+func (b *assertionBlock) declaresProse(key string) bool {
+	for _, name := range proseDeclaration(b.obj) {
+		if name == key {
+			return true
+		}
+	}
+	return false
+}
+
+// proseDeclaration reads a block's `prose` array. A block that carries no
+// `prose` key declares nothing.
+func proseDeclaration(obj map[string]any) []string {
+	raw, present := obj["prose"]
+	if !present {
+		return nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(list))
+	for _, entry := range list {
+		if name, ok := entry.(string); ok {
+			out = append(out, name)
 		}
 	}
 	return out
@@ -351,6 +407,12 @@ func assertKeyWith(t *testing.T, block map[string]any, key string, check func(wa
 	if blk := lookupAssertionBlock(block); blk != nil {
 		blk.markAsserted(key)
 	}
+	// Rung 5: the fixture-scoped record a discharge claim is checked against.
+	// By NAME and in any block, because an obligation stated in `assertions` is
+	// routinely carried by a per-scenario `expect` key.
+	if ledger := lookupProseLedger(t); ledger != nil {
+		ledger.markAsserted(key)
+	}
 	check(want)
 }
 
@@ -379,6 +441,358 @@ func excuseKeys(t *testing.T, block map[string]any, reason string, keys ...strin
 	for _, key := range keys {
 		excuseKey(t, block, key, reason)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Rung 5: a PROSE key is DISCHARGED, never asserted and never excused
+// (#lzprosekeyconvention)
+// ---------------------------------------------------------------------------
+//
+// An `assertions` block mixes two kinds of key. Most carry a value a runner can
+// compare against observed behaviour — a list, a count, a vocabulary. A few
+// carry an English paragraph that states an obligation and nothing comparable.
+// Rungs 3 and 4 have no answer for the second kind, and the nine bindings each
+// invented one: lazily-go's was an `excuseKey` whose reason NAMES the assertion
+// that discharges the paragraph — falsifiable in principle, checked by nothing.
+//
+// The corpus now declares which keys are prose, in `assertions.prose`. The
+// declaration is itself a key of the block, so rung 2 sees it: a runner that
+// ignores it fails with an unconsumed key, which is what makes the rollout
+// self-enforcing.
+//
+// A prose key is discharged by NAMING the executable keys that carry its
+// obligation, and this tracker verifies the naming. It fails the run when:
+//
+//	1. a declared prose key is ASSERTED — comparing a paragraph, or a tally
+//	   derived from one, to an English string pins wording, not behaviour;
+//	2. a declared prose key is EXCUSED with free text — an unfalsifiable reason
+//	   is indistinguishable from the undocumented default this removes;
+//	3. a key the block does NOT declare prose is discharged;
+//	4. the discharged set differs from `assertions.prose` — the comparison that
+//	   consumes `prose` itself, and what makes a forgotten key fail rather than
+//	   vanish;
+//	5. a discharge names NO keys;
+//	6. a discharge names a key this fixture's run did not assert;
+//	7. a discharge names a key that is itself prose.
+//
+// Rule 6 is the whole convention: the excuse becomes falsifiable, because the
+// tracker can check it. "`epoch_disambiguation` is discharged by `frame_epoch`
+// and `blob_epoch`" is a claim about the run; "`epoch_disambiguation` is prose"
+// is not.
+//
+// The ledger is FIXTURE-scoped, not block-scoped: `epoch_disambiguation` is
+// stated in `assertions` and discharged by `expect.frame_epoch` /
+// `expect.blob_epoch`, asserted long after that block is finished. Verification
+// therefore runs at fixture end, through `verifyProse(t, fixture)`, and a run
+// that never verifies fails from the ledger's own teardown — an unverified
+// discharge claim is as bad as an unconsumed key.
+
+// proseDischarge is one claim: this paragraph's obligation is carried by these
+// executable keys, and this run asserted them.
+type proseDischarge struct {
+	label string
+	block map[string]any
+	key   string
+	by    []string
+}
+
+// proseBlock is a block that declared `prose`, held alongside its rung-3 ledger
+// so rules 1 and 2 can read what the run did with each declared key.
+type proseBlock struct {
+	label string
+	obj   map[string]any
+	blk   *assertionBlock
+}
+
+// proseLedger is the fixture-scoped record: every key name the run ASSERTED,
+// every block that DECLARED prose, and every pending discharge CLAIM.
+type proseLedger struct {
+	mu         sync.Mutex
+	fixture    string
+	verified   bool
+	asserted   map[string]bool
+	blocks     []proseBlock
+	discharges []proseDischarge
+}
+
+var (
+	proseLedgersMu sync.Mutex
+	// Keyed by the ROOT test name: one fixture replay is one top-level test,
+	// and a subtest's assertions belong to the same fixture as its parent's.
+	proseLedgers = map[string]*proseLedger{}
+)
+
+func proseLedgerRoot(t *testing.T) string {
+	name := t.Name()
+	if i := strings.IndexByte(name, '/'); i >= 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// openProseLedger returns the replay's ledger, creating and arming it on first
+// use. The teardown it registers is what fails a run that records discharge
+// claims and never verifies them.
+func openProseLedger(t *testing.T) *proseLedger {
+	t.Helper()
+	root := proseLedgerRoot(t)
+	proseLedgersMu.Lock()
+	ledger, existing := proseLedgers[root]
+	if !existing {
+		ledger = &proseLedger{asserted: map[string]bool{}}
+		proseLedgers[root] = ledger
+	}
+	proseLedgersMu.Unlock()
+	if !existing {
+		t.Cleanup(func() {
+			proseLedgersMu.Lock()
+			if proseLedgers[root] == ledger {
+				delete(proseLedgers, root)
+			}
+			proseLedgersMu.Unlock()
+			ledger.closed(t)
+		})
+	}
+	return ledger
+}
+
+func lookupProseLedger(t *testing.T) *proseLedger {
+	proseLedgersMu.Lock()
+	defer proseLedgersMu.Unlock()
+	return proseLedgers[proseLedgerRoot(t)]
+}
+
+func (l *proseLedger) markAsserted(key string) {
+	l.mu.Lock()
+	l.asserted[key] = true
+	l.mu.Unlock()
+}
+
+func (l *proseLedger) declareBlock(t *testing.T, label string, obj map[string]any, blk *assertionBlock) {
+	t.Helper()
+	if len(proseDeclaration(obj)) == 0 {
+		t.Errorf("%s: `prose` is present but names no keys — a block declaring prose declares which keys are prose", label)
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, existing := range l.blocks {
+		if sameJSONBlock(existing.obj, obj) {
+			return
+		}
+	}
+	l.blocks = append(l.blocks, proseBlock{label: label, obj: obj, blk: blk})
+}
+
+func (l *proseLedger) recordDischarge(d proseDischarge) {
+	l.mu.Lock()
+	l.discharges = append(l.discharges, d)
+	l.mu.Unlock()
+}
+
+// closed is the ledger's own teardown: a run that recorded prose but never
+// verified it fails here, exactly as an unconsumed key does.
+func (l *proseLedger) closed(t *testing.T) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.verified || (len(l.blocks) == 0 && len(l.discharges) == 0) {
+		return
+	}
+	t.Errorf("%s: the fixture declares prose keys (or the runner discharged some) and verifyProse was never called "+
+		"— an unverified discharge claim is a claim about the run that nothing checked; call verifyProse(t, fixture) "+
+		"once the replay is finished", proseLedgerFixtureLabel(l.blocks))
+}
+
+func proseLedgerFixtureLabel(blocks []proseBlock) string {
+	if len(blocks) > 0 {
+		return blocks[0].label
+	}
+	return "prose ledger"
+}
+
+func sameJSONBlock(a, b map[string]any) bool {
+	ida, oka := assertionBlockID(a)
+	idb, okb := assertionBlockID(b)
+	return oka && okb && ida == idb
+}
+
+// proseKey discharges a prose key by naming the executable keys that carry its
+// obligation. It REPLACES excuseKey for these keys: two paths to satisfy one key
+// is the ambiguity this convention removes, so a declared prose key that is
+// excused fails (rule 2) rather than being quietly accepted.
+func proseKey(t *testing.T, block map[string]any, key string, dischargedBy ...string) {
+	t.Helper()
+	ledger := lookupProseLedger(t)
+	if ledger == nil {
+		t.Errorf("%s: proseKey(%q) with no open prose ledger — the block carrying the key must go through "+
+			"consumeKeys before its prose can be discharged", assertionLabel(block), key)
+		return
+	}
+	ledger.recordDischarge(proseDischarge{
+		label: assertionLabel(block),
+		block: block,
+		key:   key,
+		by:    append([]string{}, dischargedBy...),
+	})
+}
+
+// verifyProse arms the fixture-end check. It is called once, AFTER the replay,
+// so the t.Cleanup it registers runs before the per-block rung-3 teardowns and
+// the `prose` key it consumes is seen as asserted by them.
+func verifyProse(t *testing.T, fixture string) {
+	t.Helper()
+	ledger := lookupProseLedger(t)
+	if ledger == nil {
+		t.Errorf("verifyProse(%s): no prose ledger is open — nothing in this replay went through consumeKeys", fixture)
+		return
+	}
+	ledger.mu.Lock()
+	ledger.fixture = fixture
+	ledger.verified = true
+	ledger.mu.Unlock()
+	t.Cleanup(func() {
+		for _, problem := range ledger.problems(fixture) {
+			t.Errorf("%s", problem)
+		}
+		// The comparison above read the block's own `prose` value; marking it
+		// asserted is what CONSUMES it, so a fixture that gains a prose key the
+		// runner never discharges fails rung 3 rather than passing silently.
+		ledger.consumeDeclarations(t)
+	})
+}
+
+// consumeDeclarations marks each declaring block's `prose` key asserted. The
+// check itself lives in problems, so the message a mismatch produces names the
+// missing and the extra keys rather than dumping two lists.
+func (l *proseLedger) consumeDeclarations(t *testing.T) {
+	l.mu.Lock()
+	blocks := append([]proseBlock{}, l.blocks...)
+	l.mu.Unlock()
+	for _, block := range blocks {
+		assertKeyWith(t, block.obj, "prose", func(any) {})
+	}
+}
+
+// problems is the decision verifyProse reports, split out so every rule can be
+// mutation-checked without a t whose Errorf would redden the caller.
+func (l *proseLedger) problems(fixture string) []string {
+	l.mu.Lock()
+	blocks := append([]proseBlock{}, l.blocks...)
+	discharges := append([]proseDischarge{}, l.discharges...)
+	asserted := make(map[string]bool, len(l.asserted))
+	for key := range l.asserted {
+		asserted[key] = true
+	}
+	l.mu.Unlock()
+
+	var out []string
+	if len(blocks) == 0 {
+		return []string{fmt.Sprintf("verifyProse(%s): no block declared `prose` — either the fixture carries no "+
+			"prose declaration or the block carrying it never reached consumeKeys", fixture)}
+	}
+
+	// Rule 7 reads the fixture-wide set: a discharge naming a paragraph from
+	// any block of this fixture is naming prose.
+	isProse := map[string]bool{}
+	for _, block := range blocks {
+		for _, name := range proseDeclaration(block.obj) {
+			isProse[name] = true
+		}
+	}
+
+	for _, discharge := range discharges {
+		known := false
+		for _, block := range blocks {
+			if sameJSONBlock(block.obj, discharge.block) {
+				known = true
+				break
+			}
+		}
+		if !known {
+			// Rule 3, in its strongest form: the block does not declare `prose`
+			// at all, so nothing in the corpus says this key is a paragraph.
+			out = append(out, fmt.Sprintf("%s: key %q is discharged, but its block declares no `prose` — "+
+				"only the corpus decides which keys are prose", discharge.label, discharge.key))
+		}
+		// Rule 5.
+		if len(discharge.by) == 0 {
+			out = append(out, fmt.Sprintf("%s: the discharge of %q names no keys — a discharge that names "+
+				"nothing is the free-text excuse this convention replaces", discharge.label, discharge.key))
+		}
+		for _, name := range discharge.by {
+			switch {
+			case isProse[name]:
+				// Rule 7.
+				out = append(out, fmt.Sprintf("%s: the discharge of %q names %q, which is itself prose — "+
+					"a paragraph cannot carry another paragraph's obligation", discharge.label, discharge.key, name))
+			case !asserted[name]:
+				// Rule 6 — the whole convention.
+				out = append(out, fmt.Sprintf("%s: the discharge of %q names %q, which this fixture's run never "+
+					"asserted — the claim is false, or the assertion it names was dropped", discharge.label, discharge.key, name))
+			}
+		}
+	}
+
+	for _, block := range blocks {
+		declared := proseDeclaration(block.obj)
+		declaredSet := map[string]bool{}
+		for _, name := range declared {
+			declaredSet[name] = true
+		}
+
+		discharged := map[string]bool{}
+		for _, discharge := range discharges {
+			if !sameJSONBlock(block.obj, discharge.block) {
+				continue
+			}
+			// Rule 3.
+			if !declaredSet[discharge.key] {
+				out = append(out, fmt.Sprintf("%s: key %q is discharged but `assertions.prose` does not list it — "+
+					"a key with a value a runner can compare must be ASSERTED, not discharged", block.label, discharge.key))
+			}
+			discharged[discharge.key] = true
+		}
+
+		if block.blk != nil {
+			block.blk.mu.Lock()
+			for _, name := range declared {
+				// Rule 1.
+				if block.blk.asserted[name] {
+					out = append(out, fmt.Sprintf("%s: prose key %q is ASSERTED — comparing a paragraph, or a tally "+
+						"derived from one, to an English string pins wording rather than behaviour; discharge it "+
+						"with proseKey instead", block.label, name))
+				}
+				// Rule 2.
+				if reason, excused := block.blk.excused[name]; excused {
+					out = append(out, fmt.Sprintf("%s: prose key %q is EXCUSED with free text (%q) — an unfalsifiable "+
+						"reason is indistinguishable from no reason; name the executable keys that carry the "+
+						"obligation with proseKey", block.label, name, reason))
+				}
+			}
+			block.blk.mu.Unlock()
+		}
+
+		// Rule 4: the comparison that consumes `prose` itself.
+		var missing, extra []string
+		for _, name := range declared {
+			if !discharged[name] {
+				missing = append(missing, name)
+			}
+		}
+		for name := range discharged {
+			if !declaredSet[name] {
+				extra = append(extra, name)
+			}
+		}
+		sort.Strings(missing)
+		sort.Strings(extra)
+		if len(missing) > 0 || len(extra) > 0 {
+			out = append(out, fmt.Sprintf("%s: the discharged set does not match `assertions.prose` — undischarged %v, "+
+				"discharged-but-not-declared %v; every declared paragraph gets a discharge naming the executable "+
+				"keys that carry it", block.label, missing, extra))
+		}
+	}
+	return out
 }
 
 func assertionLabel(block map[string]any) string {
@@ -686,6 +1100,175 @@ func TestAssertionBlockVerifiesDisposition(t *testing.T) {
 	if problems := blk.problems(); len(problems) != 0 {
 		t.Fatalf("prose or absent key reported: %v", problems)
 	}
+}
+
+// TestNoProseWordedExcuses is the STATIC half of rule 2
+// (#lzprosekeyconvention). The runtime tracker catches a free-text excuse only
+// for a key the corpus already declares prose; this catches the habit itself —
+// an `excuseKey` whose reason opens with "prose" is a runner deciding for itself
+// that a paragraph needs no discharge, which is the treatment this convention
+// replaced. If a key really is a paragraph, `assertions.prose` is where that is
+// declared, and proseKey is how it is discharged.
+func TestNoProseWordedExcuses(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	scanned := 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(".", name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		scanned++
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fn, ok := call.Fun.(*ast.Ident)
+			if !ok || (fn.Name != "excuseKey" && fn.Name != "excuseKeys") {
+				return true
+			}
+			for _, arg := range call.Args {
+				ast.Inspect(arg, func(inner ast.Node) bool {
+					lit, ok := inner.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						return true
+					}
+					text, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						return true
+					}
+					if strings.HasPrefix(strings.ToLower(strings.TrimSpace(text)), "prose") {
+						t.Errorf("%s: excuse reason opens with %q — a paragraph is DISCHARGED, never excused: "+
+							"declare it in the fixture's `assertions.prose` upstream and name the executable keys "+
+							"that carry its obligation with proseKey (#lzprosekeyconvention)",
+							fset.Position(lit.Pos()), text)
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+	if scanned == 0 {
+		t.Fatal("no test sources scanned — the guard is asserting nothing")
+	}
+}
+
+// TestProseLedgerVerifiesDischarges is the mutation check for the rung-5 tracker
+// itself: without each arm, the shape it names goes green.
+func TestProseLedgerVerifiesDischarges(t *testing.T) {
+	// A block declaring two paragraphs and carrying two executable keys.
+	newLedger := func(asserted ...string) (*proseLedger, map[string]any, *assertionBlock) {
+		obj := map[string]any{
+			"prose":        []any{"clause", "anti_vacuity"},
+			"clause":       "a decoder MUST reject rather than round",
+			"backends":     []any{"shm"},
+			"codecs":       []any{"json"},
+			"anti_vacuity": "the exact scenarios are the control",
+		}
+		blk := &assertionBlock{
+			label:    "fake.json assertions",
+			obj:      obj,
+			declared: []string{"prose", "clause", "backends", "codecs", "anti_vacuity"},
+			asserted: map[string]bool{},
+			excused:  map[string]string{},
+		}
+		ledger := &proseLedger{asserted: map[string]bool{}}
+		for _, key := range asserted {
+			ledger.asserted[key] = true
+		}
+		ledger.blocks = []proseBlock{{label: blk.label, obj: obj, blk: blk}}
+		return ledger, obj, blk
+	}
+	only := func(t *testing.T, problems []string, want string) {
+		t.Helper()
+		if len(problems) != 1 || !strings.Contains(problems[0], want) {
+			t.Fatalf("want exactly one problem containing %q, got %v", want, problems)
+		}
+	}
+
+	// The conforming shape: both paragraphs discharged by asserted keys.
+	ledger, obj, _ := newLedger("backends", "codecs")
+	ledger.discharges = []proseDischarge{
+		{label: "fake.json assertions", block: obj, key: "clause", by: []string{"backends"}},
+		{label: "fake.json assertions", block: obj, key: "anti_vacuity", by: []string{"codecs"}},
+	}
+	if problems := ledger.problems("fake.json"); len(problems) != 0 {
+		t.Fatalf("conforming discharge rejected: %v", problems)
+	}
+
+	// Rule 1: a declared prose key that is ASSERTED.
+	ledger, obj, blk := newLedger("backends", "codecs")
+	ledger.discharges = []proseDischarge{
+		{block: obj, key: "clause", by: []string{"backends"}},
+		{block: obj, key: "anti_vacuity", by: []string{"codecs"}},
+	}
+	blk.asserted["clause"] = true
+	only(t, ledger.problems("fake.json"), "is ASSERTED")
+
+	// Rule 2: a declared prose key EXCUSED with free text.
+	ledger, obj, blk = newLedger("backends", "codecs")
+	ledger.discharges = []proseDischarge{
+		{block: obj, key: "clause", by: []string{"backends"}},
+		{block: obj, key: "anti_vacuity", by: []string{"codecs"}},
+	}
+	blk.excused["anti_vacuity"] = "prose: it explains the fixture"
+	only(t, ledger.problems("fake.json"), "is EXCUSED with free text")
+
+	// Rule 3: a key the corpus does not declare prose, discharged. It trips the
+	// set comparison too — a discharged-but-not-declared key is exactly what
+	// rule 4 reports as `extra`.
+	ledger, obj, _ = newLedger("backends", "codecs")
+	ledger.discharges = []proseDischarge{
+		{block: obj, key: "clause", by: []string{"backends"}},
+		{block: obj, key: "anti_vacuity", by: []string{"codecs"}},
+		{block: obj, key: "codecs", by: []string{"backends"}},
+	}
+	problems := ledger.problems("fake.json")
+	if len(problems) != 2 || !strings.Contains(problems[0], "does not list it") {
+		t.Fatalf("undeclared discharge not reported: %v", problems)
+	}
+
+	// Rule 4: a declared paragraph nobody discharged.
+	ledger, obj, _ = newLedger("backends", "codecs")
+	ledger.discharges = []proseDischarge{{block: obj, key: "clause", by: []string{"backends"}}}
+	only(t, ledger.problems("fake.json"), "undischarged [anti_vacuity]")
+
+	// Rule 5: a discharge naming nothing.
+	ledger, obj, _ = newLedger("backends", "codecs")
+	ledger.discharges = []proseDischarge{
+		{block: obj, key: "clause", by: nil},
+		{block: obj, key: "anti_vacuity", by: []string{"codecs"}},
+	}
+	only(t, ledger.problems("fake.json"), "names no keys")
+
+	// Rule 6: a discharge naming a key the run never asserted.
+	ledger, obj, _ = newLedger("codecs")
+	ledger.discharges = []proseDischarge{
+		{block: obj, key: "clause", by: []string{"backends"}},
+		{block: obj, key: "anti_vacuity", by: []string{"codecs"}},
+	}
+	only(t, ledger.problems("fake.json"), "never asserted")
+
+	// Rule 7: a discharge naming another paragraph.
+	ledger, obj, _ = newLedger("backends", "codecs")
+	ledger.discharges = []proseDischarge{
+		{block: obj, key: "clause", by: []string{"anti_vacuity"}},
+		{block: obj, key: "anti_vacuity", by: []string{"codecs"}},
+	}
+	only(t, ledger.problems("fake.json"), "which is itself prose")
+
+	// A fixture whose prose declaration never reached the tracker.
+	empty := &proseLedger{asserted: map[string]bool{}}
+	only(t, empty.problems("fake.json"), "no block declared `prose`")
 }
 
 // TestAssertKeyMarksAndCompares pins the two properties assertKey is relied on

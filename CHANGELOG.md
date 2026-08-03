@@ -8,6 +8,30 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Added
 
+- Conformance rung 5 — a PROSE key is DISCHARGED, never asserted and never
+  excused (`#lzprosekeyconvention`). Five codec fixtures now declare which of
+  their `assertions` keys are English paragraphs, in `assertions.prose`; a
+  paragraph is discharged by `proseKey(t, block, key, "a", "b")`, which NAMES the
+  executable keys that carry its obligation, and `verifyProse(t, fixture)`
+  verifies the naming at fixture end. The ledger is fixture-scoped, because an
+  obligation stated in `assertions` is routinely carried by a per-scenario
+  `expect` key asserted long after that block is finished. Seven failure modes
+  redden the run: a declared paragraph that is asserted or excused, a
+  non-declared key that is discharged, a discharged set that differs from
+  `assertions.prose`, a discharge naming nothing, naming a key the run never
+  asserted, or naming another paragraph. This replaces the free-text
+  `excuseKey` reasons lazily-go wrote for these keys — the reasons named the
+  discharging assertion, which was a good instinct checked by nothing, and two
+  paths to satisfy one key is the ambiguity the convention removes.
+  `TestNoProseWordedExcuses` is the static half: an excuse reason opening with
+  "prose" is now a build-time failure.
+- `nodeid_exact_range.json`'s `assertions.outcomes` is now ASSERTED as a key set
+  against the outcomes the replay really dispatched on, rather than excused as
+  prose. Prose nested inside a data key is not a prose key: the assertion is the
+  vocabulary, and the parent key's own assertion discharges the glosses.
+- `frame_roundtrip_json.json`'s fixture-level `assertions` block now goes through
+  `consumeKeys`, closing an unconsumed-key hole — it was read key-by-key but
+  never registered, so a key the corpus added would have been invisible.
 - `msgpack` frame codec (`EncodeIpcMessageMsgpack` / `DecodeIpcMessageMsgpack`,
   `#lzmsgpackseven`) — the cross-language binary default protocol.md § Frame
   codecs makes MUST-level: the externally tagged envelope (`{"Snapshot": …}`)
