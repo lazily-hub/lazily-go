@@ -602,7 +602,12 @@ func TestCodecMsgpackFramesRoundTrip(t *testing.T) {
 			// codec is positional on both ends round-trips every value
 			// correctly, so the decode below cannot see the named-field rule at
 			// all — only this schema-less read of the encoding can.
-			assertCodecEncoding(t, block, jsStr(scenario["variant"]), encoded)
+			// Selected by the variant the DECODER reported, not by the
+			// fixture's label (#lznullformblind). The two were cross-checked
+			// above, so this is equivalent today — but passing the label would
+			// leave which encoding assertions a frame owes resting on the
+			// corpus's word, one deleted guard away from choosing the wrong arm.
+			assertCodecEncoding(t, block, codecVariant(t, source), encoded)
 
 			roundTripped, err := DecodeIpcMessageMsgpack(encoded)
 			if err != nil {

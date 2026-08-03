@@ -141,14 +141,19 @@ func assertRosterExcludesSelf(t *testing.T, label string, want *bool, self PeerI
 	}
 }
 
-// assertRosterSortedAscending checks a welcome roster is in ascending peer order.
-func assertRosterSortedAscending(t *testing.T, label string, roster []PeerId) {
-	t.Helper()
+// rosterIsAscending reports whether a welcome roster is in ascending peer order.
+//
+// A PREDICATE, not an assertion. Its two callers compare the result against the
+// value the corpus declares, so a fixture that flips `roster_sorted_ascending`
+// to false is contradicted by the run rather than quietly turning the check off
+// (#lznullformblind).
+func rosterIsAscending(roster []PeerId) bool {
 	for i := 1; i < len(roster); i++ {
 		if roster[i-1] >= roster[i] {
-			t.Fatalf("%s: roster not ascending: %v", label, roster)
+			return false
 		}
 	}
+	return true
 }
 
 func TestSignalingFramesConformance(t *testing.T) {
@@ -393,6 +398,18 @@ func TestSignalingAntiSpoofSession(t *testing.T) {
 	// only admissible source of truth for it.
 	registered := map[string]PeerId{}
 
+	// A transcript-wide invariant is only checked where a frame of the right
+	// shape turns up, so an invariant the corpus DECLARES can go the whole
+	// replay without ever being evaluated and the test still reports green
+	// (#lznullformblind). That is the shape of the blindness the corpus itself
+	// warns about: `forwarded_from_is_server_registered` is the anti-spoof rule
+	// this fixture exists for, and it fires only inside `if forwarded` — so a
+	// `forwardedFrom` that stopped recognising a routed variant, or a transcript
+	// that lost its forwarded frames, would silence the whole invariant without
+	// silencing the test. These count the evaluations; the gate after the loop
+	// requires each declared invariant to have been exercised at least once.
+	var rosterChecks, sortedChecks, forwardedChecks int
+
 	for i, step := range fx.Steps {
 		conn, ok := conns[step.Input.Conn]
 		if !ok {
@@ -435,25 +452,58 @@ func TestSignalingAntiSpoofSession(t *testing.T) {
 			// the property the fixture exists for.
 			label := fmt.Sprintf("step %d expect %d", i, j)
 			if w, ok := got.(ServerWelcome); ok {
-				assertRosterExcludesSelf(t, label, fx.Assertions.RosterExcludesSelf, w.Peer, w.Peers)
-				if fx.Assertions.RosterSortedAscending != nil && *fx.Assertions.RosterSortedAscending {
-					assertRosterSortedAscending(t, label, w.Peers)
+				if fx.Assertions.RosterExcludesSelf != nil {
+					assertRosterExcludesSelf(t, label, fx.Assertions.RosterExcludesSelf, w.Peer, w.Peers)
+					rosterChecks++
+				}
+				// Compared against the DECLARED value, both directions. Gating
+				// on `*want == true` meant a fixture that flipped the key to
+				// false turned the check off and stayed green — the key was
+				// read, and still bound nothing (#lznullformblind).
+				if want := fx.Assertions.RosterSortedAscending; want != nil {
+					sortedChecks++
+					if got := rosterIsAscending(w.Peers); got != *want {
+						t.Fatalf("%s: roster_sorted_ascending = %v (%v), want %v",
+							label, got, w.Peers, *want)
+					}
 				}
 			}
-			if fx.Assertions.ForwardedFromIsServerRegistered != nil && *fx.Assertions.ForwardedFromIsServerRegistered {
+			if want := fx.Assertions.ForwardedFromIsServerRegistered; want != nil {
 				if from, forwarded := forwardedFrom(got); forwarded {
-					want, joined := registered[step.Input.Conn]
+					forwardedChecks++
+					registeredID, joined := registered[step.Input.Conn]
 					if !joined {
 						t.Fatalf("%s: forwarded frame from a conn %q that never joined", label, step.Input.Conn)
 					}
-					if from != want {
-						t.Fatalf("%s: forwarded from = %d, want the sender's server-registered id %d",
-							label, from, want)
+					// Same both-directions rule, and this is the one that
+					// matters most: the anti-spoof invariant this fixture exists
+					// for used to evaluate only when the corpus said `true`, so
+					// flipping it to false silently retired the rule.
+					if got := from == registeredID; got != *want {
+						t.Fatalf("%s: forwarded `from` = %d and the sender's server-registered "+
+							"id is %d, so forwarded_from_is_server_registered = %v, want %v",
+							label, from, registeredID, got, *want)
 					}
 				}
 			}
 		}
 	}
+	// Every DECLARED transcript-wide invariant must have been evaluated. A count
+	// of zero means the corpus stated a rule and this replay never once asked it.
+	if fx.Assertions.RosterExcludesSelf != nil && rosterChecks == 0 {
+		t.Error("the fixture declares `roster_excludes_self` and the replay produced no " +
+			"ServerWelcome to evaluate it against — the invariant was never asked")
+	}
+	if fx.Assertions.RosterSortedAscending != nil && sortedChecks == 0 {
+		t.Error("the fixture declares `roster_sorted_ascending` and the replay produced no " +
+			"ServerWelcome to evaluate it against — the invariant was never asked")
+	}
+	if fx.Assertions.ForwardedFromIsServerRegistered != nil && forwardedChecks == 0 {
+		t.Error("the fixture declares `forwarded_from_is_server_registered` — the anti-spoof " +
+			"rule this fixture exists for — and the replay produced no forwarded frame to " +
+			"evaluate it against, so the rule was never asked")
+	}
+
 	for _, reject := range fx.Rejects {
 		if reject.Input == nil {
 			t.Fatalf("%s: reject has no input", reject.Label)

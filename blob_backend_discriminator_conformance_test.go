@@ -405,15 +405,31 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 
 		out := blobBackendDecode(t, scenario)
 
-		switch outcome := scenario["outcome"].(string); outcome {
+		// THE RUN CHOOSES THE ARM, not the fixture's label (#lznullformblind).
+		//
+		// This switch used to dispatch on `scenario["outcome"]`, so the fixture
+		// decided which assertions a frame owed. A `reject` frame the binding
+		// wrongly ACCEPTED still entered the reject arm and was caught only by
+		// the guard below — and, worse, `outcomesReplayed`, `accepted` and
+		// `rejected` were all booked from the label BEFORE that guard ran. The
+		// anti-vacuity counters that protect `assertions.outcomes` and the
+		// 10/4 split therefore carried exactly the blindness they exist to
+		// remove: they counted what the corpus said happened, not what did.
+		//
+		// Derived from the decode itself, the label becomes an ASSERTION rather
+		// than a selector: a wrongly-accepted reject frame now takes the accept
+		// arm, reddens `outcome` against the corpus's own value, and drops out
+		// of the `rejected` tally at the same time.
+		observed := "accept"
+		if out.panicked != nil || out.err != nil {
+			observed = "reject"
+		}
+		outcomesReplayed[observed] = true
+		assertKey(t, scenario, "outcome", observed)
+
+		switch observed {
 		case "reject":
 			rejected++
-			outcomesReplayed[outcome] = true
-			assertKey(t, scenario, "outcome", "reject")
-			if out.panicked == nil && out.err == nil {
-				t.Fatalf("%s: the frame decoded to %v; a `backend` that is not one of "+
-					"{shm, arrow, in_process} MUST be rejected, not normalized", id, out.msg)
-			}
 			assertKey(t, expect, "rejected", true)
 
 			// Which refusal is this? Derived from the wire, like `backend_form`.
@@ -482,15 +498,6 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 
 		case "accept":
 			accepted++
-			outcomesReplayed[outcome] = true
-			assertKey(t, scenario, "outcome", "accept")
-			if out.panicked != nil {
-				t.Fatalf("%s: lazily-go must accept this frame; the decode PANICKED: %v",
-					id, out.panicked)
-			}
-			if out.err != nil {
-				t.Fatalf("%s: lazily-go must accept this frame; got %v", id, out.err)
-			}
 
 			delta, ok := out.msg.(IpcMessageDelta)
 			if !ok {
@@ -551,9 +558,10 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 			assertKey(t, expect, "reencoded_backend_field_present", present)
 
 		default:
-			// Fail closed (#lzscenariobodyskip): an outcome this runner does not
-			// implement must not fall through as replayed.
-			t.Fatalf("%s: unknown outcome %q", id, outcome)
+			// Fail closed (#lzscenariobodyskip). `observed` is derived from the
+			// decode and so has only two values today; the arm stays so that
+			// widening that derivation cannot silently fall through as replayed.
+			t.Fatalf("%s: unhandled observed outcome %q", id, observed)
 		}
 	}
 
