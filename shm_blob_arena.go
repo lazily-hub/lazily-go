@@ -26,7 +26,21 @@ package lazily
 // The arena is safe for concurrent use (a real shared-memory arena is shared
 // across goroutines); the Dart original was single-isolate and unsynchronized.
 
-import "sync"
+import (
+	"encoding/binary"
+	"fmt"
+	"sync"
+)
+
+// ShmBlobHeaderLen is the byte length of the canonical in-process LZSH arena
+// header: magic (u32), version (u16), header length (u16), generation, epoch,
+// payload length, and checksum (four u64 values), all little-endian.
+const ShmBlobHeaderLen = 40
+
+const (
+	shmBlobMagic   uint32 = 0x4c5a5348 // "LZSH" when rendered big-endian
+	shmBlobVersion uint16 = 1
+)
 
 // shmArenaEntry is a blob arena entry: header fields + payload. Mirrors the
 // Dart `_ArenaEntry`, extended with refCount for the free path.
@@ -62,12 +76,147 @@ type ShmBlobArena struct {
 	epoch      int64
 	entries    []*shmArenaEntry // offset == index; a freed slot is nil
 	generation int64
+
+	// hostBytes enables the fixed-capacity, byte-compatible arena host created
+	// by NewShmBlobArenaWithCapacity. The existing entry arena remains the
+	// default used by Write/Read/Update/Retain/Free.
+	hostBytes          []byte
+	hostWriteOffset    int
+	hostNextGeneration uint64
 }
 
 // NewShmBlobArena creates an empty arena starting at the given epoch (Dart's
 // `ShmBlobArena({this.epoch = 0})`; pass 0 for the default).
 func NewShmBlobArena(epoch int64) *ShmBlobArena {
 	return &ShmBlobArena{epoch: epoch}
+}
+
+// NewShmBlobArenaWithCapacity creates the canonical fixed-capacity LZSH arena
+// host used by lazily-spec/conformance/arena_blob.json. WriteBlob writes the
+// 40-byte header immediately before each payload and returns a descriptor whose
+// offset points at that header. When the remaining tail cannot hold a write,
+// the cursor wraps to zero and the new generation makes overwritten
+// descriptors stale.
+func NewShmBlobArenaWithCapacity(capacity int) (*ShmBlobArena, error) {
+	if capacity < ShmBlobHeaderLen+1 {
+		return nil, fmt.Errorf("arena capacity %d < minimum %d", capacity, ShmBlobHeaderLen+1)
+	}
+	return &ShmBlobArena{
+		hostBytes:          make([]byte, capacity),
+		hostNextGeneration: 1,
+	}, nil
+}
+
+// Capacity returns the fixed host arena's backing capacity, or zero for the
+// entry-oriented arena created by NewShmBlobArena.
+func (a *ShmBlobArena) Capacity() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.hostBytes)
+}
+
+// Bytes returns the fixed host arena's backing bytes. The returned slice aliases
+// arena storage so a transport can expose the shared region without copying.
+// Callers must not mutate the header or payload bytes.
+func (a *ShmBlobArena) Bytes() []byte {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.hostBytes
+}
+
+// WriteBlob writes one payload into the canonical fixed-capacity LZSH arena.
+// The epoch is supplied per write because it is part of the serialized header.
+func (a *ShmBlobArena) WriteBlob(epoch int64, payload []byte) (ShmBlobRef, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(a.hostBytes) == 0 {
+		return ShmBlobRef{}, fmt.Errorf("WriteBlob requires NewShmBlobArenaWithCapacity")
+	}
+	if len(payload) > len(a.hostBytes)-ShmBlobHeaderLen {
+		return ShmBlobRef{}, fmt.Errorf(
+			"payload %d bytes exceeds arena max %d",
+			len(payload), len(a.hostBytes)-ShmBlobHeaderLen,
+		)
+	}
+	total := ShmBlobHeaderLen + len(payload)
+	if a.hostWriteOffset+total > len(a.hostBytes) {
+		a.hostWriteOffset = 0
+	}
+	generation := a.hostNextGeneration
+	a.hostNextGeneration++
+	if a.hostNextGeneration == 0 {
+		return ShmBlobRef{}, fmt.Errorf("arena generation counter overflowed")
+	}
+
+	offset := a.hostWriteOffset
+	checksum := uint64(fnv1a(payload))
+	ref := ShmBlobRef{
+		Offset:     int64(offset),
+		Len:        int64(len(payload)),
+		Generation: int64(generation),
+		Epoch:      epoch,
+		Checksum:   int64(checksum),
+	}
+	header := a.hostBytes[offset : offset+ShmBlobHeaderLen]
+	binary.LittleEndian.PutUint32(header[0:4], shmBlobMagic)
+	binary.LittleEndian.PutUint16(header[4:6], shmBlobVersion)
+	binary.LittleEndian.PutUint16(header[6:8], ShmBlobHeaderLen)
+	binary.LittleEndian.PutUint64(header[8:16], generation)
+	binary.LittleEndian.PutUint64(header[16:24], uint64(epoch))
+	binary.LittleEndian.PutUint64(header[24:32], uint64(len(payload)))
+	binary.LittleEndian.PutUint64(header[32:40], checksum)
+	copy(a.hostBytes[offset+ShmBlobHeaderLen:offset+total], payload)
+	a.hostWriteOffset += total
+	if a.hostWriteOffset == len(a.hostBytes) {
+		a.hostWriteOffset = 0
+	}
+	return ref, nil
+}
+
+// ReadBlob validates a canonical LZSH header and returns a defensive copy of
+// its payload.
+func (a *ShmBlobArena) ReadBlob(ref ShmBlobRef) ([]byte, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(a.hostBytes) == 0 {
+		return nil, fmt.Errorf("ReadBlob requires NewShmBlobArenaWithCapacity")
+	}
+	if ref.Offset < 0 || ref.Len < 0 ||
+		ref.Offset+ShmBlobHeaderLen+ref.Len > int64(len(a.hostBytes)) {
+		return nil, fmt.Errorf("descriptor offset=%d len=%d outside arena capacity=%d",
+			ref.Offset, ref.Len, len(a.hostBytes))
+	}
+	offset := int(ref.Offset)
+	header := a.hostBytes[offset : offset+ShmBlobHeaderLen]
+	if binary.LittleEndian.Uint32(header[0:4]) != shmBlobMagic {
+		return nil, fmt.Errorf("arena descriptor/header mismatch: magic")
+	}
+	if binary.LittleEndian.Uint16(header[4:6]) != shmBlobVersion {
+		return nil, fmt.Errorf("arena descriptor/header mismatch: version")
+	}
+	if binary.LittleEndian.Uint16(header[6:8]) != ShmBlobHeaderLen {
+		return nil, fmt.Errorf("arena descriptor/header mismatch: header_len")
+	}
+	if int64(binary.LittleEndian.Uint64(header[8:16])) != ref.Generation {
+		return nil, fmt.Errorf("arena descriptor/header mismatch: generation")
+	}
+	if int64(binary.LittleEndian.Uint64(header[16:24])) != ref.Epoch {
+		return nil, fmt.Errorf("arena descriptor/header mismatch: epoch")
+	}
+	if int64(binary.LittleEndian.Uint64(header[24:32])) != ref.Len {
+		return nil, fmt.Errorf("arena descriptor/header mismatch: len")
+	}
+	if int64(binary.LittleEndian.Uint64(header[32:40])) != ref.Checksum {
+		return nil, fmt.Errorf("arena descriptor/header mismatch: checksum")
+	}
+	from := offset + ShmBlobHeaderLen
+	payload := append([]byte(nil), a.hostBytes[from:from+int(ref.Len)]...)
+	if fnv1a(payload) != ref.Checksum {
+		return nil, fmt.Errorf("arena payload checksum mismatch")
+	}
+	return payload, nil
 }
 
 // Epoch returns the arena's current epoch. All descriptors carry the epoch that

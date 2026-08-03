@@ -45,7 +45,6 @@ fi
 # someone looked; shrinking this list is the work. Adding to it silently is how the
 # guard rots, so keep a reason with any new entry.
 KNOWN_UNCOVERED=(
-  "arena_blob.json"
   "reactive-graph/exact_fold_paths_stay_exact.json"
   "reactive-graph/feedback_drain_bound_reports_exhaustion.json"
   "reactive-graph/merge_cell_acquires_no_dependency_edge.json"
@@ -370,4 +369,3 @@ fi
 
 echo "scenario coverage OK: $SCENARIO_REPLAYED/$SCENARIO_TOTAL scenarios of those fixtures REPLAYED" \
      "(${#SCENARIO_EXCUSES[@]} excused; runtime ledger — recorded at the point of replay)"
-
