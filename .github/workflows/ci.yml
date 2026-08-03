@@ -145,6 +145,9 @@ jobs:
       - name: Interop peer self-check (#lzinteroppeerci)
         run: CGO_ENABLED=1 go run -race ./cmd/lazily-interop-peer --self-check
 
+      - name: Assertion observation ordering (#lzassertordering)
+        run: python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .
+
       # Rungs 1 and 4 execute HERE and nowhere else (#lzguardsnotinci). Unlike
       # rung 2 (#lzassertunknownkeys) and rung 3 (#lzconsumednotasserted), which
       # live inside the test binary and so were already enforced by the `test`
