@@ -36,6 +36,10 @@ const conformanceMarker = "lazily-spec" + string(filepath.Separator) + "conforma
 // specReadFile is os.ReadFile plus a record of any conformance fixture it opens.
 func specReadFile(name string) ([]byte, error) {
 	recordConformanceRead(name)
+	// Rule 8 of the prose-key convention books here too, on a broader marker:
+	// an opened fixture whose block declares `prose` owes a verification whether
+	// it came from the canonical corpus or the vendored mirror.
+	recordProseOpened(name)
 	return os.ReadFile(name)
 }
 
@@ -91,5 +95,12 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	flushConformanceManifest()
 	flushConformanceScenarios()
+	// Rule 8 of the prose-key convention (#lzprosekeyconvention). Here rather
+	// than in a test function for the same reason the manifest flush is: only
+	// after m.Run is the union of verifications complete, and no ordering
+	// between test functions has to be assumed.
+	if !checkProseVerificationCoverage() && code == 0 {
+		code = 1
+	}
 	os.Exit(code)
 }

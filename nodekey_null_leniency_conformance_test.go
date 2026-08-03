@@ -62,6 +62,68 @@ func decodeNodeKeyScenario(t *testing.T, scenario map[string]any) IpcMessage {
 	return msg
 }
 
+// nodeKeySite navigates a generic frame tree to the map that carries the `key`
+// slot, dispatching on which optional-key site the scenario exercises. Shared by
+// the RAW-WIRE control and the RE-ENCODED inspection so both read the same slot.
+func nodeKeySite(t *testing.T, field string, generic map[string]any) map[string]any {
+	t.Helper()
+	switch field {
+	case "snapshot":
+		body := generic["Snapshot"].(map[string]any)
+		return body["nodes"].([]any)[0].(map[string]any)
+	case "node_add":
+		body := generic["Delta"].(map[string]any)
+		op := body["ops"].([]any)[0].(map[string]any)
+		return op["NodeAdd"].(map[string]any)
+	}
+	t.Fatalf("unknown field %v", field)
+	return nil
+}
+
+// nodeKeyWireForm reads the `key` slot off the RAW frame, BEFORE the decoder
+// runs, and reports which of the three wire forms it holds.
+//
+// This control is the whole reason `wire_encoding` is dischargeable here. Every
+// key in this fixture's `expect` blocks is IDENTICAL for the `omitted` and
+// `null` families — `decoded_key` is nil for both, by design, because that is
+// the leniency under test — so the four `null` scenarios are the four `omitted`
+// ones wearing a different id as far as any post-decode assertion can tell. A
+// binding whose decoder collapses the two the instant it touches the value
+// (`key ?? null`) satisfies all twelve scenarios while never once distinguishing
+// them. Only a read of the raw slot sees the difference the clause is about, and
+// it is the same control the sibling blob-backend runner already applies to
+// `backend`.
+func nodeKeyWireForm(t *testing.T, scenario map[string]any) string {
+	t.Helper()
+	var tree any
+	switch scenario["codec"].(string) {
+	case "json":
+		if err := json.Unmarshal([]byte(scenario["wire_json"].(string)), &tree); err != nil {
+			t.Fatalf("wire_json is not JSON: %v", err)
+		}
+	case "msgpack":
+		raw, err := hex.DecodeString(scenario["wire_msgpack_hex"].(string))
+		if err != nil {
+			t.Fatalf("wire_msgpack_hex is not hex: %v", err)
+		}
+		if tree, err = msgpackDecodeValue(raw); err != nil {
+			t.Fatalf("wire_msgpack_hex is not msgpack: %v", err)
+		}
+	default:
+		// Fail closed (#lzscenariobodyskip).
+		t.Fatalf("unknown codec %v", scenario["codec"])
+	}
+	site := nodeKeySite(t, scenario["field"].(string), tree.(map[string]any))
+	value, present := site["key"]
+	switch {
+	case !present:
+		return "omitted"
+	case value == nil:
+		return "null"
+	}
+	return "present"
+}
+
 // reencodedNodeFields re-encodes under the scenario's own codec and reads the
 // result back into a plain map, so what is inspected is the field set the
 // encoder produced rather than a typed view that cannot tell absent from null.
@@ -94,17 +156,7 @@ func reencodedNodeFields(t *testing.T, scenario map[string]any, msg IpcMessage) 
 		// scenario as covered.
 		t.Fatalf("unknown codec %v", scenario["codec"])
 	}
-	switch scenario["field"].(string) {
-	case "snapshot":
-		body := generic["Snapshot"].(map[string]any)
-		return body["nodes"].([]any)[0].(map[string]any)
-	case "node_add":
-		body := generic["Delta"].(map[string]any)
-		op := body["ops"].([]any)[0].(map[string]any)
-		return op["NodeAdd"].(map[string]any)
-	}
-	t.Fatalf("unknown field %v", scenario["field"])
-	return nil
+	return nodeKeySite(t, scenario["field"].(string), generic)
 }
 
 func decodedNodeKey(t *testing.T, scenario map[string]any, msg IpcMessage) any {
@@ -145,12 +197,20 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 		"prose", "clause", "required_of_binding", "codecs", "fields", "key_forms",
 		"scenario_count", "wire_encoding", "reencode_obligation", "anti_vacuity", "generator")
 	assertKey(t, assertions, "required_of_binding", "MUST")
-	assertKey(t, assertions, "codecs", []any{"json", "msgpack"})
-	assertKey(t, assertions, "fields", []any{"snapshot", "node_add"})
-	assertKey(t, assertions, "key_forms", []any{"omitted", "null", "present"})
 	excuseKey(t, assertions, "generator",
 		"provenance: the path of the script that emitted this file, not a statement "+
 			"about the decoder; the corpus does not declare it prose")
+
+	// The vocabularies are asserted AFTER the loop, against what the replay
+	// really dispatched on. Compared to a hand-written literal they would be
+	// green over a runner that decodes nothing — the exact vacuity
+	// `anti_vacuity` exists to name — so naming them in a discharge would
+	// discharge nothing (#lzprosekeyconvention).
+	var (
+		codecsReplayed = map[string]bool{}
+		fieldsReplayed = map[string]bool{}
+		formsReplayed  = map[string]bool{}
+	)
 
 	// The four paragraphs the corpus declares in `assertions.prose`
 	// (#lzprosekeyconvention). Each names the executable keys this run asserts
@@ -158,18 +218,27 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 	proseKey(t, assertions, "clause",
 		// "accept both an omitted `key` and an explicit `key: null` and read
 		// both as absent, refusing neither and constructing a key from neither".
-		"decoded_key", "key_forms", "fields")
+		// `key_form` is what proves the two forms were DISTINCT going in;
+		// `decoded_key` is what proves they arrive the same.
+		"key_form", "decoded_key", "fields")
 	proseKey(t, assertions, "wire_encoding",
-		// Raw text / lowercase hex is what carries the ABSENT-entry versus
-		// explicit-nil distinction into the runner in both codecs.
-		"decoded_key", "codecs")
+		// PROXY. The paragraph is a claim about how the CORPUS carries its bytes
+		// — raw text and lowercase hex rather than a pre-parsed object — and no
+		// assertion a run makes can observe that choice directly. The honest
+		// proxy is the control that reads the raw `key` slot before the decoder
+		// runs: if the carriage had collapsed absent-entry and explicit-nil, the
+		// three-way `key_form` split could not survive into the runner at all,
+		// in either codec.
+		"key_form", "key_forms", "codecs")
 	proseKey(t, assertions, "reencode_obligation",
 		// The half a decode assertion cannot reach: the encoder must still emit
 		// the OMITTED form.
 		"reencoded_key_field_present")
 	proseKey(t, assertions, "anti_vacuity",
-		// `omitted` forces a real decode and `present` forces a real key through.
-		"decoded_key", "key_forms", "scenario_count")
+		// `omitted` forces a real decode and `present` forces a real key
+		// through, and both are counted off the raw wire rather than off the
+		// fixture's labels.
+		"key_form", "key_forms", "decoded_key", "reencoded_key_field_present")
 
 	scenarios := fixture["scenarios"].([]any)
 	assertKey(t, assertions, "scenario_count", float64(len(scenarios)))
@@ -192,7 +261,16 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 		excuseKey(t, scenario, "id", "the ledger key this loop records; it names the scenario rather than asserting it")
 		excuseKey(t, scenario, "expect", "container: asserted key-by-key against the DECODED and RE-ENCODED frames below")
 		excuseKey(t, scenario, "field", "a selector: it chooses which optional-key site this scenario exercises, not a value to compare")
-		excuseKey(t, scenario, "key_form", "a selector: the wire form is proven by `decoded_key` and `reencoded_key_field_present` below")
+
+		codecsReplayed[scenario["codec"].(string)] = true
+		fieldsReplayed[scenario["field"].(string)] = true
+		// The control, read off the RAW frame before the decoder runs. Not a
+		// selector: a scenario tagged `null` whose frame omits the entry — or a
+		// decoder-side collapse that made the two families indistinguishable —
+		// reddens HERE, which is the only place it can.
+		wireForm := nodeKeyWireForm(t, scenario)
+		formsReplayed[wireForm] = true
+		assertKey(t, scenario, "key_form", wireForm)
 
 		expect := scenario["expect"].(map[string]any)
 		consumeKeys(t, id+".expect", expect,
@@ -230,6 +308,23 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 		t.Fatalf("decoded %d keys, want 4: only the `present` scenarios carry one, so a "+
 			"runner reporting absent for everything satisfies the null cases trivially", keysDecoded)
 	}
+
+	// The three vocabularies, asserted as SETS against what the loop really
+	// dispatched on — `key_forms` off the raw wire, not off the fixture's own
+	// labels. Compared to literals these were green over a runner that decodes
+	// nothing.
+	assertKeyWith(t, assertions, "codecs", func(want any) {
+		t.Helper()
+		assertSameStringSet(t, "codecs", stringSlice(want), codecsReplayed)
+	})
+	assertKeyWith(t, assertions, "fields", func(want any) {
+		t.Helper()
+		assertSameStringSet(t, "fields", stringSlice(want), fieldsReplayed)
+	})
+	assertKeyWith(t, assertions, "key_forms", func(want any) {
+		t.Helper()
+		assertSameStringSet(t, "key_forms", stringSlice(want), formsReplayed)
+	})
 
 	// The replay is finished, so every key a discharge names has either been
 	// asserted or has not (#lzprosekeyconvention).

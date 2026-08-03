@@ -85,15 +85,18 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		"prose", "clause", "required_of_binding", "codecs", "scenario_count",
 		"wire_encoding", "outcomes", "anti_vacuity", "generator")
 	assertKey(t, assertions, "required_of_binding", "MUST")
-	assertKey(t, assertions, "codecs", []any{"json", "msgpack"})
 	excuseKey(t, assertions, "generator",
 		"provenance: the path of the script that emitted this file, not a statement "+
 			"about the decoder; the corpus does not declare it prose")
 
 	// `outcomes` is NOT prose (#lzprosekeyconvention): it maps a vocabulary to
 	// English glosses, and the assertion is the KEY SET, discharged by this key's
-	// own assertion against the outcomes the loop really dispatched on.
+	// own assertion against the outcomes the loop really dispatched on. Both
+	// vocabularies are asserted after the loop, against what the replay really
+	// did — compared to hand-written literals they are green over a runner that
+	// decodes nothing, so naming them in a discharge would discharge nothing.
 	outcomesReplayed := map[string]bool{}
+	codecsReplayed := map[string]bool{}
 
 	// The three paragraphs the corpus declares in `assertions.prose`. Each names
 	// the executable keys this run asserts that carry its obligation.
@@ -102,15 +105,27 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		// rendering is the only comparison that sees a neighbouring identifier.
 		"node_id_decimal", "root_id_decimal", "outcome")
 	proseKey(t, assertions, "wire_encoding",
-		// Raw text / lowercase hex in, decimal STRING out, in both codecs: a
-		// double-backed parser would have rounded the expectation itself.
+		// PROXY. The paragraph is a claim about how the CORPUS carries its bytes
+		// and its expectation — raw text, lowercase hex, and a decimal STRING —
+		// which no assertion a run makes can observe directly. The honest proxy
+		// is `node_id_decimal`: it is compared as a decimal rendering of the
+		// DECODED identifier, in both codecs, which is precisely the comparison
+		// that a double-backed JSON parse of the expectation would have
+		// destroyed before the test could make it.
 		"node_id_decimal", "codecs")
 	proseKey(t, assertions, "anti_vacuity",
 		// The two `exact` scenarios are the control: a runner that never decodes
-		// satisfies `exact_or_reject` alone.
-		"outcome", "outcomes", "node_id_decimal", "scenario_count")
+		// satisfies `exact_or_reject` alone. `node_id_decimal` and
+		// `root_id_decimal` are rendered from the decoded frame, so they are the
+		// keys only a real decode can produce.
+		"outcome", "outcomes", "node_id_decimal", "root_id_decimal")
 
 	scenarios := fixture["scenarios"].([]any)
+	// Asserted because every key owes a disposition, but deliberately NOT named
+	// in any discharge above: it compares the fixture's own count to the length
+	// of the fixture's own array, so it is green over a runner that decodes
+	// nothing. Rung 4's replay ledger is what actually holds the scenarios in
+	// place.
 	assertKey(t, assertions, "scenario_count", float64(len(scenarios)))
 
 	// Anti-vacuity: a runner that treats every frame as rejected satisfies the
@@ -131,6 +146,7 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		assertKey(t, scenario, "name", scenario["id"])
 		excuseKey(t, scenario, "id", "the ledger key this loop records; it names the scenario rather than asserting it")
 		excuseKey(t, scenario, "expect", "container: asserted key-by-key against the DECODED frame below")
+		codecsReplayed[scenario["codec"].(string)] = true
 
 		expect := scenario["expect"].(map[string]any)
 		consumeKeys(t, id+".expect", expect,
@@ -220,6 +236,11 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 	if accepted != 4 {
 		t.Fatalf("accepted %d scenarios, want 4: lazily-go's exact range is [0, 2^63)", accepted)
 	}
+
+	assertKeyWith(t, assertions, "codecs", func(want any) {
+		t.Helper()
+		assertSameStringSet(t, "codecs", stringSlice(want), codecsReplayed)
+	})
 
 	// The vocabulary, asserted as a SET against the outcomes the loop really
 	// dispatched on. The glosses are prose nested inside a data key, so the

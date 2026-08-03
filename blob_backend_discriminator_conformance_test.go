@@ -286,8 +286,14 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		// decode-error family and never normalized.
 		"decoded_backend", "rejected", "rejection_kind", "rejection_is_decode_error")
 	proseKey(t, assertions, "wire_encoding",
-		// The raw-text / lowercase-hex carriage is what lets the wire form be
-		// read back off the frame instead of taken on the fixture's word.
+		// PROXY. The paragraph is a claim about how the CORPUS carries its bytes
+		// — raw text and lowercase hex rather than a pre-parsed object, because
+		// `schemas/defs.json` closes `backend` to an enum and the reject frames
+		// could not survive as structured JSON — and no assertion a run makes
+		// can observe that choice directly. The honest proxy is `backend_form`,
+		// read back OFF THE RAW FRAME rather than taken on the fixture's word:
+		// a carriage that had normalized the seven shapes could not produce the
+		// vocabulary `backend_forms` pins, in either codec.
 		"backend_form", "backend_forms", "codecs")
 	proseKey(t, assertions, "backend_form_vocabulary",
 		// "every backend in `backends` is the `decoded_backend` of some accept
@@ -311,8 +317,10 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		// The four controls, in the order the paragraph states them.
 		"backend_forms", "backends", "reencoded_backend_field_present", "outcomes")
 	proseKey(t, assertions, "theorem",
-		// resolve_wrong_backend: an unknown kind is refused rather than routed,
-		// which is the refusal these keys pin.
+		// PROXY. `resolve_wrong_backend` is a Lean theorem in lazily-formal; a
+		// run in this repository cannot prove it, only its CONSEQUENCE — that an
+		// unknown kind is refused rather than normalized to `shm` and routed.
+		// These are the keys that pin the refusal.
 		"rejected", "rejection_kind")
 
 	scenarios := fixture["scenarios"].([]any)

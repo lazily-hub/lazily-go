@@ -24,7 +24,24 @@ All notable changes to lazily-go are documented here. This project adheres to
   discharging assertion, which was a good instinct checked by nothing, and two
   paths to satisfy one key is the ambiguity the convention removes.
   `TestNoProseWordedExcuses` is the static half: an excuse reason opening with
-  "prose" is now a build-time failure.
+  "prose" is now a build-time failure. The corpus declaration is evaluated on the
+  RAW block, before any reserved-annotation-name exemption — `note` is both a
+  reserved name and a declared prose key in the two frame-codec fixtures, and a
+  tracker that subtracts its exempt set first makes the declaration invisible.
+  Rule 7 also forbids a discharge naming `prose` itself, and rule 8 derives the
+  required verifications from the corpus: an opened fixture whose block declares
+  `prose` and never reaches `verifyProse` fails from `TestMain`, because rules
+  1-7 are all satisfied over an empty population.
+- `nodekey_null_leniency.json` gained the control its `wire_encoding` obligation
+  needs: the `key` slot is now read off the RAW frame BEFORE the decoder runs,
+  and `scenario.key_form` is asserted against it. Every key in that fixture's
+  `expect` blocks is identical for the `omitted` and `null` families — that is
+  the leniency under test — so the four `null` scenarios were the four `omitted`
+  ones wearing a different id as far as any post-decode assertion could tell.
+  Its `codecs` / `fields` / `key_forms` vocabularies, and
+  `nodeid_exact_range.json`'s `codecs`, are now asserted as SETS against what the
+  replay really dispatched on rather than against hand-written literals, which
+  were green over a runner that decodes nothing.
 - `nodeid_exact_range.json`'s `assertions.outcomes` is now ASSERTED as a key set
   against the outcomes the replay really dispatched on, rather than excused as
   prose. Prose nested inside a data key is not a prose key: the assertion is the
