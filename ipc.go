@@ -286,6 +286,22 @@ func NewShmBlobRef(offset, length, generation, epoch, checksum int64) (ShmBlobRe
 // The distinction needs a pointer. Decoding straight into BlobBackendKind makes
 // an omitted field and `"backend": ""` indistinguishable, and only the first of
 // those is the forward-compat channel.
+//
+// The pointer carries a THIRD case that is behaviour, not an implementation
+// detail: an explicit `"backend": null` leaves it nil, so a null decodes as Shm
+// exactly as an omitted field does. That is required, not incidental — a
+// serde-style peer that did not apply `skip_serializing_if` to an optional field
+// emits null where a conforming encoder omits, so refusing it would be stricter
+// than the reference implementation on a frame the reference implementation
+// produces (§ NodeKey, `#lzkeynullstrict`). Replacing `*string` with a decode
+// that distinguishes null from absent must keep giving them the same answer;
+// `backend_null_json` / `backend_null_msgpack` in
+// codec/blob_backend_discriminator.json are the fixtures that hold it.
+//
+// A `backend` that is present and not a string is refused by encoding/json
+// itself, as a *json.UnmarshalTypeError — the same returned-error family the
+// unknown-token refusal above uses, so one `if err != nil` catches both. The
+// msgpack codec bridges into this decoder, so it inherits all three answers.
 func (r *ShmBlobRef) UnmarshalJSON(b []byte) error {
 	var x struct {
 		Offset     int64   `json:"offset"`

@@ -355,7 +355,7 @@ echo "conformance coverage OK: $covered/$total canonical fixtures OPENED by the 
 # The same floor for rung 4. Its loop walks the scenarios of OPENED fixtures, so
 # zero opened fixtures means zero scenarios, which means zero unreplayed
 # scenarios — OK reported having compared nothing.
-MIN_SCENARIOS="${MIN_SCENARIOS:-126}"
+MIN_SCENARIOS="${MIN_SCENARIOS:-132}"
 if [ "$SCENARIO_TOTAL" -eq 0 ]; then
   echo "ERROR: ZERO scenarios were found across the opened fixtures." >&2
   echo "       The rung above is vacuously green over an empty population." >&2
