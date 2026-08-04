@@ -199,6 +199,29 @@ func (c CapabilityCheck) String() string {
 	return fmt.Sprintf("CapabilityCheck.fail(%s: %s)", c.Field, c.Reason)
 }
 
+// NegotiatedCapabilities is the session state agreed by two compatible
+// handshakes. It is deliberately distinct from either endpoint's advertisement:
+// callers must retain the common receive ceiling and the mutually available
+// fragmentation mode rather than continuing with a local value.
+type NegotiatedCapabilities struct {
+	Codec                  string
+	MaxFrameSize           int64
+	FragmentationSupported bool
+	SessionID              string
+}
+
+// CapabilityNegotiation combines compatibility diagnostics with the negotiated
+// session state. Capabilities is nil on failure.
+type CapabilityNegotiation struct {
+	Check        CapabilityCheck
+	Capabilities *NegotiatedCapabilities
+}
+
+// IsOk reports whether negotiation succeeded.
+func (n CapabilityNegotiation) IsOk() bool {
+	return n.Check.IsOk() && n.Capabilities != nil
+}
+
 // ---------------------------------------------------------------------------
 // CapabilityHandshake
 // ---------------------------------------------------------------------------
@@ -289,38 +312,53 @@ func (h CapabilityHandshake) IsCompatibleWith(other CapabilityHandshake) bool {
 	return h.CheckCompatible(other).IsOk()
 }
 
-// CheckCompatible is a structured compatibility check. It returns the offending
-// field (and reason) on mismatch so a caller can produce a clean fail-closed
-// diagnostic — mirrors `lazily-js::SessionHandshake.checkCompatible`.
+// Negotiate performs the structured compatibility check and retains the common
+// session state. A receive ceiling is valid only when positive and negotiates to
+// min(local, remote). Fragmentation is available only when both peers advertise
+// it. session_id is the shared graph identifier, so it must be non-empty and
+// equal; peer_id identifies an endpoint and may differ.
 //
 // requiredFeatures are checked against the OTHER peer's offered set: if this
 // peer requires a feature the other does not offer, the handshake fails closed
 // on `features`.
-func (h CapabilityHandshake) CheckCompatible(other CapabilityHandshake, requiredFeatures ...string) CapabilityCheck {
+func (h CapabilityHandshake) Negotiate(other CapabilityHandshake, requiredFeatures ...string) CapabilityNegotiation {
+	fail := func(field, reason string) CapabilityNegotiation {
+		return CapabilityNegotiation{Check: CapabilityCheckFail(field, reason)}
+	}
 	if h.ProtocolID != ProtocolID {
-		return CapabilityCheckFail("protocol_id", "local protocol_id != lazily-ipc")
+		return fail("protocol_id", "local protocol_id != lazily-ipc")
 	}
 	if other.ProtocolID != ProtocolID {
-		return CapabilityCheckFail("protocol_id", "remote protocol_id != lazily-ipc")
+		return fail("protocol_id", "remote protocol_id != lazily-ipc")
 	}
 	if h.ProtocolMajorVersion != ProtocolMajorVersion {
-		return CapabilityCheckFail("protocol_major_version",
+		return fail("protocol_major_version",
 			fmt.Sprintf("local major != %d", ProtocolMajorVersion))
 	}
 	if other.ProtocolMajorVersion != ProtocolMajorVersion {
-		return CapabilityCheckFail("protocol_major_version",
+		return fail("protocol_major_version",
 			fmt.Sprintf("remote major != %d", ProtocolMajorVersion))
 	}
 	if h.ProtocolMajorVersion != other.ProtocolMajorVersion {
-		return CapabilityCheckFail("protocol_major_version", "major version mismatch")
+		return fail("protocol_major_version", "major version mismatch")
 	}
 	if h.Codec != other.Codec {
-		return CapabilityCheckFail("codec",
+		return fail("codec",
 			fmt.Sprintf("codec mismatch (%s vs %s)", h.Codec, other.Codec))
 	}
 	if !h.OrderedReliable || !other.OrderedReliable {
-		return CapabilityCheckFail("ordered_reliable",
+		return fail("ordered_reliable",
 			"both peers must require ordered-reliable delivery")
+	}
+	if h.MaxFrameSize <= 0 || other.MaxFrameSize <= 0 {
+		return fail("max_frame_size", "both peers must advertise a positive receive ceiling")
+	}
+	if h.SessionID == "" || other.SessionID == "" {
+		return fail("session_id", "both peers must advertise a non-empty session_id")
+	}
+	if h.SessionID != other.SessionID {
+		return fail("session_id",
+			fmt.Sprintf("session_id mismatch (%s vs %s)", h.SessionID, other.SessionID))
 	}
 	offered := make(map[string]struct{}, len(other.Features))
 	for _, f := range other.Features {
@@ -328,11 +366,30 @@ func (h CapabilityHandshake) CheckCompatible(other CapabilityHandshake, required
 	}
 	for _, required := range requiredFeatures {
 		if _, ok := offered[required]; !ok {
-			return CapabilityCheckFail("features",
+			return fail("features",
 				fmt.Sprintf("required feature %q not offered by peer", required))
 		}
 	}
-	return CapabilityCheckOk()
+	maxFrameSize := h.MaxFrameSize
+	if other.MaxFrameSize < maxFrameSize {
+		maxFrameSize = other.MaxFrameSize
+	}
+	return CapabilityNegotiation{
+		Check: CapabilityCheckOk(),
+		Capabilities: &NegotiatedCapabilities{
+			Codec:                  h.Codec,
+			MaxFrameSize:           maxFrameSize,
+			FragmentationSupported: h.FragmentationSupported && other.FragmentationSupported,
+			SessionID:              h.SessionID,
+		},
+	}
+}
+
+// CheckCompatible preserves the diagnostics-only API while delegating to the
+// production negotiation path so compatibility and negotiated state cannot
+// drift apart.
+func (h CapabilityHandshake) CheckCompatible(other CapabilityHandshake, requiredFeatures ...string) CapabilityCheck {
+	return h.Negotiate(other, requiredFeatures...).Check
 }
 
 type capabilityHandshakeWire struct {
