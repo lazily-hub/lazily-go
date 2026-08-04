@@ -237,11 +237,8 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 	assertions := fixture["assertions"].(map[string]any)
 	consumeKeys(t, nodeKeyNullFixture+".assertions", assertions,
 		"prose", "clause", "required_of_binding", "codecs", "fields", "key_forms",
-		"scenario_count", "wire_encoding", "reencode_obligation", "anti_vacuity", "generator")
+		"scenario_count", "wire_encoding", "reencode_obligation", "anti_vacuity")
 	assertKey(t, assertions, "required_of_binding", "MUST")
-	excuseKey(t, assertions, "generator",
-		"provenance: the path of the script that emitted this file, not a statement "+
-			"about the decoder; the corpus does not declare it prose")
 
 	// The vocabularies are asserted AFTER the loop, against what the replay
 	// really dispatched on. Compared to a hand-written literal they would be

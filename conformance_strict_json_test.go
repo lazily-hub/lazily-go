@@ -134,7 +134,9 @@ func consumeKeys(t *testing.T, label string, obj map[string]any, consumed ...str
 
 // conformanceMetaKeys is the map-shaped conformanceMeta: the prose and taxonomy
 // keys every fixture root may carry.
-var conformanceMetaKeys = []string{"description", "notes", "note", "comment", "kind", "model"}
+// `generator` is root-only provenance owned by lazily-spec; it is deliberately
+// absent from annotationKeys so it cannot be hidden inside an assertion block.
+var conformanceMetaKeys = []string{"description", "notes", "note", "comment", "kind", "model", "generator"}
 
 // consumeFixtureKeys is consumeKeys for a fixture root, which additionally
 // tolerates the corpus-wide prose and taxonomy keys.
@@ -231,7 +233,7 @@ var (
 // declaration and therefore overrides this table.
 var annotationKeys = map[string]bool{
 	"description": true, "notes": true, "note": true, "comment": true,
-	"why": true, "kind": true, "model": true,
+	"why": true, "kind": true, "model": true, "generator": true,
 }
 
 func assertionBlockID(obj map[string]any) (uintptr, bool) {

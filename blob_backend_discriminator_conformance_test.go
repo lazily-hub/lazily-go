@@ -271,12 +271,8 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 		"outcomes", "rejection_kinds", "scenario_count", "wire_encoding",
 		"backend_form_vocabulary", "null_form", "non_string_form",
 		"epoch_disambiguation", "reject_obligation", "anti_vacuity",
-		"theorem", "generator")
+		"theorem")
 	assertKey(t, assertions, "required_of_binding", "MUST")
-	excuseKey(t, assertions, "generator",
-		"provenance: the path of the script that emitted this file. It states where the "+
-			"fixture came from, not anything the replay observes, and the corpus does not "+
-			"declare it prose — there is no obligation here to discharge")
 
 	// The nine paragraphs the corpus declares in `assertions.prose`
 	// (#lzprosekeyconvention). Each names the executable keys THIS run asserts

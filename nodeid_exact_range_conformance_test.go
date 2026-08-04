@@ -81,11 +81,8 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 	assertions := fixture["assertions"].(map[string]any)
 	consumeKeys(t, nodeIDExactRangeFixture+".assertions", assertions,
 		"prose", "clause", "required_of_binding", "codecs", "scenario_count",
-		"wire_encoding", "outcomes", "anti_vacuity", "generator")
+		"wire_encoding", "outcomes", "anti_vacuity")
 	assertKey(t, assertions, "required_of_binding", "MUST")
-	excuseKey(t, assertions, "generator",
-		"provenance: the path of the script that emitted this file, not a statement "+
-			"about the decoder; the corpus does not declare it prose")
 
 	// `outcomes` is NOT prose (#lzprosekeyconvention): it maps a vocabulary to
 	// English glosses, and the assertion is the KEY SET, discharged by this key's
