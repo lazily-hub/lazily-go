@@ -144,3 +144,27 @@ func TestStatechartConformance(t *testing.T) {
 		})
 	}
 }
+
+func TestMalformedStatechartCorpusIsRejected(t *testing.T) {
+	data, err := specReadFile(filepath.Join(statechartSpecDir(), "malformed_rejected.json"))
+	if err != nil {
+		t.Fatalf("malformed statechart fixture missing from lazily-spec: %v", err)
+	}
+	var fixture struct {
+		Cases []struct {
+			Name  string          `json:"name"`
+			Chart json.RawMessage `json:"chart"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.Cases) == 0 {
+		t.Fatal("malformed corpus must contain cases")
+	}
+	for _, scenario := range fixture.Cases {
+		if _, err := ChartDefFromJSON(scenario.Chart); err == nil {
+			t.Fatalf("malformed statechart case %q was accepted", scenario.Name)
+		}
+	}
+}

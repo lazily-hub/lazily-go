@@ -149,6 +149,26 @@ func ChartDefFromJSON(data []byte) (*ChartDef, error) {
 		}
 		stateDefs[key] = sd
 	}
+	if _, ok := stateDefs[initial]; !ok {
+		return nil, fmt.Errorf("chart.initial names undeclared state %q", initial)
+	}
+	for id, sd := range stateDefs {
+		for field, target := range map[string]string{
+			"parent": sd.parent, "initial": sd.initial, "default": sd.defaultChild,
+		} {
+			if target != "" {
+				if _, ok := stateDefs[target]; !ok {
+					return nil, fmt.Errorf("state %s: %s names undeclared state %q", id, field, target)
+				}
+			}
+		}
+		for event, tr := range sd.transitions {
+			if _, ok := stateDefs[tr.target]; !ok {
+				return nil, fmt.Errorf(
+					"state %s: transition %s targets undeclared state %q", id, event, tr.target)
+			}
+		}
+	}
 
 	kids := map[string][]string{}
 	root := ""
@@ -222,9 +242,29 @@ func parseState(id string, obj map[string]any) (stateDef, error) {
 	if obj == nil {
 		return stateDef{}, fmt.Errorf("state %s must be an object", id)
 	}
-	parent := asStr(obj["parent"])
-	initial := asStr(obj["initial"])
-	defaultChild := asStr(obj["default"])
+	optionalString := func(field string) (string, error) {
+		value, present := obj[field]
+		if !present || value == nil {
+			return "", nil
+		}
+		text, ok := value.(string)
+		if !ok {
+			return "", fmt.Errorf("state %s: %s must be a string", id, field)
+		}
+		return text, nil
+	}
+	parent, err := optionalString("parent")
+	if err != nil {
+		return stateDef{}, err
+	}
+	initial, err := optionalString("initial")
+	if err != nil {
+		return stateDef{}, err
+	}
+	defaultChild, err := optionalString("default")
+	if err != nil {
+		return stateDef{}, err
+	}
 
 	if obj["run"] != nil {
 		return stateDef{}, fmt.Errorf("state %s uses `run` actions, which are not supported", id)
@@ -271,30 +311,53 @@ func parseState(id string, obj map[string]any) (stateDef, error) {
 		}
 	}
 
-	var kind kindTag
+	if p, present := obj["parallel"]; present && p != nil {
+		if _, ok := p.(bool); !ok {
+			return stateDef{}, fmt.Errorf("state %s: `parallel` must be a boolean", id)
+		}
+	}
+
+	var inferred kindTag
 	switch h := obj["history"].(type) {
 	case nil:
 		if p, ok := obj["parallel"].(bool); ok && p {
-			kind = kindParallel
-		} else if asStr(obj["kind"]) == "final" {
-			kind = kindFinal
-		} else if _, ok := obj["initial"].(string); ok {
-			kind = kindCompound
+			inferred = kindParallel
+		} else if initial != "" {
+			inferred = kindCompound
 		} else {
-			kind = kindAtomic
+			inferred = kindAtomic
 		}
 	case string:
 		switch h {
 		case "shallow":
-			kind = kindHistoryShallow
+			inferred = kindHistoryShallow
 		case "deep":
-			kind = kindHistoryDeep
+			inferred = kindHistoryDeep
 		default:
 			return stateDef{}, fmt.Errorf("state %s: unknown history kind %s", id, h)
 		}
 	default:
 		return stateDef{}, fmt.Errorf(
 			"state %s: `history` must be the string \"shallow\" or \"deep\", got %v", id, h)
+	}
+	kind := inferred
+	if declared := asStr(obj["kind"]); declared != "" {
+		inferredName := map[kindTag]string{
+			kindAtomic: "atomic", kindCompound: "compound", kindParallel: "parallel",
+			kindHistoryShallow: "history", kindHistoryDeep: "history",
+		}[inferred]
+		if declared == "final" {
+			if inferred != kindAtomic {
+				return stateDef{}, fmt.Errorf(
+					"state %s: declared kind %q contradicts structural kind %q",
+					id, declared, inferredName)
+			}
+			kind = kindFinal
+		} else if declared != inferredName {
+			return stateDef{}, fmt.Errorf(
+				"state %s: declared kind %q contradicts structural kind %q",
+				id, declared, inferredName)
+		}
 	}
 
 	entry, err := actionList(obj["entry"])
@@ -380,7 +443,11 @@ func parseTransition(raw any) (transition, error) {
 			return transition{}, err
 		}
 		internal := false
-		if b, ok := m["internal"].(bool); ok {
+		if rawInternal, present := m["internal"]; present && rawInternal != nil {
+			b, ok := rawInternal.(bool)
+			if !ok {
+				return transition{}, errors.New("transition internal must be a boolean")
+			}
 			internal = b
 		}
 		return transition{target: target, guard: guard, action: action, internal: internal}, nil
@@ -408,7 +475,7 @@ func (d *ChartDef) kind(id string) kindTag {
 	if sd, ok := d.states[id]; ok {
 		return sd.kind
 	}
-	return kindAtomic
+	panic(fmt.Sprintf("unknown state in this chart: %s", id))
 }
 
 // ancestorsInclusive returns the ancestors of id inclusive, [id, …, root].

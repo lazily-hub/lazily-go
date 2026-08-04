@@ -305,14 +305,17 @@ func TestStateChartKindStrictness(t *testing.T) {
 		}
 	})
 
-	// Every legal enum value must still parse, or "reject any present `kind`"
-	// would pass the rejections above.
-	t.Run("every enum value is accepted", func(t *testing.T) {
-		for _, k := range []string{"atomic", "compound", "parallel", "history", "final"} {
-			doc := `{"initial": "root", "states": {
-				"root": {"initial": "leaf"},
-				"leaf": {"parent": "root", "kind": "` + k + `"}
-			}}`
+	// Every legal enum value must still parse when it agrees with the structural
+	// fields, or "reject any present `kind`" would pass the rejections above.
+	t.Run("every consistent enum value is accepted", func(t *testing.T) {
+		docs := map[string]string{
+			"atomic":   `{"initial":"leaf","states":{"root":{"initial":"leaf"},"leaf":{"parent":"root","kind":"atomic"}}}`,
+			"compound": `{"initial":"leaf","states":{"root":{"kind":"compound","initial":"leaf"},"leaf":{"parent":"root"}}}`,
+			"parallel": `{"initial":"a","states":{"root":{"kind":"parallel","parallel":true},"a":{"parent":"root"}}}`,
+			"history":  `{"initial":"h","states":{"root":{"initial":"h"},"h":{"parent":"root","kind":"history","history":"shallow","default":"leaf"},"leaf":{"parent":"root"}}}`,
+			"final":    `{"initial":"leaf","states":{"root":{"initial":"leaf"},"leaf":{"parent":"root","kind":"final"}}}`,
+		}
+		for k, doc := range docs {
 			if _, err := ChartDefFromJSON([]byte(doc)); err != nil {
 				t.Fatalf("kind %q was rejected: %v", k, err)
 			}
