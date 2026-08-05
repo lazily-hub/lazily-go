@@ -24,6 +24,23 @@
 // re-mints the entry's *Cell, so the same pointer (and its dependents) survive.
 package lazily
 
+// DependencyAvailability is the exact-key dependency state carried by one
+// stable per-key source. Available=false is an ordinary reactive value.
+type DependencyAvailability[V comparable] struct {
+	Available bool
+	Value     V
+}
+
+// UnavailableDependency constructs the unavailable state.
+func UnavailableDependency[V comparable]() DependencyAvailability[V] {
+	return DependencyAvailability[V]{}
+}
+
+// AvailableDependency constructs the available state.
+func AvailableDependency[V comparable](value V) DependencyAvailability[V] {
+	return DependencyAvailability[V]{Available: true, Value: value}
+}
+
 // SourceMap is the input-cell specialization of ReactiveMap: a keyed collection
 // of reactive cells with independent value / membership / order reactivity
 // (cell-model.md § Keyed cell collections).
@@ -127,6 +144,36 @@ func (m *SourceMap[K, V]) Set(key K, value V) {
 		return
 	}
 	m.mintWith(key, func() V { return value })
+}
+
+// DependencyMap exposes exact-key availability as a reactive value.
+type DependencyMap[K comparable, V comparable] struct {
+	*SourceMap[K, DependencyAvailability[V]]
+}
+
+// NewDependencyMap creates an empty exact-key dependency family.
+func NewDependencyMap[K comparable, V comparable](ctx *Context) *DependencyMap[K, V] {
+	return &DependencyMap[K, V]{
+		SourceMap: NewSourceMap[K, DependencyAvailability[V]](ctx),
+	}
+}
+
+// ObserveDependency observes one stable per-key source, materializing only that
+// availability source when the key has not been seen before.
+func (m *DependencyMap[K, V]) ObserveDependency(c ComputeOps, key K) DependencyAvailability[V] {
+	return m.GetOrInsertWith(c, key, func(K) DependencyAvailability[V] {
+		return UnavailableDependency[V]()
+	})
+}
+
+// Publish transitions key to Available(value).
+func (m *DependencyMap[K, V]) Publish(key K, value V) {
+	m.Set(key, AvailableDependency(value))
+}
+
+// Unpublish transitions key back to Unavailable without changing source identity.
+func (m *DependencyMap[K, V]) Unpublish(key K) {
+	m.Set(key, UnavailableDependency[V]())
 }
 
 // Insert inserts key with value at the position specified by at (relative to

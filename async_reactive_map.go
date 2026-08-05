@@ -442,6 +442,46 @@ func (m *AsyncSourceMap[K, V]) Set(key K, value V) {
 	}
 }
 
+// AsyncDependencyMap is the async-graph exact-key availability family.
+type AsyncDependencyMap[K comparable, V comparable] struct {
+	*AsyncSourceMap[K, DependencyAvailability[V]]
+}
+
+// NewAsyncDependencyMap creates an empty async dependency family.
+func NewAsyncDependencyMap[K comparable, V comparable](
+	c *AsyncContext,
+) *AsyncDependencyMap[K, V] {
+	return &AsyncDependencyMap[K, V]{
+		AsyncSourceMap: NewAsyncSourceMap[K, DependencyAvailability[V]](c),
+	}
+}
+
+// ObserveDependency materializes one availability source and registers an
+// exact-key async dependency when cc is non-nil.
+func (m *AsyncDependencyMap[K, V]) ObserveDependency(
+	cc *AsyncComputeContext,
+	key K,
+) DependencyAvailability[V] {
+	m.Observe(key, func(K) DependencyAvailability[V] {
+		return UnavailableDependency[V]()
+	})
+	value, ok := m.ObserveTracked(cc, key)
+	if !ok {
+		panic("dependency availability source must be resolved")
+	}
+	return value
+}
+
+// Publish transitions key to Available(value).
+func (m *AsyncDependencyMap[K, V]) Publish(key K, value V) {
+	m.Set(key, AvailableDependency(value))
+}
+
+// Unpublish transitions key back to Unavailable.
+func (m *AsyncDependencyMap[K, V]) Unpublish(key K) {
+	m.Set(key, UnavailableDependency[V]())
+}
+
 // AsyncComputedMap is the derived-slot specialization of AsyncReactiveMap: entries
 // are minted pending and driven to resolution via Drive; MaterializeAll pre-mints
 // the keyset (still pending until driven). No Set.

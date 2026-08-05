@@ -337,6 +337,40 @@ func (m *ThreadSafeSourceMap[K, V]) Set(key K, value V) {
 	m.mintWith(key, func() V { return value })
 }
 
+// ThreadSafeDependencyMap is the lock-backed exact-key availability family.
+type ThreadSafeDependencyMap[K comparable, V comparable] struct {
+	*ThreadSafeSourceMap[K, DependencyAvailability[V]]
+}
+
+// NewThreadSafeDependencyMap creates an empty thread-safe dependency family.
+func NewThreadSafeDependencyMap[K comparable, V comparable](
+	ts *ThreadSafeContext,
+) *ThreadSafeDependencyMap[K, V] {
+	return &ThreadSafeDependencyMap[K, V]{
+		ThreadSafeSourceMap: NewThreadSafeSourceMap[K, DependencyAvailability[V]](ts),
+	}
+}
+
+// ObserveDependency materializes and observes one exact-key availability source.
+func (m *ThreadSafeDependencyMap[K, V]) ObserveDependency(
+	c ComputeOps,
+	key K,
+) DependencyAvailability[V] {
+	return m.GetOrInsertWith(c, key, func(K) DependencyAvailability[V] {
+		return UnavailableDependency[V]()
+	})
+}
+
+// Publish transitions key to Available(value).
+func (m *ThreadSafeDependencyMap[K, V]) Publish(key K, value V) {
+	m.Set(key, AvailableDependency(value))
+}
+
+// Unpublish transitions key back to Unavailable.
+func (m *ThreadSafeDependencyMap[K, V]) Unpublish(key K) {
+	m.Set(key, UnavailableDependency[V]())
+}
+
 // ThreadSafeComputedMap is the derived-slot specialization: GetOrInsertWith
 // mints a slot on first access (lazy); MaterializeAll pre-mints the keyset
 // (eager). No Set.
