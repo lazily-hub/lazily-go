@@ -430,11 +430,11 @@ func assertKey(t *testing.T, block map[string]any, key string, actual any) {
 	})
 }
 
-// assertKeyWith marks key asserted and hands the fixture's own value to the
-// caller's check. It exists for the comparisons that are not equality — a
-// tolerance, a set containment, an invariant derived from the value. The point
-// is that the fixture's value reaches the comparison, not that the comparison is
-// `==`.
+// assertKeyWith hands the fixture's own value to the caller's check and marks
+// key asserted only after that check returns. It exists for comparisons that
+// are not equality — a tolerance, a set containment, an invariant derived from
+// the value. The point is that the fixture's value reaches the comparison, not
+// that the comparison is `==`.
 func assertKeyWith(t *testing.T, block map[string]any, key string, check func(want any)) {
 	t.Helper()
 	want, present := block[key]
@@ -442,6 +442,7 @@ func assertKeyWith(t *testing.T, block map[string]any, key string, check func(wa
 		t.Errorf("%s: key %q is asserted but the fixture block does not carry it", assertionLabel(block), key)
 		return
 	}
+	check(want)
 	if blk := lookupAssertionBlock(block); blk != nil {
 		blk.markAsserted(key)
 	}
@@ -451,7 +452,6 @@ func assertKeyWith(t *testing.T, block map[string]any, key string, check func(wa
 	if ledger := lookupProseLedger(t); ledger != nil {
 		ledger.markAsserted(key)
 	}
-	check(want)
 }
 
 // excuseKey records that key cannot be asserted at this call site, and why. The
@@ -1050,7 +1050,18 @@ func (l *proseLedger) consumeDeclarations(t *testing.T) {
 	blocks := append([]proseBlock{}, l.blocks...)
 	l.mu.Unlock()
 	for _, block := range blocks {
-		assertKeyWith(t, block.obj, "prose", func(any) {})
+		assertKeyWith(t, block.obj, "prose", func(want any) {
+			names, ok := want.([]any)
+			if !ok {
+				t.Errorf("%s: prose declaration must be an array, got %T", assertionLabel(block.obj), want)
+				return
+			}
+			for _, name := range names {
+				if _, ok := name.(string); !ok {
+					t.Errorf("%s: prose declaration entries must be strings, got %T", assertionLabel(block.obj), name)
+				}
+			}
+		})
 	}
 }
 
