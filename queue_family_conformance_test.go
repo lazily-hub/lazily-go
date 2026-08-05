@@ -170,16 +170,24 @@ type queueFamilyConfig struct {
 
 func queueFamilyConfigOf(t *testing.T, name string, fixture map[string]any) queueFamilyConfig {
 	t.Helper()
-	cfg := consumeKeys(t, name+" config", jsMap(fixture["config"]),
-		"visibility_timeout", "max_deliveries")
-	if cfg == nil {
-		t.Fatalf("%s: config is required for the work-queue corpus", name)
+	initial := consumeKeys(t, name+" initial", jsMap(fixture["initial"]),
+		"visibility_timeout", "max_deliveries", "pending", "in_flight", "dead_letters")
+	if initial == nil {
+		t.Fatalf("%s: initial state and lease config are required for the work-queue corpus", name)
 	}
-	excuseKeys(t, cfg, "replay input: the two knobs the work queue is CONSTRUCTED with; what they produce is asserted through the lease/redelivery expectations each step states",
+	excuseKeys(t, initial, "replay input: the two knobs the work queue is CONSTRUCTED with; what they produce is asserted through the lease/redelivery expectations each step states",
 		"visibility_timeout", "max_deliveries")
+	for _, key := range []string{"pending", "in_flight", "dead_letters"} {
+		initialKey := key
+		assertKeyWith(t, initial, initialKey, func(raw any) {
+			if len(jsList(raw)) != 0 {
+				t.Fatalf("%s: non-empty initial.%s is not supported by this runner", name, initialKey)
+			}
+		})
+	}
 	return queueFamilyConfig{
-		VisibilityTimeout: int64(jsInt(cfg["visibility_timeout"])),
-		MaxDeliveries:     uint64(jsInt(cfg["max_deliveries"])),
+		VisibilityTimeout: int64(jsInt(initial["visibility_timeout"])),
+		MaxDeliveries:     uint64(jsInt(initial["max_deliveries"])),
 	}
 }
 
