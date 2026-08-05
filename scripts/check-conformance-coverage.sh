@@ -45,6 +45,9 @@ fi
 # someone looked; shrinking this list is the work. Adding to it silently is how the
 # guard rots, so keep a reason with any new entry.
 KNOWN_UNCOVERED=(
+  # Experimental protobuf-v1 generation is piloted in Rust/Kotlin/TypeScript;
+  # Go must negotiate the capability before replaying this typed trace.
+  "protobuf/graph_boundary_traces.json"
   "reactive-graph/exact_fold_paths_stay_exact.json"
   "reactive-graph/feedback_drain_bound_reports_exhaustion.json"
   "reactive-graph/merge_cell_acquires_no_dependency_edge.json"
@@ -53,6 +56,8 @@ KNOWN_UNCOVERED=(
   "reactive-graph/merge_per_settled_cone_not_per_write.json"
   "reliable-sync/coalesce_bounds_outbox.json"
   "reliable-sync/liveness_lease_eviction.json"
+  # The canonical journal-decoder trace has no Go replay runner yet.
+  "reliable-sync/outbox_journal_decode.json"
 )
 
 # Per-scenario replay accounting (#lzscenariocoverage) — rung 4.
