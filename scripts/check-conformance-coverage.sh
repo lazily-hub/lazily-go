@@ -53,12 +53,6 @@ KNOWN_UNCOVERED=(
   # Experimental protobuf-v1 generation is piloted in Rust/Kotlin/TypeScript;
   # Go must negotiate the capability before replaying this typed trace.
   "protobuf/graph_boundary_traces.json"
-  "reactive-graph/exact_fold_paths_stay_exact.json"
-  "reactive-graph/feedback_drain_bound_reports_exhaustion.json"
-  "reactive-graph/merge_cell_acquires_no_dependency_edge.json"
-  "reactive-graph/merge_feed_through_a_formula_coalesces.json"
-  "reactive-graph/merge_folds_synchronously_in_batch.json"
-  "reactive-graph/merge_per_settled_cone_not_per_write.json"
   "reliable-sync/coalesce_bounds_outbox.json"
   "reliable-sync/liveness_lease_eviction.json"
   # The canonical journal-decoder trace has no Go replay runner yet.

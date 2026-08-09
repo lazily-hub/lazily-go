@@ -128,7 +128,10 @@ type depOwner interface {
 
 // asyncSourceNode is the loop-owned state of a mutable input cell.
 type asyncSourceNode struct {
-	value    any
+	value any
+	// policy folds a Merge op into the current value. Held type-erased so this
+	// loop-owned struct stays non-generic; see mergeFolder.
+	policy   func(cur, op any) any
 	disposed bool
 }
 
@@ -169,8 +172,25 @@ type AsyncSource[T any] struct {
 }
 
 // NewAsyncSource creates a mutable input cell bound to c (Dart AsyncContext.cell).
+// Its writes fold under KeepLatest, which is a plain cell.
 func NewAsyncSource[T any](c *AsyncContext, value T) *AsyncSource[T] {
-	return &AsyncSource[T]{c: c, node: &asyncSourceNode{value: value}}
+	return NewAsyncSourceWithPolicy(c, value, KeepLatest[T]())
+}
+
+// NewAsyncSourceWithPolicy creates an input cell on the async graph whose Merge
+// folds under policy — the async counterpart of NewSourceWithPolicy. With a
+// policy other than KeepLatest it is the accumulator the corpus calls a merge
+// cell.
+func NewAsyncSourceWithPolicy[T any](c *AsyncContext, value T, policy MergePolicy[T]) *AsyncSource[T] {
+	return &AsyncSource[T]{c: c, node: &asyncSourceNode{value: value, policy: mergeFolder(policy)}}
+}
+
+// mergeFolder erases MergePolicy[T] to a fold over `any` so the loop-owned node
+// can hold it without the node type becoming generic. The cast is safe by
+// construction: only NewAsyncSourceWithPolicy[T] installs it, and only
+// AsyncSource[T].Merge calls it.
+func mergeFolder[T any](policy MergePolicy[T]) func(cur, op any) any {
+	return func(cur, op any) any { return policy.Merge(cur.(T), op.(T)) }
 }
 
 // Peek returns the current value without registering a dependency
@@ -218,6 +238,29 @@ func (h *AsyncSource[T]) Set(value T) {
 			return
 		}
 		h.node.value = value
+		h.c.invalidateDependents(h.node)
+	})
+}
+
+// Merge folds op into the current value under this cell's policy and writes the
+// result. The read-modify-write happens inside ONE loop command, so a fold is
+// atomic with respect to every other graph mutation — which is exactly why it
+// belongs in the library rather than a Peek-then-Set at the call site.
+//
+// Like Set, an equal result invalidates nothing (free dedup).
+func (h *AsyncSource[T]) Merge(op T) {
+	h.c.do(func() {
+		if h.c.disposed || h.node.disposed {
+			return
+		}
+		var next any = op
+		if h.node.policy != nil {
+			next = h.node.policy(h.node.value, op)
+		}
+		if asyncValueEqual(h.node.value, next) {
+			return
+		}
+		h.node.value = next
 		h.c.invalidateDependents(h.node)
 	})
 }
@@ -503,6 +546,12 @@ func (e *AsyncEffectHandle) DisposeAsync() {
 			return
 		}
 		e.disposed = true
+		if e.rerunScheduled {
+			// The rerun will never happen, so it must stop counting towards
+			// quiescence or the drain counters never reset.
+			e.rerunScheduled = false
+			e.c.pendingReruns--
+		}
 		if e.cancel != nil {
 			e.cancel()
 		}
@@ -538,6 +587,110 @@ type AsyncContext struct {
 	disposed   bool
 	batchDepth int
 	batchQueue map[any]struct{}
+
+	// --- bounded effect drain ---
+	//
+	// The async plane's drain is a goroutine CHAIN, not a flat worklist:
+	// onEffectDone re-enters runEffect while rerunScheduled is set. An effect
+	// writing into its own dependency cone therefore reschedules itself
+	// forever, spawning a goroutine per hop, and the chain's only exit is
+	// convergence. Same defect as the sync plane's flushEffects loop, same fix:
+	// bound the runs and report rather than hang.
+	//
+	// Every field here is loop-owned, so no locking — the transitions all
+	// happen inside c.do / c.post.
+	drainBudget int
+	// runningEffects and pendingReruns make quiescence an O(1) test. Scanning
+	// c.effects for "is anything still going" would be O(n) on every effect
+	// completion, which is the common case and not where that cost belongs.
+	runningEffects int
+	pendingReruns  int
+	// drainIterations counts effect runs since the last quiescent point; it is
+	// what the budget bounds.
+	drainIterations     int
+	drainRuns           map[*AsyncEffectHandle]int
+	drainOrder          []*AsyncEffectHandle
+	lastDrainExhaustion *DrainExhaustion
+}
+
+// DrainBudget reports the current effect-drain iteration budget.
+func (c *AsyncContext) DrainBudget() int {
+	budget := 0
+	c.do(func() { budget = c.drainBudgetLocked() })
+	if budget == 0 {
+		return DefaultDrainBudget
+	}
+	return budget
+}
+
+func (c *AsyncContext) drainBudgetLocked() int {
+	if c.drainBudget <= 0 {
+		return DefaultDrainBudget
+	}
+	return c.drainBudget
+}
+
+// SetDrainBudget overrides the effect-drain iteration budget. See
+// Context.SetDrainBudget.
+func (c *AsyncContext) SetDrainBudget(n int) {
+	if n < 1 {
+		n = 1
+	}
+	c.do(func() { c.drainBudget = n })
+}
+
+// LastDrainExhaustion returns the most recent drain exhaustion, or nil when
+// every drain so far reached quiescence.
+func (c *AsyncContext) LastDrainExhaustion() *DrainExhaustion {
+	var report *DrainExhaustion
+	c.do(func() { report = c.lastDrainExhaustion })
+	return report
+}
+
+// ClearDrainExhaustion forgets the recorded exhaustion so a later drain can be
+// observed independently.
+func (c *AsyncContext) ClearDrainExhaustion() {
+	c.do(func() { c.lastDrainExhaustion = nil })
+}
+
+// noteDrainRun records one effect run and reports whether the budget is now
+// exhausted. Loop-owned; called from runEffect before the body is spawned, so
+// the run that trips the budget does not also execute.
+func (c *AsyncContext) noteDrainRun(e *AsyncEffectHandle) bool {
+	if c.drainRuns == nil {
+		c.drainRuns = map[*AsyncEffectHandle]int{}
+	}
+	if c.drainRuns[e] == 0 {
+		c.drainOrder = append(c.drainOrder, e)
+	}
+	c.drainRuns[e]++
+	c.drainIterations++
+	if c.drainIterations < c.drainBudgetLocked() {
+		return false
+	}
+	c.lastDrainExhaustion = c.asyncDrainExhaustionReport()
+	return true
+}
+
+// resetDrainIfQuiescent clears the per-drain counters once nothing is running
+// and nothing is scheduled, so the next drain is measured on its own.
+func (c *AsyncContext) resetDrainIfQuiescent() {
+	if c.runningEffects != 0 || c.pendingReruns != 0 {
+		return
+	}
+	c.drainIterations = 0
+	clear(c.drainRuns)
+	c.drainOrder = c.drainOrder[:0]
+}
+
+// asyncDrainExhaustionReport mirrors Context.drainExhaustionReport: busiest
+// effects first, ties in first-run order, capped so the head stays visible.
+func (c *AsyncContext) asyncDrainExhaustionReport() *DrainExhaustion {
+	return &DrainExhaustion{
+		Iterations: c.drainIterations,
+		Budget:     c.drainBudgetLocked(),
+		TopEffects: topEffectRuns(c.drainOrder, c.drainRuns),
+	}
 }
 
 // NewAsyncContext creates an async reactive context and starts its owner
@@ -839,14 +992,25 @@ func (c *AsyncContext) scheduleEffectRerun(e *AsyncEffectHandle) {
 		return
 	}
 	if e.running {
-		e.rerunScheduled = true
+		if !e.rerunScheduled {
+			e.rerunScheduled = true
+			c.pendingReruns++
+		}
 		return
 	}
 	c.runEffect(e)
 }
 
 func (c *AsyncContext) runEffect(e *AsyncEffectHandle) {
+	// Bound the chain before spawning, so the run that trips the budget does
+	// not also execute. Leaving the effect un-run (and un-rescheduled) is the
+	// async analogue of the sync drain leaving its worklist in place:
+	// exhaustion is reported, not papered over by finishing one more hop.
+	if c.noteDrainRun(e) {
+		return
+	}
 	e.running = true
+	c.runningEffects++
 	for dep := range e.deps {
 		c.removeDependent(dep, e)
 	}
@@ -869,15 +1033,24 @@ func (c *AsyncContext) runEffect(e *AsyncEffectHandle) {
 
 func (c *AsyncContext) onEffectDone(e *AsyncEffectHandle, cleanup func()) {
 	e.running = false
+	c.runningEffects--
 	if e.disposed {
 		// A cleanup produced after disposal is dropped (matches Dart).
+		if e.rerunScheduled {
+			e.rerunScheduled = false
+			c.pendingReruns--
+		}
+		c.resetDrainIfQuiescent()
 		return
 	}
 	e.cleanup = cleanup
 	if e.rerunScheduled {
 		e.rerunScheduled = false
+		c.pendingReruns--
 		c.runEffect(e)
+		return
 	}
+	c.resetDrainIfQuiescent()
 }
 
 // --- batching & lifecycle ---

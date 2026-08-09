@@ -49,7 +49,13 @@ var reactiveGraphReplayed = []string{
 	"disposal_does_not_run_surviving_effects.json",
 	"dispose_detaches_edges_both_directions.json",
 	"dispose_signal_reverts_to_lazy.json",
+	"exact_fold_paths_stay_exact.json",
 	"failed_compute_is_never_cached.json",
+	"feedback_drain_bound_reports_exhaustion.json",
+	"merge_cell_acquires_no_dependency_edge.json",
+	"merge_feed_through_a_formula_coalesces.json",
+	"merge_folds_synchronously_in_batch.json",
+	"merge_per_settled_cone_not_per_write.json",
 	"read_after_dispose_is_an_error.json",
 	"recycled_id_inherits_nothing.json",
 	"scope_teardown_equals_fold_of_disposals.json",
@@ -66,30 +72,13 @@ var reactiveGraphReplayed = []string{
 // skipped silently, and a fixture becoming executable fails the ledger
 // assertion until it is promoted into reactiveGraphReplayed.
 //
-// The merge-feed fixtures landed on spec main (#lzmergefeed, Step 3): they drive
-// the `merge_cell` op — the accumulate/fold write surface (RelayCell / merge
-// policy) — which this reactive-graph runner does not model. The runner has no
-// `merge_cell` node kind, so replaying them would Fatalf on an unsupported op;
-// they are accounted-for skips, not silent gaps, and each stays here until the
-// op is implemented and the fixture promoted into reactiveGraphReplayed.
-//
-// feedback_drain_bound_reports_exhaustion uses only supported ops (cell / effect
-// / read / set_cell) but asserts the novel `drain_exhausted` / `writes_own_cone`
-// keys — the bounded-feedback drain semantics carried forward under #lzmergefeed.
-// It is parked here rather than mis-replayed against expectation keys the runner
-// cannot check (they would Fatalf in the assertion switch's default arm).
-//
-// merge ops are NOT implemented and the drift assertion is NOT loosened: these
-// entries are exactly what makes the on-disk corpus drift check pass without
-// running fixtures this binding cannot honestly execute.
-var reactiveGraphUnsupported = map[string]string{
-	"exact_fold_paths_stay_exact.json":             "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
-	"merge_cell_acquires_no_dependency_edge.json":  "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
-	"merge_feed_through_a_formula_coalesces.json":  "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
-	"merge_folds_synchronously_in_batch.json":      "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
-	"merge_per_settled_cone_not_per_write.json":    "merge_cell op (#lzmergefeed) — no merge/fold node kind in this runner",
-	"feedback_drain_bound_reports_exhaustion.json": "drain_exhausted/writes_own_cone assertion keys (#lzmergefeed) — bounded-feedback drain not modeled",
-}
+// It is EMPTY, and that is load-bearing. The six merge-feed / bounded-drain
+// fixtures sat here because the runner had no `merge_cell` node kind and the
+// library had no bounded effect drain. Both are now implemented rather than
+// excused: `Source` already folded under a `MergePolicy`, `AsyncSource` gained
+// the same surface, and both planes gained a drain budget with an exhaustion
+// report. The drift assertion was never loosened to get here.
+var reactiveGraphUnsupported = map[string]string{}
 
 // reactiveGraphModelUnsupported names fixture/model pairs one execution model
 // cannot run, keyed "<model>/<fixture>". Same discipline as the ledger above:
@@ -184,6 +173,28 @@ type graphModel interface {
 	// It is the only observable that separates an eager signal from the lazy
 	// slot it is built on: their values are identical for every read sequence.
 	computesOf(id string) int
+	// mergeCell builds an accumulator: a Source whose writes fold under Sum.
+	// It is an ordinary cell node — degree, read and dispose all work on it
+	// unchanged — so the ONLY thing that makes it a "merge cell" is the policy.
+	mergeCell(id string, value int) nodeRef
+	// merge folds op into a merge cell under its policy — an explicit merge()
+	// call. Exact: one fold per call, because the caller counts the ops.
+	merge(n nodeRef, op int)
+	// feedEffect is an effect that reads `reads` and folds their sum into
+	// `target`. `onMerge` ticks once per fold, from INSIDE the effect body, so
+	// the count moves only when the runtime actually folds — counting at the
+	// call site would report the runner's intent rather than the library's
+	// behaviour, and that is the one thing these fixtures discriminate on.
+	feedEffect(id string, reads []nodeRef, target nodeRef, onMerge func()) nodeRef
+	// divergeEffect is an effect that reads `own` and writes `own + 1` back
+	// into it, closing a feedback loop through the SCHEDULER rather than the
+	// graph. It diverges under KeepLatest, so a bounded drain is the only exit.
+	divergeEffect(id string, own nodeRef) nodeRef
+	// drainExhausted reports whether the most recent settle cut its effect
+	// drain short.
+	drainExhausted() bool
+	// clearDrain resets that observable so the next op is measured alone.
+	clearDrain()
 	scope() scopeModel
 	// settle drives the model to quiescence before assertions are evaluated.
 	// Synchronous models are already quiescent when an op returns; async
@@ -285,6 +296,26 @@ func (a *armedFailures) take(id string) bool {
 	return true
 }
 
+// divergeNext is the divergent effect's body arithmetic, shared by both planes.
+//
+// 0 is held as a FIXED POINT. The dependency edge is registered the instant the
+// tracked read runs, so a plain v+1 body would reschedule itself mid-creation
+// and exhaust the drain before the external kick ever landed — the fixture's
+// step 1 pins `drain_exhausted: false` there ("creation runs the effect once;
+// the loop has not been kicked yet"). Writing 0 back leaves the store's equality
+// guard to suppress the invalidation, so creation settles. The external
+// set_cell(counter, 1) moves off the fixed point and the loop diverges.
+//
+// Go's ints wrap on overflow rather than panicking, so no saturating variant is
+// needed: divergence here means never CONVERGING — every step changes the value
+// and reschedules — not the value growing without bound.
+func divergeNext(v int) int {
+	if v == 0 {
+		return 0
+	}
+	return v + 1
+}
+
 // syncModel replays against the default single-threaded *Context.
 type syncModel struct {
 	ctx      *Context
@@ -361,6 +392,45 @@ func (m *syncModel) batch(run func()) { m.ctx.Batch(run) }
 func (m *syncModel) computesOf(id string) int { return m.computes.count(id) }
 
 func (m *syncModel) failNext(id string, count int) { m.armed.arm(id, count) }
+
+func (m *syncModel) mergeCell(id string, value int) nodeRef {
+	return nodeRef{kind: kindCell, id: id, h: NewSourceWithPolicy(m.ctx, value, Sum[int]())}
+}
+
+func (m *syncModel) merge(r nodeRef, op int) { r.h.(*Source[int]).Merge(op) }
+
+func (m *syncModel) feedEffect(id string, reads []nodeRef, target nodeRef, onMerge func()) nodeRef {
+	deps := append([]nodeRef(nil), reads...)
+	acc := target.h.(*Source[int])
+	e := NewEffect(m.ctx, func(c *Compute) func() {
+		m.log.run(id)
+		sum := 0
+		for _, d := range deps {
+			sum += m.trackRead(c, d)
+		}
+		onMerge()
+		acc.Merge(sum)
+		return func() { m.log.cleanup(id) }
+	})
+	return nodeRef{kind: kindEffect, id: id, h: e}
+}
+
+func (m *syncModel) divergeEffect(id string, own nodeRef) nodeRef {
+	cell := own.h.(*Source[int])
+	// Only the divergent fixture builds this, so lowering the budget here keeps
+	// the exhausting loop fast without changing any other fixture's model.
+	m.ctx.SetDrainBudget(256)
+	e := NewEffect(m.ctx, func(c *Compute) func() {
+		m.log.run(id)
+		v := Get[int](c, cell)
+		cell.Set(divergeNext(v))
+		return func() { m.log.cleanup(id) }
+	})
+	return nodeRef{kind: kindEffect, id: id, h: e}
+}
+
+func (m *syncModel) drainExhausted() bool { return m.ctx.LastDrainExhaustion() != nil }
+func (m *syncModel) clearDrain()          { m.ctx.ClearDrainExhaustion() }
 
 func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
@@ -586,6 +656,50 @@ func (m *asyncModel) computesOf(id string) int { return m.computes.count(id) }
 
 func (m *asyncModel) failNext(id string, count int) { m.armed.arm(id, count) }
 
+func (m *asyncModel) mergeCell(id string, value int) nodeRef {
+	return nodeRef{kind: kindCell, id: id, h: NewAsyncSourceWithPolicy(m.ctx, value, Sum[int]())}
+}
+
+func (m *asyncModel) merge(r nodeRef, op int) { r.h.(*AsyncSource[int]).Merge(op) }
+
+func (m *asyncModel) feedEffect(id string, reads []nodeRef, target nodeRef, onMerge func()) nodeRef {
+	deps := append([]nodeRef(nil), reads...)
+	acc := target.h.(*AsyncSource[int])
+	e := m.ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
+		m.log.run(id)
+		sum := 0
+		for _, d := range deps {
+			v, err := m.trackRead(cc, d)
+			if err != nil {
+				// A read that fails because a dependency is gone is the
+				// contract, not a test failure; the fold is skipped with it, so
+				// the count still tracks folds that actually happened.
+				return func() { m.log.cleanup(id) }
+			}
+			sum += v
+		}
+		onMerge()
+		acc.Merge(sum)
+		return func() { m.log.cleanup(id) }
+	})
+	return nodeRef{kind: kindEffect, id: id, h: e}
+}
+
+func (m *asyncModel) divergeEffect(id string, own nodeRef) nodeRef {
+	cell := own.h.(*AsyncSource[int])
+	m.ctx.SetDrainBudget(256)
+	e := m.ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
+		m.log.run(id)
+		v := TrackSource(cc, cell)
+		cell.Set(divergeNext(v))
+		return func() { m.log.cleanup(id) }
+	})
+	return nodeRef{kind: kindEffect, id: id, h: e}
+}
+
+func (m *asyncModel) drainExhausted() bool { return m.ctx.LastDrainExhaustion() != nil }
+func (m *asyncModel) clearDrain()          { m.ctx.ClearDrainExhaustion() }
+
 func (m *asyncModel) effect(id string, reads []nodeRef) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
 	e := m.ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
@@ -694,6 +808,24 @@ type reactiveGraphOp struct {
 	// Writes is the batch op's write list: an ordered sequence of cell writes
 	// applied inside one batch, so the corpus can pin coalescing.
 	Writes []reactiveGraphWrite `json:"writes"`
+	// Policy is the merge cell's fold. The corpus only ever uses "Sum"; any
+	// other value is rejected rather than silently folded under the wrong
+	// algebra, which would satisfy the counts and land on the wrong value.
+	Policy string `json:"policy"`
+	// Merges is the batch op's explicit merge() list. Distinct from Writes
+	// because the two paths differ: explicit calls are EXACT (one fold per
+	// call, the caller counting the ops) while delivery through a dependency
+	// edge is flush-granular (one fold per settled cone).
+	Merges []reactiveGraphWrite `json:"merges"`
+	// MergesInto turns an effect into a FEED: it reads `reads` and folds their
+	// sum into this merge cell. The dependency edge belongs to the effect; the
+	// merge cell acquires none, which is the whole point of
+	// merge_cell_acquires_no_dependency_edge.json.
+	MergesInto string `json:"merges_into"`
+	// WritesOwnCone turns an effect into a divergent scheduler-closed loop: it
+	// reads this cell and writes it back incremented. Not a dependency cycle —
+	// the loop closes through the scheduler — so only a bounded drain exits it.
+	WritesOwnCone string `json:"writes_own_cone"`
 }
 
 // reactiveGraphWrite is one cell write inside a `batch` op.
@@ -765,6 +897,11 @@ type replayEngine struct {
 	label   string // "" for a steps-shaped fixture, "[<scenario>]" otherwise
 
 	nodes map[string]nodeRef
+	// merges counts folds per merge cell, cumulative from scenario start like
+	// `computes`, so a fixture can assert a step did NOT fold by repeating the
+	// previous step's number. Registered at merge_cell construction so
+	// `merges_of` on a cell that never folded reads 0 rather than "unknown".
+	merges map[string]int
 	// stale keeps every handle ever minted so `dispose_stale_handle` can tear
 	// down through a handle whose node is long gone.
 	stale    map[string]nodeRef
@@ -787,6 +924,7 @@ func newReplayEngine(t *testing.T, m graphModel, fixture, label string) *replayE
 		fixture:  fixture,
 		label:    label,
 		nodes:    map[string]nodeRef{},
+		merges:   map[string]int{},
 		stale:    map[string]nodeRef{},
 		scopes:   map[string]scopeModel{},
 		poisoned: map[string]bool{},
@@ -876,9 +1014,37 @@ func (e *replayEngine) create(op reactiveGraphOp) nodeRef {
 			e.t.Fatalf("%s#%d: cell op has no value", e.fixture, e.step)
 		}
 		return target.cell(op.ID, *op.Value)
+	case "merge_cell":
+		if op.Value == nil {
+			e.t.Fatalf("%s#%d: merge_cell op has no value", e.fixture, e.step)
+		}
+		e.requireSumPolicy(op)
+		if op.Scope != "" {
+			e.t.Fatalf("%s#%d: the corpus never scopes a merge cell", e.fixture, e.step)
+		}
+		// Register the counter at construction, so `merges_of` on a cell that
+		// has folded nothing reports 0 instead of failing as unknown — which is
+		// what merge_per_settled_cone_not_per_write.json asserts on its very
+		// first step ("construction alone folds nothing").
+		if _, ok := e.merges[op.ID]; !ok {
+			e.merges[op.ID] = 0
+		}
+		return e.m.mergeCell(op.ID, *op.Value)
 	case "computed":
 		return target.computed(op.ID, e.refs(op.Reads), op.Offset)
 	case "effect":
+		// Three effect flavours, chosen by which extra field the op carries. A
+		// feed folds into a merge cell; a diverging effect writes its own
+		// dependency cone; a plain effect is a pure sink. The corpus never
+		// scopes either of the first two.
+		if op.MergesInto != "" {
+			target := e.cellNode(op.MergesInto)
+			id := op.MergesInto
+			return e.m.feedEffect(op.ID, e.refs(op.Reads), target, func() { e.merges[id]++ })
+		}
+		if op.WritesOwnCone != "" {
+			return e.m.divergeEffect(op.ID, e.cellNode(op.WritesOwnCone))
+		}
 		return target.effect(op.ID, e.refs(op.Reads))
 	default:
 		// Fail closed (#lzscenariobodyskip). `effect` used to be the `default`
@@ -892,8 +1058,28 @@ func (e *replayEngine) create(op reactiveGraphOp) nodeRef {
 
 func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 	switch op.Type {
-	case "cell", "computed", "effect":
+	case "cell", "merge_cell", "computed", "effect":
 		e.put(op.ID, e.create(op))
+		// A feed effect's step asserts `value` on the cell it feeds, not on the
+		// effect (which has no value). The corpus spells the target in
+		// `merges_into`, so that is what the read resolves to.
+		if op.MergesInto != "" {
+			v, err := e.readID(op.MergesInto)
+			if err != nil {
+				return nil, true
+			}
+			return &v, false
+		}
+	case "merge":
+		// An explicit merge() call — exact, one fold per call. Not emitted by
+		// the five landed fixtures (which merge inside a batch or via a feed),
+		// but accepted so a future single-fold fixture is not an unknown op.
+		if op.Value == nil {
+			e.t.Fatalf("%s#%d: merge op has no value", e.fixture, e.step)
+		}
+		e.requireSumPolicy(op)
+		e.merges[op.ID]++
+		e.m.merge(e.cellNode(op.ID), *op.Value)
 	case "read":
 		v, err := e.readID(op.ID)
 		if err != nil {
@@ -936,6 +1122,16 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 					e.t.Fatalf("%s#%d: batch writes non-cell %q", e.fixture, e.step, w.ID)
 				}
 				e.m.setCell(n, w.Value)
+			}
+			// Explicit merges inside a batch fold SYNCHRONOUSLY — only the
+			// downstream cascade defers to batch exit. Counting here is exact
+			// for the same reason the fold is: the caller decides how many ops
+			// exist. A binding that deferred the fold itself would show fewer
+			// merges than calls, and under Sum it would also land on the wrong
+			// value.
+			for _, mg := range op.Merges {
+				e.merges[mg.ID]++
+				e.m.merge(e.cellNode(mg.ID), mg.Value)
 			}
 		})
 	case "dispose":
@@ -1090,6 +1286,10 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 	for i, step := range steps {
 		e.step = i
 		runsBefore := len(e.m.runLog())
+		// Measure this op's drain in isolation: `drain_exhausted` is a
+		// cumulative observable on the model, so clear it before every op or
+		// one exhausted drain would answer true for every later step.
+		e.m.clearDrain()
 
 		opValue, opError := e.runOp(step.Op)
 		e.rep.ops++
@@ -1150,7 +1350,7 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 				var want map[string]int
 				e.unmarshal(key, raw, &want)
 				for _, id := range sortedIntKeys(want) {
-					e.check("computes_of."+id, e.m.computesOf(id), want[id])
+					e.check("computes_of."+id, e.computesOf(id), want[id])
 				}
 			case "dependents_of":
 				var want map[string]int
@@ -1184,6 +1384,21 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 					}
 				}
 				e.check("cleanup_order", normalizeList(cleaned), normalizeList(proj))
+			case "merges_of":
+				var want map[string]int
+				e.unmarshal(key, raw, &want)
+				for _, id := range sortedIntKeys(want) {
+					got, ok := e.merges[id]
+					if !ok {
+						e.t.Fatalf("%s#%d: merges_of names %q, which is not a merge cell",
+							e.fixture, i, id)
+					}
+					e.check("merges_of."+id, got, want[id])
+				}
+			case "drain_exhausted":
+				var want bool
+				e.unmarshal(key, raw, &want)
+				e.check("drain_exhausted", e.m.drainExhausted(), want)
 			case "scope_owned_count":
 				var want map[string]int
 				e.unmarshal(key, raw, &want)
@@ -1196,6 +1411,48 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 					"reactiveGraphUnsupported with the key named", e.fixture, i, key)
 			}
 		}
+	}
+}
+
+// computesOf resolves the corpus's `computes_of` for any node kind.
+//
+// On a derived node it is the compute counter. On an EFFECT — merge_folds's
+// `watch` is an observer of the accumulator — the "computes" are its runs,
+// already recorded in the run log by name. Counting there needs no extra
+// counter and no change to how effects are built.
+func (e *replayEngine) computesOf(id string) int {
+	if n, ok := e.nodes[id]; ok && n.kind == kindEffect {
+		runs := 0
+		for _, name := range e.m.runLog() {
+			if name == id {
+				runs++
+			}
+		}
+		return runs
+	}
+	return e.m.computesOf(id)
+}
+
+// cellNode resolves an id that must name a cell (a plain one or a merge cell —
+// they are the same node kind, differing only in policy).
+func (e *replayEngine) cellNode(id string) nodeRef {
+	n := e.node(id)
+	if n.kind != kindCell {
+		e.t.Fatalf("%s#%d: %q is not a cell", e.fixture, e.step, id)
+	}
+	return n
+}
+
+// requireSumPolicy rejects a merge policy this runner does not fold under.
+//
+// The corpus only ever merges under Sum. Accepting an unknown name and folding
+// under Sum anyway would satisfy every count assertion while landing on the
+// wrong value for a non-Sum algebra — so it fails loudly instead. An absent
+// policy is Sum by the same fixtures' construction.
+func (e *replayEngine) requireSumPolicy(op reactiveGraphOp) {
+	if op.Policy != "" && op.Policy != "Sum" {
+		e.t.Fatalf("%s#%d: unsupported merge policy %q — this runner folds under Sum only",
+			e.fixture, e.step, op.Policy)
 	}
 }
 

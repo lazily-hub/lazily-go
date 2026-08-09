@@ -289,6 +289,140 @@ type Context struct {
 	// aliases a stale node — Go's pointer identity means there is no recycled-id
 	// hazard here (cf. the generation-tagged SlotId the arena bindings need).
 	eagerBy map[reactiveNode]*Effect
+
+	// drainBudget bounds effect runs within one drain. See DefaultDrainBudget.
+	drainBudget int
+	// drainRuns attributes runs within the CURRENT drain, so an exhaustion
+	// report can name the effects that were cycling. Cleared by the outer
+	// drain only, so a terminating flush pays no per-iteration scan.
+	drainRuns map[*Effect]int
+	// drainOrder is drainRuns' keys in first-run order. Go randomises map
+	// iteration, so without it two identical divergent runs would produce
+	// differently-ordered reports among equal run counts.
+	drainOrder []*Effect
+	// lastDrainExhaustion is set when a drain exhausts drainBudget. An
+	// observable rather than a panic: exhaustion is a report, not a crash.
+	lastDrainExhaustion *DrainExhaustion
+}
+
+// DefaultDrainBudget bounds effect runs within one drain.
+//
+// An effect that writes into its own dependency cone reschedules itself
+// indefinitely. The write calls Set -> flushEffects, which hits the re-entrancy
+// guard and returns immediately, appending the newly scheduled effect to the
+// worklist for the *outer* drain to pick up. The loop therefore runs flat, at
+// constant stack depth: a recursion-depth bound could never fire, and the
+// drain's only other exit is an empty worklist. Without this budget a divergent
+// loop hangs the process instead of failing. That is the contract pinned by
+// conformance/reactive-graph/feedback_drain_bound_reports_exhaustion.json.
+//
+// The value is deliberately large enough that a long-but-terminating cascade
+// does not trip it. DrainExhaustion.TopEffects is what separates divergence from
+// depth, so the budget does not have to be tuned to tell them apart.
+const DefaultDrainBudget = 100_000
+
+// EffectRuns attributes runs to one effect inside an exhausted drain.
+//
+// Effect is the handle that ran: a *Effect on the sync plane, a
+// *AsyncEffectHandle on the async one. Go has no sum type for "an effect on
+// whichever plane", and the two planes are separate schedulers with separate
+// handle types, so this is `any` rather than a lossier common interface — the
+// caller already knows which context it asked.
+type EffectRuns struct {
+	Effect any
+	Runs   int
+}
+
+// topEffectRuns selects the busiest entries, descending, ties left in first-run
+// order. `order` is walked instead of the map because Go randomises map
+// iteration, and a report that reorders between two identical divergent runs is
+// not a report. core.go imports nothing, so the selection is written out rather
+// than reaching for `sort`.
+func topEffectRuns[E comparable](order []E, runs map[E]int) []EffectRuns {
+	const topN = 8
+	top := make([]EffectRuns, 0, topN)
+	for _, e := range order {
+		n := runs[e]
+		if n == 0 {
+			continue
+		}
+		at := len(top)
+		for at > 0 && top[at-1].Runs < n {
+			at--
+		}
+		if at >= topN {
+			continue
+		}
+		if len(top) < topN {
+			top = append(top, EffectRuns{})
+		}
+		copy(top[at+1:], top[at:])
+		top[at] = EffectRuns{Effect: e, Runs: n}
+	}
+	return top
+}
+
+// DrainExhaustion reports that an effect drain was cut short by its budget.
+//
+// Exhaustion is NOT convergence, and this deliberately does not pretend
+// otherwise: it reports that the drain stopped early, plus the effects that ran
+// most, so a diverging loop names itself instead of surfacing as "the drain hit
+// a counter". The worklist is left as-is.
+type DrainExhaustion struct {
+	// Iterations is the number of effect runs performed before the budget was
+	// reached.
+	Iterations int
+	// Budget is the bound that was hit.
+	Budget int
+	// TopEffects are the busiest effects in the exhausted drain, descending by
+	// run count. A scheduler-closed loop puts its own effect at the head with a
+	// count proportional to Iterations, which is what separates it from a wide
+	// cascade where runs are spread thin.
+	TopEffects []EffectRuns
+}
+
+// DrainBudget reports the current effect-drain iteration budget.
+func (c *Context) DrainBudget() int {
+	if c.drainBudget <= 0 {
+		return DefaultDrainBudget
+	}
+	return c.drainBudget
+}
+
+// SetDrainBudget overrides the effect-drain iteration budget.
+//
+// Lowering it is how a test exercises divergence without waiting for
+// DefaultDrainBudget iterations. Raising it is a blunt instrument: if a
+// legitimate cascade trips the default, read DrainExhaustion.TopEffects first to
+// confirm the runs are spread across many effects rather than concentrated in
+// one that is feeding itself.
+func (c *Context) SetDrainBudget(n int) {
+	if n < 1 {
+		n = 1
+	}
+	c.drainBudget = n
+}
+
+// LastDrainExhaustion returns the most recent drain exhaustion, or nil when
+// every drain so far ended with an empty worklist.
+//
+// This is the observable a conformance fixture asserts on: a divergent
+// scheduler-closed loop must surface here rather than hang.
+func (c *Context) LastDrainExhaustion() *DrainExhaustion { return c.lastDrainExhaustion }
+
+// ClearDrainExhaustion forgets the recorded exhaustion so a later drain can be
+// observed independently.
+func (c *Context) ClearDrainExhaustion() { c.lastDrainExhaustion = nil }
+
+// drainExhaustionReport names the busiest effects in the current drain. Capped
+// at a handful of entries: the head is what identifies a scheduler-closed loop,
+// and a full histogram over a wide graph would bury it.
+func (c *Context) drainExhaustionReport(iterations int) *DrainExhaustion {
+	return &DrainExhaustion{
+		Iterations: iterations,
+		Budget:     c.DrainBudget(),
+		TopEffects: topEffectRuns(c.drainOrder, c.drainRuns),
+	}
 }
 
 // NewContext creates an empty reactive scope.
@@ -522,6 +656,12 @@ func (c *Context) flushEffects() {
 	}
 	c.flushingEffects = true
 	defer func() { c.flushingEffects = false }()
+	// Only the outer drain owns the attribution buffer; clearing here rather
+	// than per iteration keeps a terminating flush free of scans.
+	clear(c.drainRuns)
+	c.drainOrder = c.drainOrder[:0]
+	budget := c.DrainBudget()
+	iterations := 0
 	for c.effectsHead < len(c.pendingEffects) {
 		e := c.pendingEffects[c.effectsHead]
 		c.pendingEffects[c.effectsHead] = nil
@@ -537,6 +677,24 @@ func (c *Context) flushEffects() {
 			// upstream suppressed the change), so there is nothing new to
 			// react to.
 			continue
+		}
+		// The bound is on ITERATIONS, not re-entry depth. A nested flushEffects
+		// returns at the guard above, so depth is pinned at 1 by construction
+		// and a depth bound would never fire — a scheduler-closed feedback loop
+		// is a flat unbounded drain. Counted before the run, so the effect that
+		// trips the budget does not also execute.
+		if c.drainRuns == nil {
+			c.drainRuns = map[*Effect]int{}
+		}
+		c.drainRuns[e]++
+		iterations++
+		if iterations >= budget {
+			// Stop and report. The worklist is deliberately left as-is:
+			// exhaustion is not convergence, and discarding the pending work
+			// would make a cut-short drain indistinguishable from a finished
+			// one on the next observation.
+			c.lastDrainExhaustion = c.drainExhaustionReport(iterations)
+			return
 		}
 		e.rerun()
 	}
