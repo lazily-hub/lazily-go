@@ -102,6 +102,55 @@ func matSortedKeys(m map[string]int) []string {
 	return ks
 }
 
+// assertDefaultModeBuild proves the materialization corpus's `default_mode_eager`
+// clause behaviourally (#lzdefaultmodeuniform).
+//
+// This binding has no mode flag to read back: eager vs lazy IS which call the
+// caller makes — MaterializeAll pre-mint versus GetOrInsertWith mint-on-access.
+// So the fixture's value SELECTS the build, and the fact asserted is the one the
+// clause names: *a map built the way the fixture names its default is fully
+// materialized at build time.* The mode string is dispatched on ONLY to choose
+// the construction; the count it must reach is the same either way.
+//
+// The shape this replaces was `if f.Expected.DefaultMode != "eager" { Fatalf }`.
+// Deserializing the key and comparing it to a hardcoded literal asserts only that
+// the fixture equals itself (#lzconsumednotasserted): it reddens when the corpus
+// flips, but a binding whose eager build materialized NOTHING passed it. Mirrors
+// lazily-rs materialization_conformance.rs, lazily-cpp
+// test_materialization_replay.hpp, and lazily-cs MaterializationConformanceTests.
+//
+// eager/lazy each build the map that way and return its present-at-build count.
+// declared is the fixture's full declared key count — the count a FULLY
+// materialized build has. The comparison is against `declared` in BOTH arms,
+// because that is the clause: the default build is fully materialized. Only the
+// eager build satisfies it, so flipping the fixture to "lazy" reddens (the lazy
+// build defers its computed entries) and an eager build that materializes nothing
+// reddens too. An unknown mode string is a hard failure, never a skip.
+func assertDefaultModeBuild(
+	t *testing.T,
+	label string,
+	mode string,
+	eager func() int,
+	lazy func() int,
+	declared int,
+) {
+	t.Helper()
+	var present int
+	switch mode {
+	case "eager":
+		present = eager()
+	case "lazy":
+		present = lazy()
+	default:
+		t.Fatalf("%s: unknown default_mode %q (want \"eager\" or \"lazy\")", label, mode)
+	}
+	if present != declared {
+		t.Fatalf("%s: a map built the fixture's default way (%s) has %d of %d declared entries "+
+			"present at build — default_mode_eager says the default build is fully materialized",
+			label, mode, present, declared)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Fixture replays
 // ---------------------------------------------------------------------------
@@ -112,9 +161,6 @@ func matSortedKeys(m map[string]int) []string {
 // every key up front, lazy only the read keys.
 func TestMaterializationObservationalTransparency(t *testing.T) {
 	f := loadMatFixture(t, "observational_transparency.json")
-	if f.Expected.DefaultMode != "eager" {
-		t.Fatalf("default strategy must be eager (fixture=%q)", f.Expected.DefaultMode)
-	}
 	if !isComputedMapModel(f.Model) {
 		t.Fatalf("fixture model = %q, want ComputedMap (or the deprecated SlotMap spelling)", f.Model)
 	}
@@ -122,6 +168,19 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 	factory := func(k string) int { return f.Spec.Val[k] }
 
 	ctx := NewContext()
+
+	// default_mode_eager, asserted behaviourally: build the map the way the
+	// fixture names its default, then require that build to hold every declared
+	// key at build time.
+	assertDefaultModeBuild(t, "observational_transparency.json", f.Expected.DefaultMode,
+		func() int {
+			m := NewComputedMap[string, int](ctx)
+			m.MaterializeAll(ctx, keys, factory)
+			return m.PresentCount()
+		},
+		func() int { return NewComputedMap[string, int](ctx).PresentCount() },
+		len(keys))
+
 	eager := NewComputedMap[string, int](ctx)
 	eager.MaterializeAll(ctx, keys, factory)
 	if eager.EntryKind() != EntryKindComputed {
@@ -162,8 +221,22 @@ func TestMaterializationObservationalTransparency(t *testing.T) {
 func TestMaterializationDeferralNotDeallocation(t *testing.T) {
 	f := loadMatFixture(t, "deferral_not_deallocation.json")
 	factory := func(k string) int { return f.Spec.Val[k] }
+	keys := matSortedKeys(f.Spec.Val)
 
 	ctx := NewContext()
+
+	// This fixture also carries expected.default_mode. It was decoded and never
+	// asserted here at all, which is the same #lzconsumednotasserted hole as the
+	// literal comparison, just quieter.
+	assertDefaultModeBuild(t, "deferral_not_deallocation.json", f.Expected.DefaultMode,
+		func() int {
+			m := NewComputedMap[string, int](ctx)
+			m.MaterializeAll(ctx, keys, factory)
+			return m.PresentCount()
+		},
+		func() int { return NewComputedMap[string, int](ctx).PresentCount() },
+		len(keys))
+
 	lazy := NewComputedMap[string, int](ctx)
 
 	var sizes []int
@@ -241,9 +314,6 @@ func TestFixtureEntryKindSpellingsAreForwardCompatible(t *testing.T) {
 // SourceMap over the cell entries and a ComputedMap over the slot entries.
 func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	f := loadMatFixture(t, "entry_kind_orthogonal_to_mode.json")
-	if f.Expected.DefaultMode != "eager" {
-		t.Fatalf("default strategy must be eager, got %q", f.Expected.DefaultMode)
-	}
 
 	var cellKeys, slotKeys []string
 	vals := make(map[string]int)
@@ -263,6 +333,33 @@ func TestMaterializationEntryKindOrthogonalToStrategy(t *testing.T) {
 	factory := func(k string) int { return vals[k] }
 
 	ctx := NewContext()
+	// Map iteration above filled these in random order; sort so every build below
+	// pre-mints in the same sequence run to run.
+	sort.Strings(cellKeys)
+	sort.Strings(slotKeys)
+
+	// default_mode_eager on the MIXED-kind fixture: the same dispatch with the
+	// entry-kind split. Source entries are present at build under EVERY strategy,
+	// computed entries only under eager — so only the eager build holds all four
+	// declared entries, and the required count stays the full four either way.
+	// Asserting "under lazy, only the two sources are present" instead would be a
+	// tautology: the library does behave that way, so a corpus flipped to "lazy"
+	// would stay GREEN and the probe would prove nothing.
+	buildMixed := func(materializeComputed bool) int {
+		cells := NewSourceMap[string, int](ctx)
+		for _, k := range cellKeys {
+			cells.Entry(k, vals[k])
+		}
+		slots := NewComputedMap[string, int](ctx)
+		if materializeComputed {
+			slots.MaterializeAll(ctx, slotKeys, factory)
+		}
+		return cells.PresentCount() + slots.PresentCount()
+	}
+	assertDefaultModeBuild(t, "entry_kind_orthogonal_to_mode.json", f.Expected.DefaultMode,
+		func() int { return buildMixed(true) },
+		func() int { return buildMixed(false) },
+		len(f.Spec.Entries))
 
 	// Eager build: cells pre-minted (always materialized) + slots pre-minted.
 	eagerCells := NewSourceMap[string, int](ctx)

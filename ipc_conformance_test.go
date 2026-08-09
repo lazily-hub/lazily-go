@@ -33,11 +33,19 @@ import (
 // fixtureCandidateDirs lists, in priority order, the directories that may hold
 // the conformance fixtures. A local committed copy wins (parity with lazily-kt
 // / lazily-dart), then the sibling lazily-spec submodule (dev convenience).
+// LAZILY_SPEC_CONFORMANCE_DIR overrides the corpus root and wins over both, so a
+// corpus-perturbation run can point this runner at a scratch copy instead of
+// editing the shared lazily-spec checkout that every binding reads. It is the
+// same variable scripts/check-conformance-coverage.sh honours.
 func fixtureCandidateDirs() []string {
-	return []string{
+	dirs := make([]string, 0, 3)
+	if override := os.Getenv("LAZILY_SPEC_CONFORMANCE_DIR"); override != "" {
+		dirs = append(dirs, override)
+	}
+	return append(dirs,
 		"conformance",
 		filepath.Join("..", "lazily-spec", "conformance"),
-	}
+	)
 }
 
 // findFixture returns the on-disk path of a named fixture, or "" if the spec
