@@ -52,7 +52,7 @@ type stdlibStep struct {
 
 func loadStdlibFixture(t *testing.T, name string) stdlibFixture {
 	t.Helper()
-	path := filepath.Join("..", "lazily-spec", "conformance", "stdlib", name)
+	path := specPath("stdlib", name)
 	raw, err := specReadFile(path)
 	if err != nil {
 		t.Skipf("lazily-spec fixture absent: %s", path)

@@ -29,7 +29,7 @@ var statechartFixtureNames = []string{
 
 // statechartSpecDir resolves the sibling lazily-spec conformance directory.
 func statechartSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "statechart")
+	return specPath("statechart")
 }
 
 type statechartStep struct {

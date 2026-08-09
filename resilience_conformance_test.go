@@ -12,7 +12,7 @@ import (
 // spec tree is absent the subtest is skipped.
 
 func resilienceSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "resilience")
+	return specPath("resilience")
 }
 
 type resilienceOp struct {

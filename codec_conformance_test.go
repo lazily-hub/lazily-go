@@ -28,7 +28,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
@@ -41,17 +40,14 @@ const (
 
 func loadCodecFixture(t *testing.T, name string) (map[string]any, bool) {
 	t.Helper()
-	candidates := []string{
-		filepath.Join("..", "lazily-spec", "conformance", name),
-		// The vendored mirror, in the same place loadConformanceFixture reads
-		// it from, so the offline fallback is a real one rather than a copy
-		// nothing loads. TestVendoredFixturesMatchCanonical holds it
-		// byte-identical to the canonical corpus whenever the sibling is present.
-		filepath.Join("test", "conformance", name),
-		filepath.Join("conformance", name),
-		filepath.Join("testdata", "conformance", name),
-	}
-	for _, path := range candidates {
+	// The candidate list — canonical root first, then the vendored offline
+	// mirror — comes from the shared corpus seam, so an explicit
+	// LAZILY_SPEC_CONFORMANCE_DIR collapses it to the redirected root alone and
+	// the mirror cannot silently rescue a perturbed corpus
+	// (#lzoverrideallrunners). TestVendoredFixturesMatchCanonical holds the
+	// mirror byte-identical to the canonical corpus whenever the sibling is
+	// present.
+	for _, path := range specCandidatePaths(name) {
 		data, err := specReadFile(path)
 		if err != nil {
 			continue
@@ -60,7 +56,7 @@ func loadCodecFixture(t *testing.T, name string) (map[string]any, bool) {
 		mustStrictJSON(t, name, data, &fixture)
 		return fixture, true
 	}
-	t.Skipf("codec fixture not found: %s", name)
+	specFixtureMissing(t, "codec fixture not found: %s", name)
 	return nil, false
 }
 

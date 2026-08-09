@@ -31,21 +31,11 @@ import (
 // ---------------------------------------------------------------------------
 
 // fixtureCandidateDirs lists, in priority order, the directories that may hold
-// the conformance fixtures. A local committed copy wins (parity with lazily-kt
-// / lazily-dart), then the sibling lazily-spec submodule (dev convenience).
-// LAZILY_SPEC_CONFORMANCE_DIR overrides the corpus root and wins over both, so a
-// corpus-perturbation run can point this runner at a scratch copy instead of
-// editing the shared lazily-spec checkout that every binding reads. It is the
-// same variable scripts/check-conformance-coverage.sh honours.
+// the conformance fixtures. Resolution now lives in the shared corpus seam
+// (conformance_corpus_test.go) so that every runner in this package honours
+// LAZILY_SPEC_CONFORMANCE_DIR, not just this one (#lzoverrideallrunners).
 func fixtureCandidateDirs() []string {
-	dirs := make([]string, 0, 3)
-	if override := os.Getenv("LAZILY_SPEC_CONFORMANCE_DIR"); override != "" {
-		dirs = append(dirs, override)
-	}
-	return append(dirs,
-		"conformance",
-		filepath.Join("..", "lazily-spec", "conformance"),
-	)
+	return specCorpusRoots()
 }
 
 // findFixture returns the on-disk path of a named fixture, or "" if the spec
@@ -76,7 +66,7 @@ func loadFixture(t *testing.T, name string) conformanceFixture {
 	t.Helper()
 	p := findFixture(name)
 	if p == "" {
-		t.Skipf("conformance fixture %q not found (lazily-spec checkout absent)", name)
+		specFixtureMissing(t, "conformance fixture %q not found (spec checkout absent)", name)
 	}
 	raw, err := specReadFile(p)
 	if err != nil {
@@ -420,7 +410,7 @@ func agentDocSchemaVersion(t *testing.T) string {
 	t.Helper()
 	for _, dir := range []string{
 		filepath.Join("schemas"),
-		filepath.Join("..", "lazily-spec", "schemas"),
+		specSchemasDir(),
 	} {
 		raw, err := specReadFile(filepath.Join(dir, "agent-doc-state.json"))
 		if err != nil {
@@ -500,7 +490,7 @@ func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
 	var tags []string
 	for _, dir := range []string{
 		filepath.Join("schemas"),
-		filepath.Join("..", "lazily-spec", "schemas"),
+		specSchemasDir(),
 	} {
 		p := filepath.Join(dir, "agent-doc-state.json")
 		raw, err := specReadFile(p)

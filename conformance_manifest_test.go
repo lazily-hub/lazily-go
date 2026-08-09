@@ -1,8 +1,8 @@
 package lazily
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -31,7 +31,8 @@ var (
 	manifestOpened = map[string]struct{}{}
 )
 
-const conformanceMarker = "lazily-spec" + string(filepath.Separator) + "conformance" + string(filepath.Separator)
+// The corpus root, the candidate order, and the attribution rule all live in
+// conformance_corpus_test.go (#lzoverrideallrunners).
 
 // specReadFile is os.ReadFile plus a record of any conformance fixture it opens.
 func specReadFile(name string) ([]byte, error) {
@@ -43,16 +44,16 @@ func specReadFile(name string) ([]byte, error) {
 	return os.ReadFile(name)
 }
 
+// recordConformanceRead attributes a read RELATIVE TO THE RESOLVED CORPUS ROOT,
+// not by scanning for a hardcoded path substring. Under
+// LAZILY_SPEC_CONFORMANCE_DIR the corpus lives somewhere that contains no such
+// substring, and the old rule silently recorded nothing — turning a
+// corpus-perturbation probe into a vacuous green (#lzoverrideallrunners).
 func recordConformanceRead(name string) {
-	abs, err := filepath.Abs(name)
-	if err != nil {
-		abs = name
-	}
-	idx := strings.Index(abs, conformanceMarker)
-	if idx == -1 {
+	id, ok := specCanonicalRelative(name)
+	if !ok {
 		return
 	}
-	id := filepath.ToSlash(abs[idx+len(conformanceMarker):])
 	manifestMu.Lock()
 	manifestOpened[id] = struct{}{}
 	manifestMu.Unlock()
@@ -92,6 +93,14 @@ func flushConformanceManifest() {
 // finish. A deferred flush in each test would race and truncate; a single exit
 // hook is the only place the union is complete.
 func TestMain(m *testing.M) {
+	// An explicitly-set-but-unusable corpus override is a broken run. Refuse it
+	// here, before a single runner gets the chance to skip its way to green or
+	// to fall back to the corpus the operator redirected away from
+	// (#lzoverrideallrunners).
+	if err := specCorpusError(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	flushConformanceManifest()
 	flushConformanceScenarios()

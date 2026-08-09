@@ -53,7 +53,7 @@ type crdtTreeFixture struct {
 
 func loadCrdtTreeFixture(t *testing.T) crdtTreeFixture {
 	t.Helper()
-	raw, err := specReadFile("../lazily-spec/conformance/crdt-tree/algebra.json")
+	raw, err := specReadFile(specPath("crdt-tree", "algebra.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -15,7 +15,7 @@ import (
 // warmth).
 
 func membershipSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "membership")
+	return specPath("membership")
 }
 
 type membershipOp struct {

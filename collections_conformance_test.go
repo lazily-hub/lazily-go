@@ -16,7 +16,6 @@ package lazily
 
 import (
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -26,12 +25,7 @@ import (
 
 func loadCollectionFixture(t *testing.T, name string) (map[string]any, bool) {
 	t.Helper()
-	candidates := []string{
-		filepath.Join("..", "lazily-spec", "conformance", "collections", name),
-		filepath.Join("conformance", "collections", name),
-		filepath.Join("testdata", "conformance", "collections", name),
-	}
-	for _, path := range candidates {
+	for _, path := range specCandidatePaths("collections", name) {
 		data, err := specReadFile(path)
 		if err != nil {
 			continue
@@ -40,7 +34,7 @@ func loadCollectionFixture(t *testing.T, name string) (map[string]any, bool) {
 		mustStrictJSON(t, name, data, &fixture)
 		return fixture, true
 	}
-	t.Skipf("collections fixture not found: %s", name)
+	specFixtureMissing(t, "collections fixture not found: %s", name)
 	return nil, false
 }
 

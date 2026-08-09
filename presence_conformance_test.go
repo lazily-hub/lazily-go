@@ -16,7 +16,7 @@ import (
 // sibling tree is reachable the test runs; otherwise it skips.
 
 func presenceSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "presence")
+	return specPath("presence")
 }
 
 type presenceOp struct {

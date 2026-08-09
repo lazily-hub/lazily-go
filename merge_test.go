@@ -7,7 +7,6 @@
 package lazily
 
 import (
-	"path/filepath"
 	"testing"
 )
 
@@ -158,16 +157,14 @@ type mergeScenario struct {
 
 func TestMergeCellAlgebraFixture(t *testing.T) {
 	var data []byte
-	for _, path := range []string{
-		filepath.Join("..", "lazily-spec", "conformance", "collections", "mergecell_algebra.json"),
-	} {
+	for _, path := range specCandidatePaths("collections", "mergecell_algebra.json") {
 		if b, err := specReadFile(path); err == nil {
 			data = b
 			break
 		}
 	}
 	if data == nil {
-		t.Skip("mergecell_algebra.json fixture not present as sibling")
+		specFixtureMissing(t, "mergecell_algebra.json fixture not present in the conformance corpus")
 	}
 	var fixture struct {
 		conformanceMeta

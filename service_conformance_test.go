@@ -17,7 +17,7 @@ import (
 // absent spec tree cannot fail the build.
 
 func serviceSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "service")
+	return specPath("service")
 }
 
 type serviceOp struct {

@@ -22,7 +22,7 @@ import (
 // so drift in an absent spec tree cannot fail the build.
 
 func temporalSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "temporal")
+	return specPath("temporal")
 }
 
 // temporalStep is one replay step shared by every temporal fixture. Absent

@@ -37,7 +37,9 @@ import (
 // with an explicit message, and CI guards that the checkout is present so
 // "green" and "ran nothing" cannot be confused.
 
-const reactiveGraphSpecDir = "../lazily-spec/conformance/reactive-graph"
+// reactiveGraphSpecDir resolves through the shared corpus seam so this runner
+// honours LAZILY_SPEC_CONFORMANCE_DIR like every other one (#lzoverrideallrunners).
+func reactiveGraphSpecDir() string { return specPath("reactive-graph") }
 
 // reactiveGraphReplayed is the set of fixtures this binding can execute today.
 // Asserted against the on-disk listing together with the unsupported ledger, so
@@ -1592,17 +1594,17 @@ func reactiveGraphLedgerKeys(m map[string]string) []string {
 // ---------------------------------------------------------------------------
 
 func TestReactiveGraphConformance(t *testing.T) {
-	if _, err := os.Stat(reactiveGraphSpecDir); err != nil {
+	if _, err := os.Stat(reactiveGraphSpecDir()); err != nil {
 		t.Skipf("%s not found — clone lazily-spec as a sibling checkout to replay the "+
-			"reactive-graph (#lzspecedgeindex) fixtures", reactiveGraphSpecDir)
+			"reactive-graph (#lzspecedgeindex) fixtures", reactiveGraphSpecDir())
 	}
 
 	// The fixture set on disk must be exactly what this runner accounts for,
 	// either as replayed or as explicitly unsupported. An upstream addition
 	// cannot arrive unexecuted and unreported.
-	entries, err := filepath.Glob(filepath.Join(reactiveGraphSpecDir, "*.json"))
+	entries, err := filepath.Glob(filepath.Join(reactiveGraphSpecDir(), "*.json"))
 	if err != nil {
-		t.Fatalf("listing %s: %v", reactiveGraphSpecDir, err)
+		t.Fatalf("listing %s: %v", reactiveGraphSpecDir(), err)
 	}
 	onDisk := map[string]bool{}
 	for _, e := range entries {
@@ -1627,7 +1629,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 	for f := range accounted {
 		if !onDisk[f] {
 			t.Errorf("fixture %s is accounted for but missing from %s — stale ledger entry",
-				f, reactiveGraphSpecDir)
+				f, reactiveGraphSpecDir())
 		}
 	}
 
@@ -1639,7 +1641,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 		t.Logf("UNSUPPORTED %s — %s", k, reactiveGraphModelUnsupported[k])
 		if f := k[strings.Index(k, "/")+1:]; !onDisk[f] {
 			t.Errorf("per-model ledger entry %s names a fixture missing from %s — stale entry",
-				k, reactiveGraphSpecDir)
+				k, reactiveGraphSpecDir())
 		}
 	}
 
@@ -1666,7 +1668,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 					continue
 				}
 				t.Run(name, func(t *testing.T) {
-					raw, err := specReadFile(filepath.Join(reactiveGraphSpecDir, name))
+					raw, err := specReadFile(filepath.Join(reactiveGraphSpecDir(), name))
 					if err != nil {
 						t.Fatalf("reading fixture %s: %v", name, err)
 					}
@@ -1690,7 +1692,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 						// Each scenario is replayed in its own context and the
 						// resulting observations are compared.
 						for _, sv := range typedScenarioViews(
-							filepath.Join(reactiveGraphSpecDir, name), fx.Scenarios,
+							filepath.Join(reactiveGraphSpecDir(), name), fx.Scenarios,
 							func(s reactiveGraphScenario) (string, string) { return s.Id, s.Name }) {
 							// Rung 4 books on the payload handoff
 							// (#lzscenariobodyskip), so a scenario this loop

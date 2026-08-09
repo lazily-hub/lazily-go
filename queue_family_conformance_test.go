@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"sort"
@@ -1588,11 +1587,7 @@ func TestQueueFamilyFixtureInvalidationNesting(t *testing.T) {
 	for _, name := range append(append(
 		append([]string{}, queueFixtures...), topicFixtures...), workQueueFixtures...) {
 		var data []byte
-		for _, path := range []string{
-			filepath.Join("..", "lazily-spec", "conformance", "collections", name),
-			filepath.Join("conformance", "collections", name),
-			filepath.Join("testdata", "conformance", "collections", name),
-		} {
+		for _, path := range specCandidatePaths("collections", name) {
 			var err error
 			data, err = os.ReadFile(path)
 			if err == nil {

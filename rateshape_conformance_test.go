@@ -13,7 +13,7 @@ import (
 // analogue of rs `ctx.is_set`).
 
 func rateshapeSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "rateshape")
+	return specPath("rateshape")
 }
 
 var rateshapeFixtureNames = []string{

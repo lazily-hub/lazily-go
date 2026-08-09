@@ -28,7 +28,7 @@ import (
 
 // signalingSpecDir resolves the sibling lazily-spec conformance directory.
 func signalingSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "signaling")
+	return specPath("signaling")
 }
 
 // loadSignalingFixture reads and JSON-decodes a fixture, returning ok=false when

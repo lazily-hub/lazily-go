@@ -722,16 +722,17 @@ func recordProseVerified(fixture string) {
 // recordProseOpened books a fixture read. Unlike the conformance manifest it
 // also counts the VENDORED mirror, because a fixture replayed from the offline
 // fallback owes its paragraphs a discharge exactly as the canonical one does.
+// It attributes against every RESOLVED corpus root (#lzoverrideallrunners), so
+// a run redirected by LAZILY_SPEC_CONFORMANCE_DIR keys prose the same way as one
+// against the canonical checkout instead of quietly booking nothing.
 func recordProseOpened(path string) {
-	slashed := filepath.ToSlash(path)
-	for _, marker := range []string{"lazily-spec/conformance/", "test/conformance/", "testdata/conformance/"} {
-		if idx := strings.Index(slashed, marker); idx != -1 {
-			proseVerifiedMu.Lock()
-			proseOpened[slashed[idx+len(marker):]] = true
-			proseVerifiedMu.Unlock()
-			return
-		}
+	id, ok := specAnyRootRelative(path)
+	if !ok {
+		return
 	}
+	proseVerifiedMu.Lock()
+	proseOpened[id] = true
+	proseVerifiedMu.Unlock()
 }
 
 // proseDeclaringFixtures walks the conformance corpus and returns every fixture
@@ -739,12 +740,7 @@ func recordProseOpened(path string) {
 // runners name them (`codec/nodeid_exact_range.json`).
 func proseDeclaringFixtures() []string {
 	seen := map[string]bool{}
-	for _, root := range []string{
-		filepath.Join("..", "lazily-spec", "conformance"),
-		filepath.Join("test", "conformance"),
-		"conformance",
-		filepath.Join("testdata", "conformance"),
-	} {
+	for _, root := range specCorpusRoots() {
 		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil || entry.IsDir() || !strings.HasSuffix(path, ".json") {
 				return nil //nolint:nilerr // a corpus root that is absent contributes nothing

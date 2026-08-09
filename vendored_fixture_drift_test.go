@@ -29,7 +29,7 @@ import (
 // are load-bearing and least verifiable.
 func TestVendoredFixturesMatchCanonical(t *testing.T) {
 	const vendoredRoot = "test/conformance"
-	canonicalRoot := filepath.Join("..", "lazily-spec", "conformance")
+	canonicalRoot := specDir()
 
 	if _, err := os.Stat(canonicalRoot); os.IsNotExist(err) {
 		t.Skipf("canonical corpus absent at %s — cannot compare; clone the lazily-spec sibling", canonicalRoot)
@@ -68,8 +68,8 @@ func TestVendoredFixturesMatchCanonical(t *testing.T) {
 		if !bytes.Equal(vendoredBytes, canonicalBytes) {
 			t.Errorf("vendored fixture %s DRIFTED from the canonical corpus "+
 				"(%d bytes vendored vs %d canonical). The offline fallback would replay "+
-				"the stale copy. Re-sync it from ../lazily-spec/conformance/ or delete it.",
-				rel, len(vendoredBytes), len(canonicalBytes))
+				"the stale copy. Re-sync it from %s or delete it.",
+				rel, len(vendoredBytes), len(canonicalBytes), canonicalRoot)
 		}
 		compared++
 		return nil

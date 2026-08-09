@@ -50,7 +50,7 @@ type outboxStoreFixture struct {
 
 func loadOutboxStoreFixture(t *testing.T) outboxStoreFixture {
 	t.Helper()
-	raw, err := specReadFile("../lazily-spec/conformance/reliable-sync/outbox_store_protocol.json")
+	raw, err := specReadFile(specPath("reliable-sync", "outbox_store_protocol.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

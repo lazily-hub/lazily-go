@@ -20,7 +20,6 @@ package lazily
 import (
 	"encoding/json"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"testing"
 )
@@ -32,22 +31,12 @@ import (
 func loadLosslessTreeFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	rel := filepath.Join("lossless-tree", name)
-	candidates := []string{
-		filepath.Join("..", "lazily-spec", "conformance", rel),
-		filepath.Join("test", "conformance", rel),
-	}
-	if _, file, _, ok := runtime.Caller(0); ok {
-		dir := filepath.Dir(file)
-		candidates = append(candidates,
-			filepath.Join(dir, "..", "lazily-spec", "conformance", rel),
-		)
-	}
-	for _, path := range candidates {
+	for _, path := range specCandidatePaths(rel) {
 		if b, err := specReadFile(path); err == nil {
 			return b
 		}
 	}
-	t.Skipf("conformance fixture not found: %s", rel)
+	specFixtureMissing(t, "conformance fixture not found: %s", rel)
 	return nil
 }
 

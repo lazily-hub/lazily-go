@@ -17,7 +17,7 @@ import (
 )
 
 func coordSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "coordination")
+	return specPath("coordination")
 }
 
 type coordOp struct {

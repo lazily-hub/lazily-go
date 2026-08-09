@@ -14,7 +14,7 @@ import (
 // invalidation (`expected.invalidates.output`).
 
 func windowingSpecDir() string {
-	return filepath.Join("..", "lazily-spec", "conformance", "windowing")
+	return specPath("windowing")
 }
 
 type windowingStep struct {

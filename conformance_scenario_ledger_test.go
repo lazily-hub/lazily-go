@@ -131,11 +131,12 @@ func scenarioField(scenario map[string]any, key string) string {
 
 // conformanceFixtureID normalizes a fixture reference to the corpus-relative,
 // slash-separated id the manifest records.
+// It resolves against the RESOLVED corpus root, so the ledger keys the same way
+// under LAZILY_SPEC_CONFORMANCE_DIR as it does against the canonical checkout
+// (#lzoverrideallrunners).
 func conformanceFixtureID(name string) string {
-	if abs, err := filepath.Abs(name); err == nil {
-		if idx := strings.Index(abs, conformanceMarker); idx != -1 {
-			return filepath.ToSlash(abs[idx+len(conformanceMarker):])
-		}
+	if id, ok := specCanonicalRelative(name); ok {
+		return id
 	}
 	return filepath.ToSlash(strings.TrimPrefix(name, "./"))
 }
@@ -220,9 +221,9 @@ func TestConformanceFixtureIDNormalization(t *testing.T) {
 	if got := conformanceFixtureID(want); got != want {
 		t.Fatalf("corpus-relative id rewritten: %q", got)
 	}
-	got := conformanceFixtureID(filepath.Join("..", "lazily-spec", "conformance", "reliable-sync", "liveness_orset_lww.json"))
+	got := conformanceFixtureID(specPath("reliable-sync", "liveness_orset_lww.json"))
 	if got != want {
-		t.Fatalf("sibling path not normalized: %q", got)
+		t.Fatalf("corpus-root path not normalized: %q", got)
 	}
 }
 

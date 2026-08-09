@@ -8,7 +8,7 @@ import (
 )
 
 func TestDependencyAvailabilityIsExactKeyReactive(t *testing.T) {
-	raw, err := specReadFile("../lazily-spec/conformance/collections/dependency_reactive_availability.json")
+	raw, err := specReadFile(specPath("collections", "dependency_reactive_availability.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

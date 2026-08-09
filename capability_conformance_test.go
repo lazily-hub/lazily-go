@@ -2,7 +2,6 @@ package lazily
 
 import (
 	"encoding/json"
-	"path/filepath"
 	"testing"
 )
 
@@ -36,7 +35,7 @@ func decodeFixtureHandshake(t *testing.T, label string, block map[string]any) Ca
 }
 
 func TestCapabilityHandshakeConformance(t *testing.T) {
-	path := filepath.Join("..", "lazily-spec", "conformance", capabilityHandshakeFixture)
+	path := specPath(capabilityHandshakeFixture)
 	data, err := specReadFile(path)
 	if err != nil {
 		t.Fatalf("canonical capability-handshake fixture not found: %v", err)
