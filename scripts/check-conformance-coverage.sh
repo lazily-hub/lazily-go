@@ -343,7 +343,24 @@ fi
 # distinguish "nothing is wrong" from "nothing was examined", so assert the
 # magnitude explicitly before reporting OK. Do not lower these to fix a red run —
 # a drop here means the corpus or the recorder shrank, which IS the finding.
-MIN_FIXTURES="${MIN_FIXTURES:-131}"
+#
+# These floors track WHAT CI ACTUALLY REPLAYS, exactly — no margin, no slack.
+# Pinned 2026-08-09 from CI run 31340402500 against the published corpus:
+# 141/150 fixtures OPENED, 147/147 scenarios REPLAYED. A local `make test` on the
+# same commit reproduced both numbers.
+#
+# Do NOT raise a floor "by however many replays this change adds" and leave the
+# old margin in place. That convention is the bug: the floor only ever trails
+# further behind, and every unit of slack is that many replays that could stop
+# running with this guard still green. When a change genuinely adds replays,
+# re-read the coverage lines from a COMPLETED CI run — which clones the published
+# corpus (#lzspecpushbeforebindings) rather than trusting a working tree — and set
+# the floor to that total.
+#
+# An upstream fixture that lands without a Go runner raises `total` and leaves
+# `covered` alone, so it does not trip MIN_FIXTURES; only a replay that STOPS
+# running does.
+MIN_FIXTURES="${MIN_FIXTURES:-141}"
 if [ "$total" -eq 0 ]; then
   echo "ERROR: the corpus at $SPEC_DIR listed ZERO fixtures." >&2
   echo "       Every check above is vacuously green over an empty population." >&2
@@ -362,7 +379,10 @@ echo "conformance coverage OK: $covered/$total canonical fixtures OPENED by the 
 # The same floor for rung 4. Its loop walks the scenarios of OPENED fixtures, so
 # zero opened fixtures means zero scenarios, which means zero unreplayed
 # scenarios — OK reported having compared nothing.
-MIN_SCENARIOS="${MIN_SCENARIOS:-137}"
+#
+# Same rule as MIN_FIXTURES above: this equals the scenario total a completed CI
+# run reports, exactly. Pinned 2026-08-09 from run 31340402500 at 147/147.
+MIN_SCENARIOS="${MIN_SCENARIOS:-147}"
 if [ "$SCENARIO_TOTAL" -eq 0 ]; then
   echo "ERROR: ZERO scenarios were found across the opened fixtures." >&2
   echo "       The rung above is vacuously green over an empty population." >&2
