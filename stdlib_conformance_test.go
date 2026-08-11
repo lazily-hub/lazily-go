@@ -314,6 +314,10 @@ func assertStdlibExpectation(t *testing.T, id string, step int, expectedRaw json
 	if len(expectedKeys) == 0 {
 		t.Fatalf("%s step %d: expect is empty — the step asserts nothing", id, step)
 	}
+	// Rung 0: the whole-object DeepEqual below IS a key-set check, in both
+	// directions, so this block is bound — declare it or the unbound-block guard
+	// reports every stdlib step as dead (#lzunboundblockguard).
+	bindBlockBytes("expect", expectedRaw)
 	var expected any
 	decoder := json.NewDecoder(bytes.NewReader(expectedRaw))
 	decoder.UseNumber()

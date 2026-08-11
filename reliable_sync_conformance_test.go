@@ -89,6 +89,9 @@ func (fx rsFixture) assertRootDelta(t *testing.T, name string) {
 		t.Fatalf("%s: the root wire frame decoded to %T, want a Delta", name, message)
 	}
 	d := decoded.Value
+	// Rung 0: the dispatch below fatals on a key it cannot evaluate, so the block
+	// is bound (#lzunboundblockguard).
+	bindBlockFields("assertions", fx.Assertions)
 	for key, raw := range fx.Assertions {
 		var actual any
 		switch key {

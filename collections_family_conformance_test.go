@@ -330,7 +330,8 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		num, _ := v.(float64)
 		flavor.insert(key, int(num))
 	}
-	assertKeyWith(t, initial, "order", func(want any) {
+	assertKeyWith(t, initial, "order", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		if got := flavor.keysUntracked(); !sameOrder(stringSlice(want), got) {
 			t.Fatalf("%s: seeded order = %v, want %v", flavor.name(), got, stringSlice(want))
 		}
@@ -432,7 +433,8 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		}
 
 		gotOrder := flavor.keysUntracked()
-		assertKeyWith(t, expected, "order", func(want any) {
+		assertKeyWith(t, expected, "order", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			if wantOrder := stringSlice(want); !sameOrder(wantOrder, gotOrder) {
 				t.Fatalf("%s: order = %v, want %v", where(i), gotOrder, wantOrder)
 			}
@@ -445,7 +447,8 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		// pure reorder leaves the second unchanged, which is the whole point of
 		// the separate reader class asserted below.
 		if _, stated := expected["membership"]; stated {
-			assertKeyWith(t, expected, "membership", func(want any) {
+			assertKeyWith(t, expected, "membership", func(wantValue fixtureValue) {
+				want := wantValue.Value()
 				wantSet := stringSlice(want)
 				if len(wantSet) != len(gotOrder) {
 					t.Fatalf("%s: membership = %v, want set %v", where(i), gotOrder, wantSet)
@@ -487,7 +490,8 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 		for _, key := range gotOrder {
 			survivors[key] = true
 		}
-		assertKeyWith(t, invalidatesBlock, "value", func(want any) {
+		assertKeyWith(t, invalidatesBlock, "value", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			dirty := map[string]bool{}
 			for _, key := range stringSlice(want) {
 				dirty[key] = true
@@ -506,7 +510,8 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 			}
 		})
 
-		assertKeyWith(t, invalidatesBlock, "membership", func(want any) {
+		assertKeyWith(t, invalidatesBlock, "membership", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			wantMembershipDirty, _ := want.(bool)
 			if got := membership.drive() != membershipBase; got != wantMembershipDirty {
 				t.Fatalf("%s: membership reader invalidated=%v, want %v - a pure reorder must NOT invalidate set-identity readers",
@@ -514,7 +519,8 @@ func replayOrderingFixture(t *testing.T, flavor mapFlavor, name string) {
 			}
 		})
 
-		assertKeyWith(t, invalidatesBlock, "order", func(want any) {
+		assertKeyWith(t, invalidatesBlock, "order", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			wantOrderDirty, _ := want.(bool)
 			if got := order.drive() != orderBase; got != wantOrderDirty {
 				t.Fatalf("%s: order reader invalidated=%v, want %v", where(i), got, wantOrderDirty)

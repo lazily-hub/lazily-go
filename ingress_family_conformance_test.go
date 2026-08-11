@@ -963,7 +963,8 @@ func replayIngressFixture(
 					t.Fatalf("%s: invalidates.scopes.%s.%s is missing", label, key, kind)
 				}
 				scopeKey, readerKind := key, kind
-				assertKeyWith(t, want, kind, func(flag any) {
+				assertKeyWith(t, want, kind, func(wantValue fixtureValue) {
+					flag := wantValue.Value()
 					assertInvalidationDelta(t,
 						label+" invalidates.scopes."+scopeKey+"."+readerKind,
 						model.scopeProbe(scopeKey, readerKind), beforeScope[scopeKey][readerKind], flag == true)
@@ -979,7 +980,8 @@ func replayIngressFixture(
 				t.Fatalf("%s: invalidates.receipts.%s is missing", label, channel)
 			}
 			receiptChannel := channel
-			assertKeyWith(t, receiptWants, channel, func(flag any) {
+			assertKeyWith(t, receiptWants, channel, func(wantValue fixtureValue) {
+				flag := wantValue.Value()
 				assertInvalidationDelta(t,
 					label+" invalidates.receipts."+receiptChannel,
 					model.receiptProbe(receiptChannel), beforeReceipts[receiptChannel], flag == true)
@@ -1026,13 +1028,15 @@ func assertIngressScope(
 	if !ok {
 		t.Fatalf("%s: scope %s absent", label, key)
 	}
-	assertKeyWith(t, want, "lifecycle", func(raw any) {
+	assertKeyWith(t, want, "lifecycle", func(wantValue fixtureValue) {
+		raw := wantValue.Value()
 		if got, expect := view.Lifecycle, ingressLifecycleOf(t, jsStr(raw)); got != expect {
 			t.Errorf("%s: %s lifecycle=%s, want %s", label, key, got, expect)
 		}
 	})
 	assertKey(t, want, "generation", view.Generation)
-	assertKeyWith(t, want, "delivered_through", func(raw any) {
+	assertKeyWith(t, want, "delivered_through", func(wantValue fixtureValue) {
+		raw := wantValue.Value()
 		if got, expect := view.DeliveredThrough, jsOptU64(raw); got != expect {
 			t.Errorf("%s: %s watermark=%+v, want %+v", label, key, got, expect)
 		}
@@ -1040,7 +1044,8 @@ func assertIngressScope(
 	assertKey(t, want, "buffered", view.Buffered)
 	assertKey(t, want, "consecutive_errors", int(view.ConsecutiveErrors))
 
-	assertKeyWith(t, want, "window", func(raw any) {
+	assertKeyWith(t, want, "window", func(wantValue fixtureValue) {
+		raw := wantValue.Value()
 		value, present := model.value(key)
 		got := Opt[uint64]{Present: present, Value: value}
 		if !present {
@@ -1050,7 +1055,8 @@ func assertIngressScope(
 			t.Errorf("%s: %s window=%+v, want %+v", label, key, got, expect)
 		}
 	})
-	assertKeyWith(t, want, "readiness", func(raw any) {
+	assertKeyWith(t, want, "readiness", func(wantValue fixtureValue) {
+		raw := wantValue.Value()
 		if got, expect := model.readiness(key), ingressReadinessOf(t, jsStr(raw)); got != expect {
 			t.Errorf("%s: %s readiness=%s, want %s", label, key, got, expect)
 		}

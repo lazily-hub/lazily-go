@@ -160,7 +160,8 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 	for _, k := range jsStrList(initial["order"]) {
 		m.Set(k, jsInt(initialValues[k]))
 	}
-	assertKeyWith(t, initial, "order", func(want any) {
+	assertKeyWith(t, initial, "order", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		if got := m.Keys(ctx); !reflect.DeepEqual(got, jsStrList(want)) {
 			t.Fatalf("%s: seeded order = %v, want %v", name, got, jsStrList(want))
 		}
@@ -212,7 +213,8 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 		for _, k := range m.Keys(ctx) {
 			survivors[k] = true
 		}
-		assertKeyWith(t, invalidates, "value", func(want any) {
+		assertKeyWith(t, invalidates, "value", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			expectedValueInval := map[string]bool{}
 			for _, k := range jsStrList(want) {
 				expectedValueInval[k] = true
@@ -230,14 +232,16 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 			}
 		})
 
-		assertKeyWith(t, invalidates, "membership", func(want any) {
+		assertKeyWith(t, invalidates, "membership", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			_, memWarm := membershipReader.Peek()
 			if memWarm == (want == true) {
 				t.Errorf("%s step %d %s: membership warm=%v, wantInvalidated=%v",
 					name, i, op["type"], memWarm, want)
 			}
 		})
-		assertKeyWith(t, invalidates, "order", func(want any) {
+		assertKeyWith(t, invalidates, "order", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			_, ordWarm := orderReader.Peek()
 			if ordWarm == (want == true) {
 				t.Errorf("%s step %d %s: order warm=%v, wantInvalidated=%v",
@@ -247,7 +251,8 @@ func runSourceMapStepsFixture(t *testing.T, name string) {
 
 		// Resulting state.
 		assertKey(t, expected, "order", m.Keys(ctx))
-		assertKeyWith(t, expected, "membership", func(want any) {
+		assertKeyWith(t, expected, "membership", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			if !sameStringSet(m.Keys(ctx), jsStrList(want)) {
 				t.Errorf("%s step %d %s: membership = %v, want set %v", name, i, op["type"], m.Keys(ctx), jsStrList(want))
 			}
@@ -323,7 +328,8 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 	resultOrder := jsStrList(expected["result_order"])
 
 	ops := ReconcileDiff(prior, target)
-	assertKeyWith(t, expected, "ops", func(wantOps any) {
+	assertKeyWith(t, expected, "ops", func(wantValue fixtureValue) {
+		wantOps := wantValue.Value()
 		assertReconcileOps(t, name, ops, jsList(wantOps), resultOrder)
 	})
 
@@ -375,7 +381,8 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 	// `move` op. That is the spec's definition of an LIS member, derived from
 	// keys the fixture already declares rather than restated here, and it is what
 	// makes `["b"]` a failure instead of a smaller obligation.
-	assertKeyWith(t, expected, "stable_keys_not_invalidated", func(want any) {
+	assertKeyWith(t, expected, "stable_keys_not_invalidated", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		declared := jsStrList(want)
 		for _, k := range declared {
 			if _, warm := readers[k].Peek(); !warm {
@@ -707,7 +714,8 @@ func checkSeqCrdtExpect(t *testing.T, replicas map[string]*SeqCrdt[string, any],
 		})
 	}
 	if _, stated := expect["orders_equal"]; stated {
-		assertKeyWith(t, expect, "orders_equal", func(want any) {
+		assertKeyWith(t, expect, "orders_equal", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			for _, rawPair := range jsList(want) {
 				pair := jsList(rawPair)
 				a, b := jsStr(pair[0]), jsStr(pair[1])
@@ -718,7 +726,8 @@ func checkSeqCrdtExpect(t *testing.T, replicas map[string]*SeqCrdt[string, any],
 		})
 	}
 	if _, stated := expect["contains_all"]; stated {
-		assertKeyWith(t, expect, "contains_all", func(want any) {
+		assertKeyWith(t, expect, "contains_all", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			for _, id := range jsList(want) {
 				if !replicas[primary].Contains(jsStr(id)) {
 					t.Errorf("contains_all: missing %v", id)
@@ -875,7 +884,8 @@ func checkTextCrdtExpect(t *testing.T, replicas map[string]*TextCrdt, expect map
 		assertKey(t, expect, "len", replicas["a"].Len())
 	}
 	if _, stated := expect["texts_equal"]; stated {
-		assertKeyWith(t, expect, "texts_equal", func(want any) {
+		assertKeyWith(t, expect, "texts_equal", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			for _, rawPair := range jsList(want) {
 				pair := jsList(rawPair)
 				a, b := jsStr(pair[0]), jsStr(pair[1])
@@ -886,7 +896,8 @@ func checkTextCrdtExpect(t *testing.T, replicas map[string]*TextCrdt, expect map
 		})
 	}
 	if _, stated := expect["a_starts_with"]; stated {
-		assertKeyWith(t, expect, "a_starts_with", func(want any) {
+		assertKeyWith(t, expect, "a_starts_with", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			prefix := jsStr(want)
 			if txt := replicas["a"].Text(); !strings.HasPrefix(txt, prefix) {
 				t.Errorf("a_starts_with %q: text = %q", prefix, txt)
@@ -894,7 +905,8 @@ func checkTextCrdtExpect(t *testing.T, replicas map[string]*TextCrdt, expect map
 		})
 	}
 	if _, stated := expect["a_ends_with"]; stated {
-		assertKeyWith(t, expect, "a_ends_with", func(want any) {
+		assertKeyWith(t, expect, "a_ends_with", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			suffix := jsStr(want)
 			if txt := replicas["a"].Text(); !strings.HasSuffix(txt, suffix) {
 				t.Errorf("a_ends_with %q: text = %q", suffix, txt)
@@ -1002,7 +1014,8 @@ func checkTextCrdtDeltaExpect(t *testing.T, replicas map[string]*TextCrdt, expec
 		return
 	}
 	if _, stated := expect["texts_equal"]; stated {
-		assertKeyWith(t, expect, "texts_equal", func(want any) {
+		assertKeyWith(t, expect, "texts_equal", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			for _, rawPair := range jsList(want) {
 				pair := jsList(rawPair)
 				a, b := jsStr(pair[0]), jsStr(pair[1])
@@ -1084,7 +1097,8 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 					keys[i] = BlockKeyOf(parseBlock(jsMap(b)))
 				}
 				if _, stated := expect["key_equal"]; stated {
-					assertKeyWith(t, expect, "key_equal", func(want any) {
+					assertKeyWith(t, expect, "key_equal", func(wantValue fixtureValue) {
+						want := wantValue.Value()
 						for _, rawPair := range jsList(want) {
 							pair := jsList(rawPair)
 							i, j := jsInt(pair[0]), jsInt(pair[1])
@@ -1095,7 +1109,8 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 					})
 				}
 				if _, stated := expect["key_not_equal"]; stated {
-					assertKeyWith(t, expect, "key_not_equal", func(want any) {
+					assertKeyWith(t, expect, "key_not_equal", func(wantValue fixtureValue) {
+						want := wantValue.Value()
 						for _, rawPair := range jsList(want) {
 							pair := jsList(rawPair)
 							i, j := jsInt(pair[0]), jsInt(pair[1])
@@ -1118,7 +1133,8 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 			}
 
 			if _, stated := expect["matches"]; stated {
-				assertKeyWith(t, expect, "matches", func(want any) {
+				assertKeyWith(t, expect, "matches", func(wantValue fixtureValue) {
+					want := wantValue.Value()
 					alignment := Align(oldBlocks, newBlocks)
 					for i, m := range jsList(want) {
 						if got := alignment.NewMatches[i].String(); got != jsStr(m) {
@@ -1128,7 +1144,8 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 				})
 			}
 			if _, stated := expect["removed"]; stated {
-				assertKeyWith(t, expect, "removed", func(want any) {
+				assertKeyWith(t, expect, "removed", func(wantValue fixtureValue) {
+					want := wantValue.Value()
 					alignment := Align(oldBlocks, newBlocks)
 					wantRemoved := []int{}
 					for _, r := range jsList(want) {
@@ -1140,7 +1157,8 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 				})
 			}
 			if _, stated := expect["similarity_min"]; stated {
-				assertKeyWith(t, expect, "similarity_min", func(want any) {
+				assertKeyWith(t, expect, "similarity_min", func(wantValue fixtureValue) {
+					want := wantValue.Value()
 					alignment := Align(oldBlocks, newBlocks)
 					edited := 0
 					for _, m := range alignment.NewMatches {
@@ -1158,7 +1176,8 @@ func TestCollectionsStableIdAlignment(t *testing.T) {
 				})
 			}
 			if _, stated := expect["new_key_equals_old_key"]; stated {
-				assertKeyWith(t, expect, "new_key_equals_old_key", func(want any) {
+				assertKeyWith(t, expect, "new_key_equals_old_key", func(wantValue fixtureValue) {
+					want := wantValue.Value()
 					keys := AssignStableKeys(oldBlocks, newBlocks)
 					oldKeys := make([]string, len(oldBlocks))
 					for i, b := range oldBlocks {

@@ -351,7 +351,14 @@ func TestCodecJSONFramesRoundTrip(t *testing.T) {
 				t.Fatalf("decode re-encoded frame: %v", err)
 			}
 
-			block := jsMap(scenario["expect"])
+			// The `json` half read this block with hand-picked keys while its
+			// `msgpack` sibling twelve lines down bound it through consumeKeys —
+			// so an `expect` key added to a JSON scenario upstream was read by
+			// nothing, asserted by nothing, and reported by nothing. Found by the
+			// unbound-block guard (#lzunboundblockguard); the two halves now bind
+			// the same way.
+			block := consumeKeys(t, codecJSONFixture+" "+sv.Label()+" expect",
+				jsMap(scenario["expect"]), codecJSONExpectKeys...)
 			assertKey(t, block, "round_trip_equals_source", reflect.DeepEqual(roundTripped, source))
 			assertCodecValues(t, block, roundTripped)
 		})
@@ -480,6 +487,26 @@ func assertCodecEncoding(t *testing.T, block map[string]any, variant string, enc
 		// scenario as covered.
 		t.Fatalf("unknown frame variant %q", variant)
 	}
+}
+
+// codecJSONExpectKeys is codecMsgpackExpectKeys for the `json` half: the same
+// union MINUS the four `encoded_*` keys, which assert the shape of the MessagePack
+// bytes and have no JSON counterpart. Listing them here instead would license a
+// key this half cannot assert; leaving the list open — which is what reading the
+// block with hand-picked keys did — licensed every key at once.
+var codecJSONExpectKeys = []string{
+	// every scenario
+	"round_trip_equals_source",
+	// Snapshot
+	"epoch", "node_count", "edge_count", "root_count",
+	"first_node_type_tag", "first_node_payload", "opaque_node_id", "opaque_node_state_tag",
+	"first_edge", "roots",
+	// Delta
+	"base_epoch", "op_count", "op_variants", "first_op_payload", "node_add_type_tag",
+	// CrdtSync
+	"frontier_len", "frontier_first_peer", "frontier_first_stamp_wall_time",
+	"first_op_node", "first_op_key_absent", "second_op_node", "second_op_key",
+	"second_op_stamp_peer",
 }
 
 // codecMsgpackExpectKeys is the union of the `expect` keys the three scenarios

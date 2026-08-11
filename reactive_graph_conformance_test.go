@@ -1307,6 +1307,11 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 		// Assertion keys are evaluated in sorted order, matching lazily-rs's
 		// BTreeMap iteration, so both bindings agree on when a degree is
 		// sampled relative to a read that re-registers the edge it counts.
+		// Rung 0: this loop is the fail-closed shape — every key of `expect` is
+		// dispatched here and its `default` arm fatals on one it does not
+		// implement — so the block IS bound, and the unbound-block guard has to
+		// be told or it reports this replay as dead (#lzunboundblockguard).
+		bindBlockFields("expect", step.Expect)
 		for _, key := range sortedRawKeys(step.Expect) {
 			raw := step.Expect[key]
 			switch key {

@@ -257,6 +257,10 @@ func snapshotAssertionActual(t *testing.T, snap Snapshot, key string) (any, bool
 
 func assertSnapshotAssertions(t *testing.T, snap Snapshot, assertions map[string]json.RawMessage) {
 	t.Helper()
+	// Rung 0: this is the fail-closed shape the strict-JSON header names — every
+	// key is dispatched and an unknown one fatals — so the block is bound and the
+	// unbound-block guard must be told (#lzunboundblockguard).
+	bindBlockFields("assertions", assertions)
 	for key, expected := range assertions {
 		actual, ok := snapshotAssertionActual(t, snap, key)
 		if !ok {
@@ -268,6 +272,9 @@ func assertSnapshotAssertions(t *testing.T, snap Snapshot, assertions map[string
 
 func assertDeltaAssertions(t *testing.T, d Delta, assertions map[string]json.RawMessage) {
 	t.Helper()
+	// Rung 0: fail-closed key dispatch (the `default` arm below fatals), so the
+	// block is bound (#lzunboundblockguard).
+	bindBlockFields("assertions", assertions)
 	for key, expected := range assertions {
 		var actual any
 		switch key {
@@ -589,6 +596,8 @@ func TestIPCConformanceAgentDocSnapshot(t *testing.T) {
 		actualTags[n.TypeTag] = true
 	}
 
+	// Rung 0: fail-closed key dispatch (#lzunboundblockguard).
+	bindBlockFields("assertions", f.Assertions)
 	for key, expected := range f.Assertions {
 		switch key {
 		case "epoch":
@@ -648,6 +657,8 @@ func TestIPCConformanceAgentDocDelta(t *testing.T) {
 		}
 	}
 
+	// Rung 0: fail-closed key dispatch (#lzunboundblockguard).
+	bindBlockFields("assertions", f.Assertions)
 	for key, expected := range f.Assertions {
 		switch key {
 		case "base_epoch":

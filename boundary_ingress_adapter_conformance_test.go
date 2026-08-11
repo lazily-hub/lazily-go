@@ -341,6 +341,12 @@ func TestBoundaryIngressAdapterCanonicalContract(t *testing.T) {
 			model.apply(jsMap(step["op"]))
 			actual := model.projection()
 			expected := jsMap(step["expected"])
+			// Rung 0: the loop below asserts EVERY key the block carries against
+			// the projection, so the key set is bound by construction — a key
+			// added upstream reaches assertKey rather than being skipped. Declare
+			// it, or the unbound-block guard reports this replay as dead
+			// (#lzunboundblockguard).
+			bindBlock("expected", expected)
 			for key := range expected {
 				assertKey(t, expected, key, actual[key])
 			}

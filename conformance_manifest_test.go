@@ -41,6 +41,9 @@ func specReadFile(name string) ([]byte, error) {
 	// an opened fixture whose block declares `prose` owes a verification whether
 	// it came from the canonical corpus or the vendored mirror.
 	recordProseOpened(name)
+	// Rung 0 books the PATH as well as the id: the unbound-block guard re-reads
+	// the same bytes the runner saw (#lzunboundblockguard).
+	recordOpenedFixture(name)
 	return os.ReadFile(name)
 }
 
@@ -109,6 +112,12 @@ func TestMain(m *testing.M) {
 	// after m.Run is the union of verifications complete, and no ordering
 	// between test functions has to be assumed.
 	if !checkProseVerificationCoverage() && code == 0 {
+		code = 1
+	}
+	// Rung 0 of the assertion ladder (#lzunboundblockguard). Here for the same
+	// reason: only after m.Run is the union of BINDINGS complete, so only here
+	// can a block be judged to have reached no runner at all.
+	if !checkUnboundAssertionBlocks() && code == 0 {
 		code = 1
 	}
 	os.Exit(code)

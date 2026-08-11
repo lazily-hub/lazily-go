@@ -156,7 +156,8 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		// `outcome` is the corpus-wide statement of what a decoder may do. Go
 		// reads it as a constraint on the fixture rather than on itself: an
 		// `exact` scenario the binding cannot represent would be a fixture bug.
-		assertKeyWith(t, expect, "outcome", func(want any) {
+		assertKeyWith(t, expect, "outcome", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			t.Helper()
 			outcome := want.(string)
 			outcomesReplayed[outcome] = true
@@ -237,7 +238,8 @@ func TestNodeIdExactRangeConformance(t *testing.T) {
 		t.Fatalf("accepted %d scenarios, want 4: lazily-go's exact range is [0, 2^63)", accepted)
 	}
 
-	assertKeyWith(t, assertions, "codecs", func(want any) {
+	assertKeyWith(t, assertions, "codecs", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		assertSameStringSet(t, "codecs", stringSlice(want), codecsReplayed)
 	})

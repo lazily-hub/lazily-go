@@ -98,6 +98,9 @@ func strictJSON(label string, data []byte, v any) error {
 	if err := dec.Decode(new(json.RawMessage)); err != io.EOF {
 		return fmt.Errorf("%s: trailing content after the JSON document", label)
 	}
+	// Rung 0: a decode that reached here took responsibility for the key set of
+	// every block its destination models as a struct (#lzunboundblockguard).
+	recordStrictBind(data, v)
 	return nil
 }
 
@@ -262,6 +265,11 @@ func trackAssertions(t *testing.T, label string, obj map[string]any, declared []
 	assertionBlocksMu.Lock()
 	assertionBlocks[id] = append(assertionBlocks[id], blk)
 	assertionBlocksMu.Unlock()
+	// Rung 0: this block has now been BOUND — a runner holds it and owes a
+	// disposition for its keys. The digest is what lets the corpus walk tell a
+	// block that reached a runner from one that reached nobody, since no handle
+	// survives the decode (#lzunboundblockguard).
+	recordBoundBlock(anyBlockName, obj)
 	// Rung 5 opens here, on the FIRST tracked block of the replay, so that a key
 	// asserted before the `prose`-carrying block is consumed still lands in the
 	// fixture-scoped asserted set a discharge is checked against.
@@ -410,7 +418,8 @@ func proseDeclaration(obj map[string]any) []string {
 // comparison written against a hardcoded literal never satisfies the guard.
 func assertKey(t *testing.T, block map[string]any, key string, actual any) {
 	t.Helper()
-	assertKeyWith(t, block, key, func(want any) {
+	assertKeyWith(t, block, key, func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		if !jsonComparisonIsExact(want, actual) {
 			t.Errorf("%s: %s = %v cannot be compared exactly against the fixture's %v: both sides are "+
@@ -437,19 +446,88 @@ func assertKey(t *testing.T, block map[string]any, key string, actual any) {
 	})
 }
 
+// ---------------------------------------------------------------------------
+// Rung 3b: a callback that never TAKES the fixture's value (#lzunboundblockguard)
+// ---------------------------------------------------------------------------
+//
+// assertKeyWith used to mark a key asserted when the callback RETURNED. Nothing
+// in that sequence involves the fixture's value: a callback that ignores its
+// argument entirely, or that returns down an arm reached before it ever looks at
+// it, satisfied every guard in this file. Two live examples were found in this
+// binding by hand, not by any guard:
+//
+//   - `stable_keys_not_invalidated` was asserted against a no-op reconcile, so
+//     any non-empty list passed — including one naming a key not in the map;
+//   - `unresolved_after_frame_indices` was a membership filter over frame
+//     indices, and its fixture value `[7]` names no frame, so the filter ran
+//     zero times and asserted nothing.
+//
+// Both were "asserted" as far as the tracker could tell. So the value is no
+// longer handed over as a bare `any` — it is handed over behind an accessor, and
+// the key is marked asserted only if the callback actually CALLED it.
+//
+// Why a recording wrapper rather than requiring the callback to RETURN what it
+// compared: both cost the same edit at every call site, and the return form is
+// satisfied by `return want` — a callback can hand back the value it was given
+// without comparing it to anything, which is the exact shape being closed. The
+// wrapper is also a RUNTIME record, per invocation, so a callback that reads the
+// value on one arm and returns early on another fails on the run that takes the
+// early arm; a source-level check of "is the parameter referenced" passes such a
+// callback forever.
+//
+// What this does NOT prove, stated rather than implied: that the value reached a
+// COMPARISON. `wantValue.Value()` followed by nothing is a read, and reads as
+// asserted here. Closing that gap needs the comparison itself to run through the
+// tracker, which is what assertKey, assertKeySet and assertKeyEach already do —
+// this rung's job is to remove the case where the fixture's value never leaves
+// the tracker at all.
+
+// fixtureValue is the fixture's own value, handed to an assertKeyWith callback
+// through an accessor that records the take.
+type fixtureValue struct {
+	value any
+	taken *bool
+}
+
+// Value returns the fixture's value for the key under assertion and records that
+// the callback took it.
+func (f fixtureValue) Value() any {
+	if f.taken != nil {
+		*f.taken = true
+	}
+	return f.value
+}
+
+// fixtureValueWasTaken runs check against want and reports whether it took the
+// value. Split out from assertKeyWith so the decision can be mutation-checked
+// without a t whose Errorf would redden the caller.
+func fixtureValueWasTaken(want any, check func(want fixtureValue)) bool {
+	taken := false
+	check(fixtureValue{value: want, taken: &taken})
+	return taken
+}
+
 // assertKeyWith hands the fixture's own value to the caller's check and marks
-// key asserted only after that check returns. It exists for comparisons that
+// key asserted only if that check TOOK the value. It exists for comparisons that
 // are not equality — a tolerance, a set containment, an invariant derived from
 // the value. The point is that the fixture's value reaches the comparison, not
 // that the comparison is `==`.
-func assertKeyWith(t *testing.T, block map[string]any, key string, check func(want any)) {
+func assertKeyWith(t *testing.T, block map[string]any, key string, check func(want fixtureValue)) {
 	t.Helper()
 	want, present := block[key]
 	if !present {
 		t.Errorf("%s: key %q is asserted but the fixture block does not carry it", assertionLabel(block), key)
 		return
 	}
-	check(want)
+	if !fixtureValueWasTaken(want, check) {
+		// NOT marked asserted: the rung-3 tracker then reports the key as read
+		// but never compared, which is exactly what happened.
+		t.Errorf("%s: the assertKeyWith callback for key %q returned without taking the fixture's value — "+
+			"the key would be marked asserted because the callback RETURNED, not because anything was compared. "+
+			"Call wantValue.Value() and compare against it, or excuse the key with a reason (#lzunboundblockguard)",
+			assertionLabel(block), key)
+		return
+	}
 	if blk := lookupAssertionBlock(block); blk != nil {
 		blk.markAsserted(key)
 	}
@@ -556,7 +634,8 @@ func assertKeySub(t *testing.T, block map[string]any, key string, consumed ...st
 		blk.markKeySetChecked(key)
 	}
 	var child map[string]any
-	assertKeyWith(t, block, key, func(want any) {
+	assertKeyWith(t, block, key, func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		if want == nil {
 			return
@@ -589,7 +668,8 @@ func assertKeySet(t *testing.T, block map[string]any, key string, observed map[s
 	if blk := lookupAssertionBlock(block); blk != nil {
 		blk.markKeySetChecked(key)
 	}
-	assertKeyWith(t, block, key, func(want any) {
+	assertKeyWith(t, block, key, func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		sub, ok := want.(map[string]any)
 		if !ok {
@@ -622,7 +702,8 @@ func assertKeyEach(t *testing.T, block map[string]any, key string, check func(na
 	if blk := lookupAssertionBlock(block); blk != nil {
 		blk.markKeySetChecked(key)
 	}
-	assertKeyWith(t, block, key, func(want any) {
+	assertKeyWith(t, block, key, func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		sub, ok := want.(map[string]any)
 		if !ok {
@@ -1053,7 +1134,8 @@ func (l *proseLedger) consumeDeclarations(t *testing.T) {
 	blocks := append([]proseBlock{}, l.blocks...)
 	l.mu.Unlock()
 	for _, block := range blocks {
-		assertKeyWith(t, block.obj, "prose", func(want any) {
+		assertKeyWith(t, block.obj, "prose", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			names, ok := want.([]any)
 			if !ok {
 				t.Errorf("%s: prose declaration must be an array, got %T", assertionLabel(block.obj), want)
@@ -1913,5 +1995,34 @@ func TestAssertKeyMarksAndCompares(t *testing.T) {
 	}
 	if !jsonValueEqual(map[string]any{"a": float64(1)}, map[string]int{"a": 1}) {
 		t.Fatal("jsonValueEqual rejected an equivalent map")
+	}
+}
+
+// TestAssertKeyWithRequiresTheCallbackToTakeTheValue is the mutation check for
+// rung 3b. Without it, the marking rule is "the callback returned", which is
+// what let two assertions in this binding pass while comparing nothing
+// (#lzunboundblockguard).
+func TestAssertKeyWithRequiresTheCallbackToTakeTheValue(t *testing.T) {
+	if fixtureValueWasTaken(float64(7), func(wantValue fixtureValue) {}) {
+		t.Fatal("a callback that ignored its argument was recorded as having taken the fixture's value")
+	}
+	// The early-return arm: the value is taken on one path and not on the one
+	// actually run. A source-level check of "is the parameter referenced" passes
+	// this callback; the runtime record does not.
+	skip := true
+	if fixtureValueWasTaken(float64(7), func(wantValue fixtureValue) {
+		if skip {
+			return
+		}
+		_ = wantValue.Value()
+	}) {
+		t.Fatal("a callback that returned before taking the value was recorded as having taken it")
+	}
+	got := any(nil)
+	if !fixtureValueWasTaken(float64(7), func(wantValue fixtureValue) { got = wantValue.Value() }) {
+		t.Fatal("a callback that took the value was not recorded")
+	}
+	if got != float64(7) {
+		t.Fatalf("the callback received %v, want the fixture's own 7", got)
 	}
 }

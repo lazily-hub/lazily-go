@@ -364,15 +364,18 @@ func TestNodeKeyNullLeniencyConformance(t *testing.T) {
 	// dispatched on — `key_forms` off the raw wire, not off the fixture's own
 	// labels. Compared to literals these were green over a runner that decodes
 	// nothing.
-	assertKeyWith(t, assertions, "codecs", func(want any) {
+	assertKeyWith(t, assertions, "codecs", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		assertSameStringSet(t, "codecs", stringSlice(want), codecsReplayed)
 	})
-	assertKeyWith(t, assertions, "fields", func(want any) {
+	assertKeyWith(t, assertions, "fields", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		assertSameStringSet(t, "fields", stringSlice(want), fieldsReplayed)
 	})
-	assertKeyWith(t, assertions, "key_forms", func(want any) {
+	assertKeyWith(t, assertions, "key_forms", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		assertSameStringSet(t, "key_forms", stringSlice(want), formsReplayed)
 	})

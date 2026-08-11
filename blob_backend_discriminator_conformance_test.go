@@ -435,7 +435,8 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 			// entirely: the frame is still refused and the peer still never sees
 			// the error. That is the failure `rejection_is_decode_error` names, in
 			// the shape this runtime can produce it.
-			assertKeyWith(t, expect, "rejection_is_decode_error", func(want any) {
+			assertKeyWith(t, expect, "rejection_is_decode_error", func(wantValue fixtureValue) {
+				want := wantValue.Value()
 				t.Helper()
 				if want != true {
 					t.Fatalf("%s: rejection_is_decode_error is %v; this runner only "+
@@ -472,7 +473,8 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 					t.Errorf("%s: rejection_kind is %q but the fixture asks for a named "+
 						"token; only unknown_token has one", id, kind)
 				}
-				assertKeyWith(t, expect, "error_names_token", func(want any) {
+				assertKeyWith(t, expect, "error_names_token", func(wantValue fixtureValue) {
+					want := wantValue.Value()
 					t.Helper()
 					token, ok := want.(string)
 					if !ok {
@@ -569,11 +571,13 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 	// one arm cannot satisfy them.
 	assertKey(t, assertions, "codecs", sortedKeys(codecsReplayed))
 	assertKey(t, assertions, "outcomes", sortedOutcomes(outcomesReplayed))
-	assertKeyWith(t, assertions, "backend_forms", func(want any) {
+	assertKeyWith(t, assertions, "backend_forms", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		assertSameStringSet(t, "backend_forms", stringSlice(want), formsReplayed)
 	})
-	assertKeyWith(t, assertions, "rejection_kinds", func(want any) {
+	assertKeyWith(t, assertions, "rejection_kinds", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		assertSameStringSet(t, "rejection_kinds", stringSlice(want), kindsReplayed)
 	})
@@ -586,7 +590,8 @@ func TestBlobBackendDiscriminatorConformance(t *testing.T) {
 	// are different facts. `decodedBackends` is filled from REAL decodes, so a
 	// backend that no accept scenario produces reddens here even though the
 	// scenario count is untouched.
-	assertKeyWith(t, assertions, "backends", func(want any) {
+	assertKeyWith(t, assertions, "backends", func(wantValue fixtureValue) {
+		want := wantValue.Value()
 		t.Helper()
 		declared := stringSlice(want)
 		library := []string{string(BackendShm), string(BackendArrow), string(BackendInProcess)}

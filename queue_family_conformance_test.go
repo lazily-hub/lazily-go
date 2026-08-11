@@ -178,7 +178,8 @@ func queueFamilyConfigOf(t *testing.T, name string, fixture map[string]any) queu
 		"visibility_timeout", "max_deliveries")
 	for _, key := range []string{"pending", "in_flight", "dead_letters"} {
 		initialKey := key
-		assertKeyWith(t, initial, initialKey, func(raw any) {
+		assertKeyWith(t, initial, initialKey, func(wantValue fixtureValue) {
+			raw := wantValue.Value()
 			if len(jsList(raw)) != 0 {
 				t.Fatalf("%s: non-empty initial.%s is not supported by this runner", name, initialKey)
 			}
@@ -529,14 +530,16 @@ func assertQueueFixtureState(
 ) {
 	t.Helper()
 	if _, stated := expected["elements"]; stated {
-		assertKeyWith(t, expected, "elements", func(want any) {
+		assertKeyWith(t, expected, "elements", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			if got := model.elements(); !reflect.DeepEqual(got, jsStrList(want)) {
 				t.Errorf("%s elements=%v, want %v", label, got, jsStrList(want))
 			}
 		})
 	}
 	if _, stated := expected["head"]; stated {
-		assertKeyWith(t, expected, "head", func(want any) {
+		assertKeyWith(t, expected, "head", func(wantValue fixtureValue) {
+			want := wantValue.Value()
 			got, exists := model.head()
 			if want == nil {
 				if exists {
@@ -633,7 +636,8 @@ func replayQueueFixture(t *testing.T, name string, model queueFixtureModel) int 
 				t.Fatalf("%s: no reader for invalidates.%s", label, kind)
 			}
 			readerKind := kind
-			assertKeyWith(t, invalidates, kind, func(want any) {
+			assertKeyWith(t, invalidates, kind, func(wantValue fixtureValue) {
+				want := wantValue.Value()
 				assertInvalidationDelta(t, label+" invalidates."+readerKind,
 					reader, before[readerKind], want == true)
 			})
@@ -856,7 +860,8 @@ func assertTopicState(
 ) {
 	t.Helper()
 	assertKey(t, expected, "base_offset", model.baseOffset())
-	assertKeyWith(t, expected, "elements", func(rawElements any) {
+	assertKeyWith(t, expected, "elements", func(wantValue fixtureValue) {
+		rawElements := wantValue.Value()
 		if got, want := model.elements(), jsStrList(rawElements); !slices.Equal(got, want) {
 			t.Errorf("%s elements=%v, want %v", label, got, want)
 		}
@@ -1192,7 +1197,8 @@ func assertWorkQueueState(
 	expected map[string]any,
 ) {
 	t.Helper()
-	assertKeyWith(t, expected, "pending", func(rawPending any) {
+	assertKeyWith(t, expected, "pending", func(wantValue fixtureValue) {
+		rawPending := wantValue.Value()
 		wantPending := jsList(rawPending)
 		gotPending := model.pending()
 		if len(gotPending) != len(wantPending) {
@@ -1209,7 +1215,8 @@ func assertWorkQueueState(
 			}
 		}
 	})
-	assertKeyWith(t, expected, "in_flight", func(rawFlight any) {
+	assertKeyWith(t, expected, "in_flight", func(wantValue fixtureValue) {
+		rawFlight := wantValue.Value()
 		wantFlight := jsList(rawFlight)
 		gotFlight := model.inFlight()
 		if len(gotFlight) != len(wantFlight) {
@@ -1229,7 +1236,8 @@ func assertWorkQueueState(
 			}
 		}
 	})
-	assertKeyWith(t, expected, "dead_letters", func(rawDead any) {
+	assertKeyWith(t, expected, "dead_letters", func(wantValue fixtureValue) {
+		rawDead := wantValue.Value()
 		wantDead := jsList(rawDead)
 		gotDead := model.deadLetters()
 		if len(gotDead) != len(wantDead) {
@@ -1255,7 +1263,8 @@ func assertWorkQueueState(
 	gotReads := model.reads()
 	for i, kind := range kinds {
 		index := i
-		assertKeyWith(t, reads, kind, func(raw any) {
+		assertKeyWith(t, reads, kind, func(wantValue fixtureValue) {
+			raw := wantValue.Value()
 			want := 0
 			if kind == "is_empty" {
 				if raw == true {
@@ -1316,7 +1325,8 @@ func replayWorkQueueFixture(t *testing.T, name string, model workQueueFixtureMod
 		label := fmt.Sprintf("%s %s step %d", model.name(), name, i)
 		for kind, reader := range readers {
 			readerKind, readerFor := kind, reader
-			assertKeyWith(t, invalidates, kind, func(want any) {
+			assertKeyWith(t, invalidates, kind, func(wantValue fixtureValue) {
+				want := wantValue.Value()
 				assertInvalidationDelta(t, label+" invalidates."+readerKind,
 					readerFor, before[readerKind], want == true)
 			})

@@ -13,6 +13,7 @@ func TestDependencyAvailabilityIsExactKeyReactive(t *testing.T) {
 		t.Fatal(err)
 	}
 	var fixture struct {
+		conformanceMeta
 		Key   string `json:"key"`
 		Steps []struct {
 			Op struct {
@@ -28,9 +29,12 @@ func TestDependencyAvailabilityIsExactKeyReactive(t *testing.T) {
 			} `json:"expected"`
 		} `json:"steps"`
 	}
-	if err := json.Unmarshal(raw, &fixture); err != nil {
-		t.Fatal(err)
-	}
+	// A plain json.Unmarshal here DROPPED any key the struct does not model, in
+	// silence — including a key added to a step's `expected` block, which is why
+	// the unbound-block guard reported all seven of them as bound by nothing
+	// (#lzunboundblockguard). The strict decode makes an unmodelled key a hard
+	// error naming the fixture and the key.
+	mustStrictJSON(t, "collections/dependency_reactive_availability.json", raw, &fixture)
 	if len(fixture.Steps) == 0 {
 		t.Fatal("dependency fixture has no steps")
 	}
