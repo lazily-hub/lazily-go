@@ -66,7 +66,7 @@ func loadStdlibFixture(t *testing.T, name string) stdlibFixture {
 }
 
 func TestStdlibConformance(t *testing.T) {
-	for _, name := range []string{"timer.json", "timeout.json", "revision_barrier.json"} {
+	for _, name := range stdlibFixtureNames {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			fixture := loadStdlibFixture(t, name)
