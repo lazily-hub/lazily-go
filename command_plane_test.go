@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 )
 
@@ -182,6 +183,7 @@ func runMessagePassingScenario(t *testing.T, name string, frames []mpFrame, expe
 	label := name
 	projection := NewCommandProjection()
 	var rpcCommandId string
+	var observedPending []int
 	if expect.Rpc != nil {
 		rpcCommandId = expect.Rpc.CommandId
 	}
@@ -232,6 +234,14 @@ func runMessagePassingScenario(t *testing.T, name string, frames []mpFrame, expe
 					t.Errorf("%s: rpc call resolved before frame %d (at frame %d): %s", label, idx, i, call.Kind)
 				}
 			}
+			// Record every frame the call was ACTUALLY still pending after, so the
+			// declared list can be checked for completeness below. The loop above
+			// is a membership FILTER: it only ever adds obligations, so a shrunken
+			// list drops one silently and an out-of-range index like [7] matches no
+			// frame at all and asserts nothing (#lzconvergedlistlength).
+			if i < expect.Rpc.ResolvesAfterFrameIndex && call.Kind == CallStateKindPending {
+				observedPending = append(observedPending, i)
+			}
 			if i == expect.Rpc.ResolvesAfterFrameIndex {
 				if call.Kind != CallStateKindResolved {
 					t.Errorf("%s: rpc call not resolved at frame %d: %s", label, i, call.Kind)
@@ -254,6 +264,20 @@ func runMessagePassingScenario(t *testing.T, name string, frames []mpFrame, expe
 			if len(expect.ProjectionBeforeConflict) > 0 {
 				assertProjectionImage(t, projection, expect.ProjectionBeforeConflict, label+" [pre-conflict]")
 			}
+		}
+	}
+
+	// The declared unresolved-after list must name every frame the call really
+	// was pending after, not merely a subset of them.
+	if expect.Rpc != nil {
+		declared := append([]int(nil), expect.Rpc.UnresolvedAfterFrameIndices...)
+		sort.Ints(declared)
+		observed := append([]int(nil), observedPending...)
+		sort.Ints(observed)
+		if !reflect.DeepEqual(declared, observed) {
+			t.Errorf("%s: expect.rpc.unresolved_after_frame_indices = %v, but the call was pending "+
+				"after frames %v — a subset drops an obligation and an out-of-range index asserts "+
+				"nothing (#lzconvergedlistlength)", label, declared, observed)
 		}
 	}
 
