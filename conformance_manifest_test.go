@@ -104,6 +104,13 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
 		os.Exit(1)
 	}
+	// Same rule for the schemas root (#lzspecschemasoverride): an explicitly-set
+	// LAZILY_SPEC_SCHEMAS_DIR that does not resolve must not degrade to the
+	// canonical checkout or to the transcribed fallback vocabulary.
+	if err := specSchemasError(); err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: %v\n", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	flushConformanceManifest()
 	flushConformanceScenarios()

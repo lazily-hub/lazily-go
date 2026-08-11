@@ -18,6 +18,7 @@ package lazily
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -411,24 +412,22 @@ func TestIPCConformanceAssertionDrift(t *testing.T) {
 const agentDocSchemaVersionFallback = "1.1.0"
 
 // agentDocSchemaVersion reports the SemVer of the canonical vocabulary the
-// replay is validating against — from the spec checkout when present, else the
-// revision the transcribed fallback pins.
+// replay is validating against — from the resolved schemas root when present,
+// else the revision the transcribed fallback pins. The root is resolved through
+// the schemas seam so LAZILY_SPEC_SCHEMAS_DIR reaches this loader
+// (#lzspecschemasoverride).
 func agentDocSchemaVersion(t *testing.T) string {
 	t.Helper()
-	for _, dir := range []string{
-		filepath.Join("schemas"),
-		specSchemasDir(),
-	} {
-		raw, err := specReadFile(filepath.Join(dir, "agent-doc-state.json"))
-		if err != nil {
-			continue
-		}
+	const name = "agent-doc-state.json"
+	if raw, ok := specSchemaRead(t, name); ok {
 		var schema struct {
 			SchemaVersion string `json:"schema_version"`
 		}
-		if err := json.Unmarshal(raw, &schema); err == nil && schema.SchemaVersion != "" {
+		err := json.Unmarshal(raw, &schema)
+		if err == nil && schema.SchemaVersion != "" {
 			return schema.SchemaVersion
 		}
+		specSchemaUnusable(t, name, fmt.Sprintf("it declares no schema_version (parse error: %v)", err))
 	}
 	return agentDocSchemaVersionFallback
 }
@@ -481,7 +480,8 @@ func agentDocSemver(t *testing.T, what, version string) (int, int) {
 
 // agentDocTypeTagVocabulary loads the pinned eight-value type_tag vocabulary
 // from the canonical schema when the spec checkout is present, else falls back
-// to the pinned set (mirroring lazily-kt).
+// to the pinned set (mirroring lazily-kt). Resolved through the schemas seam so
+// LAZILY_SPEC_SCHEMAS_DIR reaches this loader (#lzspecschemasoverride).
 func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
 	t.Helper()
 	fallback := []string{
@@ -494,16 +494,9 @@ func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
 		"agent_doc.route",
 		"agent_doc.proof.marker",
 	}
+	const name = "agent-doc-state.json"
 	var tags []string
-	for _, dir := range []string{
-		filepath.Join("schemas"),
-		specSchemasDir(),
-	} {
-		p := filepath.Join(dir, "agent-doc-state.json")
-		raw, err := specReadFile(p)
-		if err != nil {
-			continue
-		}
+	if raw, ok := specSchemaRead(t, name); ok {
 		var schema struct {
 			Defs struct {
 				TypeTag struct {
@@ -511,9 +504,11 @@ func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
 				} `json:"TypeTag"`
 			} `json:"$defs"`
 		}
-		if err := json.Unmarshal(raw, &schema); err == nil && len(schema.Defs.TypeTag.Enum) > 0 {
+		err := json.Unmarshal(raw, &schema)
+		if err == nil && len(schema.Defs.TypeTag.Enum) > 0 {
 			tags = schema.Defs.TypeTag.Enum
-			break
+		} else {
+			specSchemaUnusable(t, name, fmt.Sprintf("it declares no $defs.TypeTag.enum (parse error: %v)", err))
 		}
 	}
 	if tags == nil {

@@ -166,12 +166,167 @@ func specCandidatePaths(parts ...string) []string {
 	return out
 }
 
-// specSchemasDir is the sibling checkout's JSON-schema directory. It is
-// deliberately NOT redirected by the corpus override: the override names a
-// conformance corpus root, and a scratch copy of that corpus carries no
-// schemas/ sibling.
+// ---------------------------------------------------------------------------
+// Schemas seam (#lzspecschemasoverride)
+// ---------------------------------------------------------------------------
+
+// The JSON-schema directory used to be a hardcoded sibling path with a comment
+// explaining that the CORPUS override deliberately does not move it — a scratch
+// copy of the conformance corpus carries no `schemas/` sibling, so folding the
+// two together would make a corpus-only scratch root silently resolve schemas
+// under a directory that has none.
+//
+// That reasoning is preserved and the conclusion is not. The two roots stay
+// INDEPENDENT — a corpus-only scratch copy still works, because
+// LAZILY_SPEC_CONFORMANCE_DIR does not touch the schemas root — but the schemas
+// root now has an override of its OWN. Before it did, a probe that needed to
+// perturb a SCHEMA (flip a `type_tag` out of the closed enum, bump the
+// vocabulary's major) had nowhere to point except the shared `../lazily-spec`
+// checkout: perturbing it dirties a repo ten bindings read and reddens all ten
+// at once, so in practice nobody perturbed a schema and "the runner really
+// validates against these bytes" stayed an untested claim.
+//
+// Contract, deliberately the same shape as the corpus seam above:
+//
+//   - Variable UNSET: the historical roots in the historical preference order
+//     (the in-repo `schemas/` directory first, then the canonical sibling).
+//   - Variable SET: it REPLACES every root. There is no in-repo fallback, so a
+//     perturbed scratch schemas copy cannot be silently rescued by a pristine
+//     one.
+//   - Variable SET but unreadable: a loud failure, never a skip and never a
+//     fallback to the canonical checkout the operator redirected AWAY from. See
+//     TestSpecSchemasOverrideIsReadable and the guard in TestMain.
+//   - Variable SET but supplying a schema the runner cannot use: also a loud
+//     failure. Both schema loaders below carry a transcribed fallback for a
+//     contributor with no sibling checkout; under an explicit override that
+//     fallback is exactly the vacuous green this seam exists to prevent, so it
+//     is suppressed.
+
+// schemasDirEnv names the schemas-root override. It is a SEPARATE variable from
+// specDirEnv on purpose: the two roots move independently.
+const schemasDirEnv = "LAZILY_SPEC_SCHEMAS_DIR"
+
+var (
+	schemasRootsOnce sync.Once
+	schemasRootsVal  []string
+	schemasOverride  string
+	schemasRootErr   error
+)
+
+func resolveSchemasRoots() {
+	schemasRootsOnce.Do(func() {
+		override := strings.TrimSpace(os.Getenv(schemasDirEnv))
+		if override != "" {
+			schemasOverride = override
+			info, err := os.Stat(override)
+			switch {
+			case err != nil:
+				schemasRootErr = fmt.Errorf(
+					"%s=%q is set but cannot be read: %w. An explicit schemas override that "+
+						"does not resolve is a broken run, not an absent checkout: falling back "+
+						"to the in-repo or sibling schemas here would validate against the "+
+						"schemas the operator explicitly redirected AWAY from, and report green "+
+						"about it",
+					schemasDirEnv, override, err)
+			case !info.IsDir():
+				schemasRootErr = fmt.Errorf(
+					"%s=%q is set but is not a directory. It must point at a JSON-schema ROOT "+
+						"(the directory holding agent-doc-state.json, defs.json, ...)",
+					schemasDirEnv, override)
+			default:
+				if _, err := os.ReadDir(override); err != nil {
+					schemasRootErr = fmt.Errorf(
+						"%s=%q is set but its contents cannot be listed: %w",
+						schemasDirEnv, override, err)
+					return
+				}
+				schemasRootsVal = []string{override}
+			}
+			return
+		}
+		schemasRootsVal = []string{
+			"schemas",
+			filepath.Join("..", specRepoSegment, "schemas"),
+		}
+	})
+}
+
+// specSchemasError reports why an explicitly-set schemas override is unusable,
+// or nil.
+func specSchemasError() error {
+	resolveSchemasRoots()
+	return schemasRootErr
+}
+
+// specSchemasOverridden reports whether the schemas root was explicitly
+// redirected.
+func specSchemasOverridden() bool {
+	resolveSchemasRoots()
+	return schemasOverride != ""
+}
+
+// specSchemasRoots returns the schema roots in preference order. An explicit
+// override collapses the list to exactly one entry.
+func specSchemasRoots() []string {
+	resolveSchemasRoots()
+	return schemasRootsVal
+}
+
+// specSchemasDir is the primary schemas root: the override when set, otherwise
+// the first historical root.
 func specSchemasDir() string {
-	return filepath.Join("..", specRepoSegment, "schemas")
+	roots := specSchemasRoots()
+	if len(roots) == 0 {
+		// Only reachable when the override is broken; every caller is already
+		// failing loudly via TestMain / TestSpecSchemasOverrideIsReadable.
+		return filepath.Join(string(filepath.Separator), "nonexistent-spec-schemas")
+	}
+	return roots[0]
+}
+
+// specSchemaCandidatePaths returns one candidate path per schemas root, in
+// preference order. Under an override there is exactly one candidate.
+func specSchemaCandidatePaths(parts ...string) []string {
+	roots := specSchemasRoots()
+	out := make([]string, 0, len(roots))
+	for _, root := range roots {
+		out = append(out, filepath.Join(append([]string{root}, parts...)...))
+	}
+	return out
+}
+
+// specSchemaRead reads a schema from the first root that supplies it. A broken
+// override fails here rather than degrading to the transcribed fallback, and an
+// override that resolves but carries no such schema is a failure too — the
+// operator asked for THOSE bytes.
+func specSchemaRead(t *testing.T, parts ...string) ([]byte, bool) {
+	t.Helper()
+	if err := specSchemasError(); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range specSchemaCandidatePaths(parts...) {
+		if raw, err := specReadFile(candidate); err == nil {
+			return raw, true
+		}
+	}
+	if specSchemasOverridden() {
+		t.Fatalf("%s=%s is set but supplies no %s; a redirected schemas root that cannot "+
+			"supply a schema the runner validates against is a failure, not a fallback",
+			schemasDirEnv, schemasOverride, filepath.Join(parts...))
+	}
+	return nil, false
+}
+
+// specSchemaUnusable turns a schema that resolved but could not be used into a
+// failure under an explicit override, and into "use the transcribed fallback"
+// otherwise.
+func specSchemaUnusable(t *testing.T, name, why string) {
+	t.Helper()
+	if specSchemasOverridden() {
+		t.Fatalf("%s=%s supplies %s but %s — a redirected schemas root that cannot state "+
+			"the vocabulary is a broken probe, not a reason to fall back to the transcribed one",
+			schemasDirEnv, schemasOverride, name, why)
+	}
 }
 
 // specFixtureMissing reports a fixture the runner could not open. It skips when
@@ -268,6 +423,51 @@ func TestSpecCorpusOverrideIsReadable(t *testing.T) {
 	}
 }
 
+// TestSpecSchemasOverrideIsReadable is the schemas-seam twin of the test above
+// (#lzspecschemasoverride). TestMain also refuses to run in that state, so a
+// filtered `go test -run` cannot slip past this one either.
+func TestSpecSchemasOverrideIsReadable(t *testing.T) {
+	if err := specSchemasError(); err != nil {
+		t.Fatal(err)
+	}
+	if !specSchemasOverridden() {
+		return
+	}
+	roots := specSchemasRoots()
+	if len(roots) != 1 || roots[0] != schemasOverride {
+		t.Fatalf("override %q did not replace the schemas roots: %v", schemasOverride, roots)
+	}
+}
+
+// TestSchemasRootIsIndependentOfTheCorpusRoot pins the property the old
+// hardcoded path bought by hardcoding: redirecting the CORPUS must not move the
+// schemas root, because a scratch copy of the corpus carries no schemas/
+// sibling. The override added in #lzspecschemasoverride keeps that property —
+// the two variables are read separately and neither derives from the other.
+func TestSchemasRootIsIndependentOfTheCorpusRoot(t *testing.T) {
+	if specSchemasOverridden() {
+		if got := specSchemasDir(); got != schemasOverride {
+			t.Fatalf("schemas root = %q, want the override %q", got, schemasOverride)
+		}
+		return
+	}
+	// No schemas override: the schemas root must be a historical one regardless
+	// of where the corpus points.
+	want := []string{"schemas", filepath.Join("..", specRepoSegment, "schemas")}
+	got := specSchemasRoots()
+	if len(got) != len(want) {
+		t.Fatalf("schemas roots = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("schemas roots = %v, want %v", got, want)
+		}
+	}
+	if specCorpusOverridden() && strings.Contains(specSchemasDir(), specOverride) {
+		t.Fatalf("the corpus override %q leaked into the schemas root %q", specOverride, specSchemasDir())
+	}
+}
+
 // TestNoSourceFileSpellsTheCorpusPathItself is what makes the seam hold BY
 // CONSTRUCTION. A new runner that hardcodes the sibling checkout would honour no
 // override and reintroduce the two-corpora split, and no reviewer would notice
@@ -318,6 +518,13 @@ func TestSpecCorpusOverrideIsReadable(t *testing.T) {
 //     exempt: specSchemasDir is the one deliberate reference and it lives in this
 //     seam file, which is the single allowlisted definition site (along with the
 //     specRepoSegment const itself).
+//
+// WIDENED for the schemas seam (#lzspecschemasoverride). The guard now also
+// rejects any value with `schemas` as a path SEGMENT, so the in-repo spelling
+// `filepath.Join("schemas", "agent-doc-state.json")` — which the two agent-doc
+// loaders used before the seam existed, and which no override could reach — is
+// caught the same way the sibling spelling is. JSON-Schema `$id` URLs are
+// exempt (`https://lazily.dev/schemas/...` is an identifier, not a path).
 func TestNoSourceFileSpellsTheCorpusPathItself(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
@@ -424,15 +631,24 @@ func scanForCorpusSpellings(t *testing.T, root, seam string) (files, literals in
 // reports whether it did so (the caller stops descending, so one offense is not
 // counted once per nested sub-expression).
 func reportCorpusSpelling(t *testing.T, fset *token.FileSet, rel string, n ast.Node, value, kind string) bool {
-	if !spellsCorpusRoot(value) {
-		return false
+	switch {
+	case spellsCorpusRoot(value):
+		t.Errorf("%s:%d: %s %q spells the corpus location directly. "+
+			"Route it through specPath/specCandidatePaths/specDir instead — a hardcoded "+
+			"root ignores %s and splits the suite across two corpora "+
+			"(#lzoverrideallrunners, #lzcorpusrootguards).",
+			rel, fset.Position(n.Pos()).Line, kind, value, specDirEnv)
+		return true
+	case spellsSchemasRoot(value):
+		t.Errorf("%s:%d: %s %q spells the JSON-schema location directly. "+
+			"Route it through specSchemaRead/specSchemaCandidatePaths/specSchemasDir "+
+			"instead — a hardcoded schemas root ignores %s, so a probe that perturbs a "+
+			"SCHEMA cannot reach this runner and has to dirty the shared ../lazily-spec "+
+			"checkout to reach any of them (#lzspecschemasoverride).",
+			rel, fset.Position(n.Pos()).Line, kind, value, schemasDirEnv)
+		return true
 	}
-	t.Errorf("%s:%d: %s %q spells the corpus location directly. "+
-		"Route it through specPath/specCandidatePaths/specDir instead — a hardcoded "+
-		"root ignores %s and splits the suite across two corpora "+
-		"(#lzoverrideallrunners, #lzcorpusrootguards).",
-		rel, fset.Position(n.Pos()).Line, kind, value, specDirEnv)
-	return true
+	return false
 }
 
 // spellsCorpusRoot is the widened predicate. It matches the sibling checkout as
@@ -446,6 +662,23 @@ func spellsCorpusRoot(value string) bool {
 	}
 	for _, segment := range strings.Split(normalized, "/") {
 		if segment == specRepoSegment {
+			return true
+		}
+	}
+	return false
+}
+
+// spellsSchemasRoot matches the JSON-schema directory as a whole PATH SEGMENT,
+// which catches both the sibling spelling and the bare in-repo `"schemas"` the
+// agent-doc loaders preferred first. A `$id` URL is not a filesystem path and is
+// exempt (#lzspecschemasoverride).
+func spellsSchemasRoot(value string) bool {
+	normalized := filepath.ToSlash(value)
+	if strings.Contains(normalized, "://") {
+		return false
+	}
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == "schemas" {
 			return true
 		}
 	}
