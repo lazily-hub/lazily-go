@@ -19,8 +19,10 @@ package lazily
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -82,10 +84,70 @@ type ltSync struct {
 	To   string `json:"to"`
 }
 
+// ltDeliver is a partial/reordered delivery of `from`'s diff into `to`.
+//
+// The op list both selectors index into is the SAME one `sync` uses:
+// `from.Diff(to.Frontier())`, which lazily-go returns in canonical dotted
+// `(counter, peer)` order (pinned by TestLosslessTreeDiffReturnsOpsInCanonical-
+// CounterPeerOrder). Indexes are 0-based into that list.
+//
+//   - `only` selects a SUBSET and delivers it in canonical order. A hole in the
+//     subset is the point (non_contiguous_anti_entropy.json).
+//   - `order` selects a SEQUENCE and delivers it in exactly the listed order, as
+//     ONE ApplyUpdate call. Re-sorting it, or splitting it across calls, would
+//     destroy the very thing out_of_order_delivery_buffers.json measures: whether
+//     ApplyUpdate buffers an op whose dependency has not arrived YET IN THE SAME
+//     BATCH and retries it as the batch drains.
+//
+// Exactly one selector must be present; see ltSelectDelivered.
 type ltDeliver struct {
-	From string `json:"from"`
-	To   string `json:"to"`
-	Only []int  `json:"only"`
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Only  []int  `json:"only,omitempty"`
+	Order []int  `json:"order,omitempty"`
+}
+
+// ltSelectDelivered resolves a `deliver` step's selector against the canonical
+// diff, returning the ops to hand to a single ApplyUpdate call.
+//
+// It fails closed on three things rather than papering over them:
+//
+//   - both selectors present, or neither. Defaulting either way would let a
+//     fixture that meant "in this order" be replayed as "in canonical order"
+//     (or vice versa) with no diagnostic.
+//   - an index outside the diff. CLAMPING an out-of-range index is the silent
+//     failure this guards: it would deliver a plausible-looking batch and go
+//     green while replaying a schedule the fixture never described.
+//   - a diff shorter than the fixture assumes, which is the same bug seen from
+//     the other side and is reported by the same bounds check.
+func ltSelectDelivered(diff []TreeOp, d *ltDeliver) ([]TreeOp, error) {
+	switch {
+	case d.Only != nil && d.Order != nil:
+		return nil, fmt.Errorf("deliver{from:%s,to:%s} carries BOTH `only` and `order`; exactly one selector is allowed", d.From, d.To)
+	case d.Only == nil && d.Order == nil:
+		return nil, fmt.Errorf("deliver{from:%s,to:%s} carries NEITHER `only` nor `order`; exactly one selector is required", d.From, d.To)
+	}
+
+	indexes := d.Order
+	selector := "order"
+	if d.Only != nil {
+		// `only` names a subset; canonical order is the diff's own order, so
+		// sorting the indexes is what "in canonical order" means here.
+		indexes = append([]int(nil), d.Only...)
+		sort.Ints(indexes)
+		selector = "only"
+	}
+
+	selected := make([]TreeOp, 0, len(indexes))
+	for _, idx := range indexes {
+		if idx < 0 || idx >= len(diff) {
+			return nil, fmt.Errorf("deliver{from:%s,to:%s} `%s` index %d is out of range for a %d-op diff "+
+				"(indexes are 0-based into from.Diff(to.Frontier()); an out-of-range index is a fixture/runner "+
+				"disagreement, never something to clamp)", d.From, d.To, selector, idx, len(diff))
+		}
+		selected = append(selected, diff[idx])
+	}
+	return selected, nil
 }
 
 type ltExpect struct {
@@ -120,12 +182,13 @@ type ltFixture struct {
 // ---------------------------------------------------------------------------
 
 type ltWorld struct {
+	t        *testing.T
 	replicas map[string]*LosslessTreeCrdt
 	ids      map[string]OpId
 }
 
-func newLtWorld() *ltWorld {
-	return &ltWorld{replicas: map[string]*LosslessTreeCrdt{}, ids: map[string]OpId{}}
+func newLtWorld(t *testing.T) *ltWorld {
+	return &ltWorld{t: t, replicas: map[string]*LosslessTreeCrdt{}, ids: map[string]OpId{}}
 }
 
 func (w *ltWorld) id(label string) OpId {
@@ -177,6 +240,16 @@ func (w *ltWorld) buildChildren(spec ltSeedNode, parent OpId, replica *LosslessT
 	}
 }
 
+// applyStep runs one schedule step.
+//
+// The loop over steps is deliberately FLAT: there is no fork/edit/sync phase
+// ordering, and neither a replica's diff nor its clock is cached between steps —
+// every `sync` and `deliver` recomputes `from.Diff(to.Frontier())` at the moment
+// it runs. That is what lets a schedule MUTATE a replica after a sync INTO it
+// (apply_update_advances_counter.json), where the post-sync write must be minted
+// against the counter the ingest advanced. A runner that hoisted the diff, or
+// that assumed all local edits precede all syncs, would replay that fixture as a
+// different schedule and could not see the bug it exists for.
 func (w *ltWorld) applyStep(step ltStep) {
 	if step.Fork != "" {
 		w.replicas[step.Fork] = w.replicas["a"].Fork(step.Peer)
@@ -189,10 +262,12 @@ func (w *ltWorld) applyStep(step ltStep) {
 	}
 	if step.Deliver != nil {
 		full := w.replicas[step.Deliver.From].Diff(w.replicas[step.Deliver.To].Frontier())
-		selected := make([]TreeOp, len(step.Deliver.Only))
-		for i, idx := range step.Deliver.Only {
-			selected[i] = full.Ops[idx]
+		selected, err := ltSelectDelivered(full.Ops, step.Deliver)
+		if err != nil {
+			w.t.Fatalf("%v", err)
 		}
+		// ONE ApplyUpdate for the whole selection: the batch is the unit the
+		// dependency buffer drains over.
 		w.replicas[step.Deliver.To].ApplyUpdate(TreeUpdate{Ops: selected})
 		return
 	}
@@ -264,7 +339,7 @@ func runLosslessTreeFixture(t *testing.T, name string) {
 			// inside the subtest — never at the loop header, which cannot tell a
 			// body that replayed from one that returned early.
 			scenario := sv.Value()
-			world := newLtWorld()
+			world := newLtWorld(t)
 			world.replicas["a"] = NewLosslessTreeCrdt(scenario.Seed.Peer)
 			world.buildChildren(scenario.Seed.Tree, TreeRoot, world.replicas["a"])
 			for _, step := range scenario.Steps {
@@ -286,12 +361,110 @@ func TestLosslessTreeConformance(t *testing.T) {
 		"token_trivia_preservation.json",
 		"invalid_source_roundtrip.json",
 		"concurrent_conflict_preserves_text.json",
+		// #lzspecoutoforderfixtures (lazily-spec 39df4b3). These two are the
+		// first fixtures that discriminate ApplyUpdate's two ingest obligations:
+		// advancing the Lamport counter past every observed op unconditionally
+		// and BEFORE the idempotence skip, and BUFFERING an op whose dependency
+		// has not arrived instead of dropping it while recording its dot.
+		"apply_update_advances_counter.json",
+		"out_of_order_delivery_buffers.json",
 	}
 	for _, name := range fixtures {
 		name := name
 		t.Run(name, func(t *testing.T) {
 			runLosslessTreeFixture(t, name)
 		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// `deliver` selector contract (#lzspecoutoforderfixtures)
+// ---------------------------------------------------------------------------
+//
+// The fixtures cannot police these: a clamped index or a defaulted selector
+// still produces a plausible batch, and the two fixtures that use `deliver`
+// would go green over both. Only a direct assertion catches it.
+
+func ltDiffFixtureOps(t *testing.T) []TreeOp {
+	t.Helper()
+	tree := NewLosslessTreeCrdt(1)
+	para := tree.CreateNode(TreeRoot, nil, TreeNodeSeedElement{Kind: "para"})
+	one := tree.CreateNode(para, nil, TreeNodeSeedLeaf{Kind: LeafKindTrivia, Text: "1"})
+	tree.CreateNode(para, &one, TreeNodeSeedLeaf{Kind: LeafKindTrivia, Text: "2"})
+	ops := tree.Diff(NewTreeVersionFrontier()).Ops
+	if len(ops) != 3 {
+		t.Fatalf("setup: want a 3-op diff, got %d", len(ops))
+	}
+	return ops
+}
+
+func TestLosslessTreeDeliverOrderIsHonouredExactly(t *testing.T) {
+	ops := ltDiffFixtureOps(t)
+
+	selected, err := ltSelectDelivered(ops, &ltDeliver{From: "a", To: "b", Order: []int{2, 1, 0}})
+	if err != nil {
+		t.Fatalf("order [2,1,0]: unexpected error: %v", err)
+	}
+	if len(selected) != 3 {
+		t.Fatalf("order [2,1,0]: want 3 ops, got %d", len(selected))
+	}
+	// Exactly the listed SEQUENCE — not re-sorted back into canonical order,
+	// which would silently defeat out_of_order_delivery_buffers.json.
+	for i, want := range []int{2, 1, 0} {
+		if selected[i].Id != ops[want].Id {
+			t.Fatalf("order [2,1,0]: position %d = %s, want %s (a re-sorted delivery is not an out-of-order delivery)",
+				i, selected[i].Id, ops[want].Id)
+		}
+	}
+
+	// `only` keeps its meaning: that SUBSET, in canonical order, whatever order
+	// the indexes are listed in.
+	subset, err := ltSelectDelivered(ops, &ltDeliver{From: "a", To: "b", Only: []int{2, 0}})
+	if err != nil {
+		t.Fatalf("only [2,0]: unexpected error: %v", err)
+	}
+	if len(subset) != 2 || subset[0].Id != ops[0].Id || subset[1].Id != ops[2].Id {
+		t.Fatalf("only [2,0] must deliver ops 0 and 2 in canonical order; got %v", treeOpIds(subset))
+	}
+}
+
+func TestLosslessTreeDeliverRejectsOutOfRangeIndexRatherThanClamping(t *testing.T) {
+	ops := ltDiffFixtureOps(t)
+
+	for _, tc := range []struct {
+		name    string
+		deliver ltDeliver
+	}{
+		{"order past the end", ltDeliver{From: "a", To: "b", Order: []int{0, 3}}},
+		{"only past the end", ltDeliver{From: "a", To: "b", Only: []int{0, 7}}},
+		{"negative index", ltDeliver{From: "a", To: "b", Order: []int{-1}}},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			selected, err := ltSelectDelivered(ops, &tc.deliver)
+			if err == nil {
+				t.Fatalf("out-of-range index must FAIL the fixture, not be clamped; got %d ops back", len(selected))
+			}
+			if !strings.Contains(err.Error(), "out of range") {
+				t.Fatalf("error must name the out-of-range index; got %v", err)
+			}
+		})
+	}
+}
+
+func TestLosslessTreeDeliverRequiresExactlyOneSelector(t *testing.T) {
+	ops := ltDiffFixtureOps(t)
+
+	if _, err := ltSelectDelivered(ops, &ltDeliver{From: "a", To: "b", Only: []int{0}, Order: []int{0}}); err == nil {
+		t.Fatalf("a deliver step with BOTH `only` and `order` must be rejected, not resolved by precedence")
+	} else if !strings.Contains(err.Error(), "BOTH") {
+		t.Fatalf("error must say both selectors are present; got %v", err)
+	}
+
+	if _, err := ltSelectDelivered(ops, &ltDeliver{From: "a", To: "b"}); err == nil {
+		t.Fatalf("a deliver step with NEITHER selector must be rejected, not defaulted to the whole diff")
+	} else if !strings.Contains(err.Error(), "NEITHER") {
+		t.Fatalf("error must say no selector is present; got %v", err)
 	}
 }
 
