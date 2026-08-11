@@ -47,7 +47,7 @@ import (
 const specDirEnv = "LAZILY_SPEC_CONFORMANCE_DIR"
 
 // specRepoSegment is the sibling checkout's directory name, assembled rather
-// than written whole so TestNoTestFileSpellsTheCorpusPathItself has a single
+// than written whole so TestNoSourceFileSpellsTheCorpusPathItself has a single
 // exempt definition site.
 const specRepoSegment = "lazily" + "-spec"
 
@@ -268,7 +268,7 @@ func TestSpecCorpusOverrideIsReadable(t *testing.T) {
 	}
 }
 
-// TestNoTestFileSpellsTheCorpusPathItself is what makes the seam hold BY
+// TestNoSourceFileSpellsTheCorpusPathItself is what makes the seam hold BY
 // CONSTRUCTION. A new runner that hardcodes the sibling checkout would honour no
 // override and reintroduce the two-corpora split, and no reviewer would notice
 // one more `filepath.Join("..", "lazily-spec", "conformance", ...)` among two
@@ -276,7 +276,49 @@ func TestSpecCorpusOverrideIsReadable(t *testing.T) {
 //
 // The scan is AST-based, not textual: only string LITERALS are examined, so
 // prose in comments and in skip/failure messages is unaffected.
-func TestNoTestFileSpellsTheCorpusPathItself(t *testing.T) {
+//
+// HARDENING (#lzcorpusrootguards). The first version of this guard was PROVEN
+// EVADABLE — three synthetic violations were injected into a scratch copy and it
+// still reported green:
+//
+//  1. It filtered on `*_test.go`, so a NON-test file in package lazily could
+//     spell the corpus freely. Fixed: every `.go` file is scanned.
+//  2. It called os.ReadDir and `continue`d on entry.IsDir(), so a test file in
+//     any SUBDIRECTORY was invisible. Fixed: the scan walks the tree.
+//  3. Its predicate was `value == "lazily-spec" || contains "lazily-spec/conformance"`,
+//     so `filepath.Join("../lazily-spec", "conformance", ...)` (the checkout name
+//     fused to its parent in one literal) and `"lazily"+"-spec"` (the segment
+//     split across a concatenation) both slipped through. Fixed: constant string
+//     expressions are FOLDED before matching, filepath.Join/path.Join argument
+//     lists are reassembled into a single candidate path, and the predicate
+//     matches `lazily-spec` as a whole PATH SEGMENT rather than as a whole
+//     literal.
+//
+// Forms this catches:
+//
+//   - any literal, or `+`-concatenation of literals, whose slash-separated form
+//     has `lazily-spec` as a path segment ("lazily-spec", "../lazily-spec",
+//     "../lazily-spec/conformance/x", "lazily"+"-spec");
+//   - any literal or fold containing the fragment `lazily-spec/conformance`
+//     anywhere, even mid-segment;
+//   - filepath.Join / path.Join calls whose literal arguments reassemble into
+//     either of the above, including when non-constant arguments sit between the
+//     literals.
+//
+// Forms it deliberately does NOT catch, because a string test cannot see them:
+//
+//   - values assembled at RUNTIME from non-constant parts — fmt.Sprintf("%s-spec", x),
+//     os.Getenv, a string built in a loop. A determined author can always evade a
+//     source-level guard; the point is that nobody does it by ACCIDENT, and doing
+//     it on purpose is no longer deniable as an oversight.
+//   - an identifier alias (`const s = "lazily" + "-spec"` used as `Join("..", s)`).
+//     The alias's own declaration folds to "lazily-spec" and is reported at the
+//     declaration site, so the offense still surfaces — just one line earlier.
+//   - the sibling's non-corpus siblings, e.g. `../lazily-spec/schemas`, are NOT
+//     exempt: specSchemasDir is the one deliberate reference and it lives in this
+//     seam file, which is the single allowlisted definition site (along with the
+//     specRepoSegment const itself).
+func TestNoSourceFileSpellsTheCorpusPathItself(t *testing.T) {
 	_, thisFile, _, ok := runtime.Caller(0)
 	if !ok {
 		t.Fatal("cannot locate this source file")
@@ -284,44 +326,194 @@ func TestNoTestFileSpellsTheCorpusPathItself(t *testing.T) {
 	dir := filepath.Dir(thisFile)
 	seam := filepath.Base(thisFile)
 
-	entries, err := os.ReadDir(dir)
+	files, literals, err := scanForCorpusSpellings(t, dir, seam)
 	if err != nil {
-		t.Fatalf("reading package dir: %v", err)
+		t.Fatalf("walking package tree: %v", err)
 	}
+	// POSITIVE EVIDENCE. A guard that examined nothing is indistinguishable from
+	// a guard that found nothing, and the second reads as green. Both counters
+	// must be nonzero or the run proves nothing.
+	if files == 0 {
+		t.Fatalf("examined nothing: the walk of %s parsed 0 Go files, so this guard "+
+			"asserted nothing about the corpus seam", dir)
+	}
+	if literals == 0 {
+		t.Fatalf("examined nothing: the walk of %s parsed %d Go files but inspected 0 "+
+			"string literals, so this guard asserted nothing about the corpus seam", dir, files)
+	}
+	t.Logf("%d Go files (%d string literals) route the conformance corpus through the shared seam", files, literals)
+}
+
+// corpusGuardSkipDirs are trees the walk refuses to descend into: version
+// control and tooling state, and any vendored or third-party checkout, whose
+// sources are not ours to route through this package's seam. `testdata` is
+// skipped for the same reason the go tool ignores it — nothing in it is built.
+var corpusGuardSkipDirs = map[string]bool{
+	"vendor":       true,
+	"node_modules": true,
+	"third_party":  true,
+	"testdata":     true,
+}
+
+// scanForCorpusSpellings walks every Go file under root (seam excluded) and
+// reports each hardcoded corpus spelling via t.Errorf. It returns the number of
+// files parsed and string literals inspected so the caller can prove the walk
+// was not vacuous.
+func scanForCorpusSpellings(t *testing.T, root, seam string) (files, literals int, err error) {
+	t.Helper()
 	fset := token.NewFileSet()
-	scanned := 0
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, "_test.go") || name == seam {
-			continue
-		}
-		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+	walkErr := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
-			t.Fatalf("parsing %s: %v", name, err)
+			return err
 		}
-		scanned++
+		if entry.IsDir() {
+			name := entry.Name()
+			if path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") || corpusGuardSkipDirs[name]) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".go") || (path == filepath.Join(root, seam)) {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			rel = path
+		}
+		// Mode 0: comments are not attached, and only *ast.BasicLit nodes are
+		// examined, so prose is exempt for free.
+		file, parseErr := parser.ParseFile(fset, path, nil, 0)
+		if parseErr != nil {
+			return fmt.Errorf("parsing %s: %w", rel, parseErr)
+		}
+		files++
 		ast.Inspect(file, func(n ast.Node) bool {
-			lit, ok := n.(*ast.BasicLit)
-			if !ok || lit.Kind != token.STRING {
-				return true
-			}
-			value, err := strconv.Unquote(lit.Value)
-			if err != nil {
-				return true
-			}
-			if value == specRepoSegment || strings.Contains(value, specRepoSegment+"/conformance") {
-				t.Errorf("%s:%d: string literal %q spells the corpus location directly. "+
-					"Route it through specPath/specCandidatePaths/specDir instead — a hardcoded "+
-					"root ignores %s and splits the suite across two corpora (#lzoverrideallrunners).",
-					name, fset.Position(lit.Pos()).Line, value, specDirEnv)
+			switch node := n.(type) {
+			case *ast.BasicLit:
+				value, ok := foldStringExpr(node)
+				if !ok {
+					return true
+				}
+				literals++
+				return !reportCorpusSpelling(t, fset, rel, node, value, "string literal")
+			case *ast.BinaryExpr:
+				// A concatenation of literals: fold it before matching so
+				// "lazily"+"-spec" cannot hide the segment in the seam between
+				// two innocent halves.
+				value, ok := foldStringExpr(node)
+				if !ok {
+					return true
+				}
+				return !reportCorpusSpelling(t, fset, rel, node, value, "concatenated string expression")
+			case *ast.CallExpr:
+				value, ok := foldPathJoin(node)
+				if !ok {
+					return true
+				}
+				return !reportCorpusSpelling(t, fset, rel, node, value, "assembled Join path")
 			}
 			return true
 		})
+		return nil
+	})
+	return files, literals, walkErr
+}
+
+// reportCorpusSpelling fails the guard when value names the sibling corpus, and
+// reports whether it did so (the caller stops descending, so one offense is not
+// counted once per nested sub-expression).
+func reportCorpusSpelling(t *testing.T, fset *token.FileSet, rel string, n ast.Node, value, kind string) bool {
+	if !spellsCorpusRoot(value) {
+		return false
 	}
-	if scanned == 0 {
-		t.Fatal("scanned 0 test files — the guard is vacuous")
+	t.Errorf("%s:%d: %s %q spells the corpus location directly. "+
+		"Route it through specPath/specCandidatePaths/specDir instead — a hardcoded "+
+		"root ignores %s and splits the suite across two corpora "+
+		"(#lzoverrideallrunners, #lzcorpusrootguards).",
+		rel, fset.Position(n.Pos()).Line, kind, value, specDirEnv)
+	return true
+}
+
+// spellsCorpusRoot is the widened predicate. It matches the sibling checkout as
+// a whole PATH SEGMENT — so a joined prefix ("../lazily-spec") is caught where a
+// whole-literal equality test was not — and separately matches the corpus
+// fragment anywhere in the value.
+func spellsCorpusRoot(value string) bool {
+	normalized := filepath.ToSlash(value)
+	if strings.Contains(normalized, specRepoSegment+"/conformance") {
+		return true
 	}
-	t.Logf("%d test files route the conformance corpus through the shared seam", scanned)
+	for _, segment := range strings.Split(normalized, "/") {
+		if segment == specRepoSegment {
+			return true
+		}
+	}
+	return false
+}
+
+// foldStringExpr constant-folds string literals and `+` chains of them. It
+// resolves no identifiers: see the "deliberately does NOT catch" list above.
+func foldStringExpr(e ast.Expr) (string, bool) {
+	switch node := e.(type) {
+	case *ast.BasicLit:
+		if node.Kind != token.STRING {
+			return "", false
+		}
+		value, err := strconv.Unquote(node.Value)
+		if err != nil {
+			return "", false
+		}
+		return value, true
+	case *ast.ParenExpr:
+		return foldStringExpr(node.X)
+	case *ast.BinaryExpr:
+		if node.Op != token.ADD {
+			return "", false
+		}
+		left, ok := foldStringExpr(node.X)
+		if !ok {
+			return "", false
+		}
+		right, ok := foldStringExpr(node.Y)
+		if !ok {
+			return "", false
+		}
+		return left + right, true
+	}
+	return "", false
+}
+
+// foldPathJoin reassembles a filepath.Join / path.Join argument list into one
+// candidate path. Non-constant arguments become an opaque placeholder rather
+// than aborting the fold, so `filepath.Join("..", specRepoSegment, "conformance")`
+// still yields a value whose literal parts can be matched — and so a violation
+// interleaved with variables is not laundered by the variables.
+func foldPathJoin(call *ast.CallExpr) (string, bool) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Join" {
+		return "", false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok || (pkg.Name != "filepath" && pkg.Name != "path") {
+		return "", false
+	}
+	parts := make([]string, 0, len(call.Args))
+	sawLiteral := false
+	for _, arg := range call.Args {
+		if value, ok := foldStringExpr(arg); ok {
+			sawLiteral = true
+			parts = append(parts, value)
+			continue
+		}
+		// A placeholder that occupies its own segment, so it can never itself
+		// be — nor silently complete — the segment under test.
+		parts = append(parts, "<expr>")
+	}
+	if !sawLiteral {
+		return "", false
+	}
+	return strings.Join(parts, "/"), true
 }
 
 // TestSpecSeamAttributesRelativeToTheResolvedRoot pins the defect that made the
