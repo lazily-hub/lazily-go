@@ -72,7 +72,14 @@ func TestShmBlobArenaConformance(t *testing.T) {
 	assertKey(t, descriptorAssertions, "len", descriptor.Len)
 	assertKey(t, descriptorAssertions, "generation", descriptor.Generation)
 	assertKey(t, descriptorAssertions, "epoch", descriptor.Epoch)
-	assertKey(t, descriptorAssertions, "checksum", uint64(descriptor.Checksum))
+	// The `assertions` copy of the checksum cannot be compared exactly here: both
+	// sides arrive as float64, and at 1.3e19 the double spacing is 2048, so a ±1
+	// perturbation is invisible (#lzgoassertkeygaps). The value IS exactly pinned —
+	// the typed `expected.descriptor.checksum` above is a uint64 decoded into a
+	// struct field and compared with ==, which ±1 reddens. This excuse records that
+	// the assertions copy is redundant rather than unchecked.
+	excuseKey(t, descriptorAssertions, "checksum",
+		"u64 beyond 2^53 cannot round-trip through float64; pinned exactly by the typed expected.descriptor.checksum comparison above")
 
 	if !bytes.Equal(header, fixture.Expected.HeaderBytes) {
 		t.Fatalf("header bytes = %v, want %v", header, fixture.Expected.HeaderBytes)

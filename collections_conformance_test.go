@@ -17,6 +17,7 @@ package lazily
 import (
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -338,27 +339,76 @@ func TestCollectionsKeyedReconciliationLIS(t *testing.T) {
 		targetOrder[i] = e.Key
 		targetValues[e.Key] = e.Value
 	}
+	// Prime readers for the declared stable keys BEFORE the reorder
+	// (#lzgoassertkeygaps). This used to prime AFTER the prior->target reconcile
+	// and then run a SECOND, no-op reconcile to the same target — which
+	// invalidates nothing by construction, so every reader was trivially warm.
+	// Measured: with the no-op, `["b","c","a"]` passed, `["b"]` passed, and
+	// `["zzz"]` — a key not in the map at all — passed. Only `[]` failed, via the
+	// emptiness guard. The fixture's whole claim (b and c survive the sibling
+	// reorder that moves a and removes d) was untested.
+	stableKeys := jsStrList(expected["stable_keys_not_invalidated"])
+	if len(stableKeys) == 0 {
+		t.Fatalf("%s: stable_keys_not_invalidated is empty; there is no claim to test", name)
+	}
+	readers := map[string]*Computed[int]{}
+	for _, k := range stableKeys {
+		key := k
+		if _, ok := m.Read(key); !ok {
+			t.Fatalf("%s: stable_keys_not_invalidated names %q, which the PRIOR map does not carry — "+
+				"a key that is not there cannot survive a reorder, so this entry asserts nothing", name, key)
+		}
+		slot := NewSlot(ctx, func(c *Compute) int { v, _ := m.Read(key); return v })
+		slot.Get()
+		readers[key] = slot
+	}
+
 	m.Reconcile(targetOrder, targetValues)
 	assertKey(t, expected, "result_order", m.Keys(ctx))
 
-	// stable_keys_not_invalidated: prime readers, run a no-op reconcile, assert warm.
+	// The reorder has now actually happened; the stable keys must have survived it.
+	//
+	// The warmth check alone is a LOWER bound — it cannot see a list that has
+	// been shortened, because a dropped key simply stops being checked. So the
+	// declared set is also compared against the set the fixture's own data
+	// defines as stable: present in both prior and target, and not named by a
+	// `move` op. That is the spec's definition of an LIS member, derived from
+	// keys the fixture already declares rather than restated here, and it is what
+	// makes `["b"]` a failure instead of a smaller obligation.
 	assertKeyWith(t, expected, "stable_keys_not_invalidated", func(want any) {
-		stableKeys := jsStrList(want)
-		if len(stableKeys) == 0 {
-			t.Fatalf("%s: stable_keys_not_invalidated is empty; the no-op reconcile below would assert nothing", name)
-		}
-		readers := map[string]*Computed[int]{}
-		for _, k := range stableKeys {
-			key := k
-			slot := NewSlot(ctx, func(c *Compute) int { v, _ := m.Read(key); return v })
-			slot.Get()
-			readers[key] = slot
-		}
-		m.Reconcile(targetOrder, targetValues) // no-op
-		for _, k := range stableKeys {
+		declared := jsStrList(want)
+		for _, k := range declared {
 			if _, warm := readers[k].Peek(); !warm {
 				t.Errorf("%s: stable key %q invalidated by sibling reorder", name, k)
 			}
+		}
+
+		moved := map[string]bool{}
+		for _, raw := range jsList(expected["ops"]) {
+			op, _ := raw.(map[string]any)
+			if op["type"] == "move" {
+				if key, ok := op["key"].(string); ok {
+					moved[key] = true
+				}
+			}
+		}
+		inTarget := map[string]bool{}
+		for _, k := range targetOrder {
+			inTarget[k] = true
+		}
+		var stable []string
+		for _, e := range prior {
+			if inTarget[e.Key] && !moved[e.Key] {
+				stable = append(stable, e.Key)
+			}
+		}
+		sort.Strings(stable)
+		got := append([]string(nil), declared...)
+		sort.Strings(got)
+		if !reflect.DeepEqual(stable, got) {
+			t.Errorf("%s: stable_keys_not_invalidated is %v, but prior∩target minus moved keys is %v — "+
+				"the list must account for every key the reconcile left in place, or it can shrink "+
+				"an obligation without failing", name, got, stable)
 		}
 	})
 }

@@ -412,6 +412,13 @@ func assertKey(t *testing.T, block map[string]any, key string, actual any) {
 	t.Helper()
 	assertKeyWith(t, block, key, func(want any) {
 		t.Helper()
+		if !jsonComparisonIsExact(want, actual) {
+			t.Errorf("%s: %s = %v cannot be compared exactly against the fixture's %v: both sides are "+
+				"float64 here, and above 2^53 consecutive integers share bits, so a wrong value would "+
+				"pass. Assert it through a typed `expected` field, or carry it in the fixture as a "+
+				"decimal string (#lzgoassertkeygaps).", assertionLabel(block), key, actual, want)
+			return
+		}
 		if !jsonValueEqual(want, actual) {
 			t.Errorf("%s: %s = %v, want %v (the fixture's value)", assertionLabel(block), key, actual, want)
 		}
@@ -1222,6 +1229,42 @@ func jsonValueEqual(want, actual any) bool {
 		return false
 	}
 	return jsonEquivalent(want, got)
+}
+
+// maxExactJSONInt is the largest integer a float64 represents exactly. Above it,
+// consecutive integers share bits.
+const maxExactJSONInt = 1 << 53
+
+// jsonComparisonIsExact reports whether jsonValueEqual can actually resolve this
+// pair (#lzgoassertkeygaps).
+//
+// Both sides of that comparison are `any` decoded from JSON, so every number is
+// a float64. At 1.31e19 — the magnitude of a u64 checksum — the spacing between
+// representable doubles is 2048, so `…701` and `…700` are the same value and the
+// comparison silently passes. It was measured: perturbing arena_blob.json's
+// assertions checksum by ±1 reddened nothing, while +7700 (past one ULP) did.
+//
+// A comparison that cannot resolve its own inputs must say so rather than
+// approximate. The precision is already gone by the time we get here — the
+// fixture was decoded into float64 long before — so this cannot repair the
+// value, only refuse to pretend. Authors have two exact channels: a typed
+// `expected` struct field, or a decimal STRING in the fixture, which the corpus
+// already uses for `codec/nodeid_exact_range.json`'s node_id_decimal.
+func jsonComparisonIsExact(want, actual any) bool {
+	unsafe := func(v any) bool {
+		switch n := v.(type) {
+		case float64:
+			return n >= maxExactJSONInt || n <= -maxExactJSONInt
+		case uint64:
+			return n >= maxExactJSONInt
+		case int64:
+			return n >= maxExactJSONInt || n <= -maxExactJSONInt
+		case uint:
+			return uint64(n) >= maxExactJSONInt
+		}
+		return false
+	}
+	return !unsafe(want) && !unsafe(actual)
 }
 
 func jsonEquivalent(a, b any) bool {
