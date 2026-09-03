@@ -119,6 +119,29 @@ if !work.Ack("worker-a", delivery.DeliveryID) {
 }
 ```
 
+## Latest-durable projection egress
+
+`LatestDurableProjectionCore[K,V]` is a keyed durable-sink authority for state
+where only the newest desired value matters. `UpsertDesired` conflates pending
+revisions, `Claim` permits one in-flight envelope per key, `AckApplied` advances
+the monotone durable frontier, `FailRetryable` restores work unless a newer
+desire superseded it, and `Reconnect` fences stale actors by generation.
+
+The graph-backed `LatestDurableProjection`, lock-serialized
+`ThreadSafeLatestDurableProjection`, and `AsyncLatestDurableProjection` share the
+same core and expose a state-version source for reactive dependents. Their common
+behavior replays lazily-spec v0.38.0's canonical
+`egress/latest_durable_projection.json` fixture; the corrected formal model is
+lazily-formal v0.38.1.
+
+```go
+projection := lazily.NewLatestDurableProjection[string, string](ctx, 1)
+projection.UpsertDesired("document", 1, markdown)
+attempt := projection.Claim("document", 1)
+// Persist attempt.Envelope.Value, then acknowledge the exact token.
+projection.AckApplied("document", attempt.Envelope.Generation, attempt.Envelope.Epoch)
+```
+
 ## Context
 
 All reactives that react to each other must share a `Context`. It holds an
