@@ -8,6 +8,39 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Added
 
+- Replay-equivalence proof harness (`#lzreplaygo`, `replay.go`) — `ReplayHarness`
+  / `ReplayLog` / `ReplayFingerprint` per `lazily-spec/docs/replay-equivalence.md`.
+  Given the same event log, a rebuilt graph observes the same values at every
+  checkpoint; any deviation is a defect in the graph, not a tolerance. It is a
+  verification facility, not a runtime feature (the spec scores the row **MAY**),
+  and it is what lets a host that re-executes your code from an event log — a
+  Temporal.io workflow replay, an event-sourced aggregate, a deterministic
+  simulation — be handed a reactive graph with a proof rather than an assertion.
+  The three obligations: a recorded fingerprint carries the digest of ITS log and
+  `Verify` revalidates that binding *before* comparing any value, refusing a
+  stale fingerprint as `*ReplayLogMismatchError` rather than misreporting it as a
+  divergence (two logs can settle on the same final values, so a value-only
+  comparison would certify nothing about the log in front of it); a divergence is
+  reported at the FIRST checkpoint where the values parted, naming the diverging
+  cell label, with the checkpoint stride part of the fingerprint so a
+  differently-sampled one is refused as `*ReplayStrideMismatchError` instead of
+  compared; and the observation encoding is type-tagged and length-framed
+  (SHA-256 over canonical bytes — `crypto/sha256` is stdlib, and the spec leaves
+  both hash and byte layout binding-chosen), so mapping and set order are not
+  part of a value while sequence order and member framing are, and a value the
+  encoding does not define returns `*ReplayEncodingError` rather than falling
+  back on `fmt`'s default rendering, which embeds an address and would report a
+  FALSE divergence on every run. Every fault is a distinct type unwrapping to
+  `ErrReplayProof`, so a driver routes on `errors.As`, never on a message string.
+  `ReplayLogFromOutbox` turns a reliable-sync outbox's retained frames into a
+  fingerprinted log, so a truncated prefix shows up in the log digest instead of
+  silently shifting every event.
+- The three canonical `conformance/replay/` fixtures are replayed
+  (`replay_conformance_test.go`) and dropped from `KNOWN_UNCOVERED`. On a
+  `record` step the runner additionally cross-checks that the recorded `sum`
+  digest IS the digest of the subject's declared final state — without it the
+  fixture would accept a harness that observed some other value entirely and
+  still produced a well-formed, log-bound, correctly-strided fingerprint.
 - Conformance rung 6 — an OBJECT-VALUED assertion key is checked by its KEY SET
   (`#lzsubblockkeyset`). Rung 2 proved every key a BLOCK carries is named; it
   said nothing about the keys one level down, inside an assertion key whose value
