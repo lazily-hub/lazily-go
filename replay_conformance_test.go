@@ -159,7 +159,41 @@ var replayExpectedKeys = []string{
 	"first_divergent_seq", "first_divergent_label", "first_divergent_kind", "note",
 }
 
-func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
+// assertEveryStepExecuted is the constant-free replacement for the per-fixture
+// minimum-steps floor these runners used to hard-code (`#lzcorpusfloorguard`).
+//
+// A floor is SLACK. Pinned at 11 while the fixture carries 14 it passes with
+// three rows never executed, which is exactly what happened when lazily-spec
+// grew `canonical_encoding_equality.json` from 11 steps to 14: eight of nine
+// bindings kept the old number and would have reported green WITHOUT EXECUTING
+// the new rows. Re-pinning by hand only restarts the same drift clock.
+//
+// So this asserts the exact claim instead — every step the runner LOADED reached
+// a dispatch arm — which needs no number and can never drift. `executed` is set
+// INSIDE the dispatch arms, never at the top of the loop, so a `continue` or a
+// filter that skips the work is caught rather than credited.
+//
+// The one thing a floor did buy — noticing the corpus SHRINK — is not dropped,
+// it moved to the single place a step can be deleted: lazily-spec
+// `corpus-counts.json`, enforced by its `scripts/check-corpus-floors.mjs`.
+func assertEveryStepExecuted(t *testing.T, name string, executed []bool) {
+	t.Helper()
+	if len(executed) == 0 {
+		t.Fatalf("%s: the fixture carried no steps at all — an empty step list must never pass", name)
+	}
+	missed := []int{}
+	for index, ran := range executed {
+		if !ran {
+			missed = append(missed, index)
+		}
+	}
+	if len(missed) > 0 {
+		t.Fatalf("%s: loaded %d steps but executed %d — steps %v never reached a dispatch arm",
+			name, len(executed), len(executed)-len(missed), missed)
+	}
+}
+
+func driveReplayHarnessFixture(t *testing.T, name string) {
 	t.Helper()
 	fixture, ok := loadReplayFixture(t, name)
 	if !ok {
@@ -191,10 +225,9 @@ func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
 	}
 
 	steps := jsList(fixture["steps"])
-	if len(steps) < minimumSteps {
-		t.Fatalf("%s: %d steps, want at least %d — the corpus shrank or the runner is reading the wrong file",
-			name, len(steps), minimumSteps)
-	}
+	// No minimum-step constant here, deliberately — see assertEveryStepExecuted
+	// above for why the number is gone and where the shrink guard now lives.
+	executed := make([]bool, len(steps))
 
 	fingerprints := map[string]*ReplayFingerprint{}
 	for index, rawStep := range steps {
@@ -206,6 +239,7 @@ func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
 		expected := consumeKeys(t, where+" expected", jsMap(step["expected"]), replayExpectedKeys...)
 
 		if jsStr(op["type"]) == "log_digest_equal" {
+			executed[index] = true
 			// Two logs that settle to the same final sum must still have
 			// different digests: event ORDER is part of the log.
 			equal := logs[jsStr(op["left"])].Digest() == logs[jsStr(op["right"])].Digest()
@@ -226,6 +260,7 @@ func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
 
 		switch opType := jsStr(op["type"]); opType {
 		case "record":
+			executed[index] = true
 			fingerprint, err := harness.Record(log)
 			if err != nil {
 				t.Fatalf("%s: %v", where, err)
@@ -251,6 +286,7 @@ func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
 			}
 
 		case "prove":
+			executed[index] = true
 			if _, err := harness.Prove(log, jsInt(op["replays"])); err != nil {
 				t.Fatalf("%s: %v", where, err)
 			}
@@ -258,6 +294,7 @@ func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
 			assertKey(t, expected, "divergences", 0)
 
 		case "verify":
+			executed[index] = true
 			outcome, divergences := "ok", 0
 			var first ReplayDivergence
 			var localized bool
@@ -289,6 +326,7 @@ func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
 			assertKey(t, expected, "first_divergent_kind", first.Kind)
 
 		case "check":
+			executed[index] = true
 			divergences, err := harness.Check(log, fingerprints[jsStr(op["fingerprint"])])
 			var logMismatch *ReplayLogMismatchError
 			if errors.As(err, &logMismatch) {
@@ -305,17 +343,21 @@ func driveReplayHarnessFixture(t *testing.T, name string, minimumSteps int) {
 			assertKey(t, expected, "divergences", len(divergences))
 
 		default:
+			// An op type no arm knows about is a HARD failure, never a silent
+			// skip: a `continue` here would let the corpus grow an operation
+			// this binding does not implement and still report green.
 			t.Fatalf("%s: unknown canonical replay operation %q", where, opType)
 		}
 	}
+	assertEveryStepExecuted(t, name, executed)
 }
 
 func TestReplayFingerprintLogBindingConformance(t *testing.T) {
-	driveReplayHarnessFixture(t, replayLogBindingFixture, 8)
+	driveReplayHarnessFixture(t, replayLogBindingFixture)
 }
 
 func TestReplayDivergenceLocalizationConformance(t *testing.T) {
-	driveReplayHarnessFixture(t, replayDivergenceFixture, 7)
+	driveReplayHarnessFixture(t, replayDivergenceFixture)
 }
 
 // ---------------------------------------------------------------------------
@@ -416,14 +458,10 @@ func TestReplayCanonicalEncodingEqualityConformance(t *testing.T) {
 	values := jsMap(config["values"])
 
 	steps := jsList(fixture["steps"])
-	// 14 steps: the eleven original equality classes plus the three member-length
-	// rows lazily-spec 4010d99 added (#lzreplayframing). Pinned at what a clone
-	// of the PUBLISHED corpus carries, exactly — a smaller number would let a
-	// corpus that quietly dropped the length rows still report green here.
-	if len(steps) < 14 {
-		t.Fatalf("%s: %d steps, want at least 14 — the corpus shrank or the runner is reading the wrong file",
-			name, len(steps))
-	}
+	// This fixture is the one the drift was FOUND on (11 -> 14,
+	// `#lzreplayframing`), so it is the last place a re-pinned constant belongs.
+	// See assertEveryStepExecuted above.
+	executed := make([]bool, len(steps))
 
 	// A runner that only ever saw `false` would pass every inequality claim with
 	// a wholly broken encoding, so both outcomes must really occur.
@@ -438,6 +476,7 @@ func TestReplayCanonicalEncodingEqualityConformance(t *testing.T) {
 
 		switch opType := jsStr(op["type"]); opType {
 		case "digest_equal":
+			executed[index] = true
 			// The fixture never names a hex digest — a binding's choice of hash
 			// stays free — so every step asks only whether two declared values
 			// digest the SAME.
@@ -446,6 +485,7 @@ func TestReplayCanonicalEncodingEqualityConformance(t *testing.T) {
 			outcomes[equal] = true
 
 		case "digest_defined":
+			executed[index] = true
 			_, err := ReplayCanonicalDigest(replayTaggedValue(t, values[jsStr(op["value"])]))
 			var encoding *ReplayEncodingError
 			defined := true
@@ -458,9 +498,11 @@ func TestReplayCanonicalEncodingEqualityConformance(t *testing.T) {
 			assertKey(t, expected, "outcome", "encoding_error")
 
 		default:
+			// Hard failure, never a skip — same reason as the replay dispatch.
 			t.Fatalf("%s: unknown canonical encoding operation %q", where, opType)
 		}
 	}
+	assertEveryStepExecuted(t, name, executed)
 	if !outcomes[true] || !outcomes[false] {
 		t.Fatalf("%s: the run observed only %v — a runner that never sees both outcomes proves nothing about the encoding",
 			name, outcomes)

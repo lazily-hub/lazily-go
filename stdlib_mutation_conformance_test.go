@@ -58,11 +58,21 @@ import (
 // runner replays them.
 var stdlibFixtureNames = []string{"timer.json", "timeout.json", "revision_barrier.json"}
 
-// stdlibMutationPairFloor is the number of (operator, scenario) pairs this
-// corpus declares today: timer 4 + timeout 5 + revision_barrier 6. A floor, not
-// an equality — the corpus may grow pairs, and this run must never apply fewer
-// than it does today.
-const stdlibMutationPairFloor = 15
+// There is deliberately NO hard-coded pair total here (`#lzcorpusfloorguard`).
+//
+// This file used to carry `const stdlibMutationPairFloor = 15` — "timer 4 +
+// timeout 5 + revision_barrier 6, what the corpus declares today". That is the
+// same construction that failed across the family on the replay corpus: a
+// number about the corpus, hard-coded in a runner, which nothing moves when the
+// corpus grows. Eight of nine bindings sat on a stale replay floor while three
+// new steps went unexecuted inside the slack.
+//
+// The aggregate is DERIVED below instead, by summing each fixture's own
+// corpus-declared `mutation_floor`, and paired with the exact claim that every
+// ledger entry the runner LOADED was APPLIED. Both are constant-free and cannot
+// drift. Noticing the corpus SHRINK is not this runner's job any more: it lives
+// at the one place an entry can be deleted, lazily-spec `corpus-counts.json`
+// enforced by `scripts/check-corpus-floors.mjs`.
 
 // stdlibMutationProbe is the operator under test, consulted BY NAME at every
 // perturbable branch of the interpreter.
@@ -513,7 +523,7 @@ func TestStdlibIndependentInterpreterMatchesUnperturbedCorpus(t *testing.T) {
 // operator the corpus names and holds the ledger to its own claim
 // (#lzstdlibmutantsallbindings).
 func TestStdlibDeclaredMutationsAreObservedByIndependentInterpreter(t *testing.T) {
-	pairs := 0
+	pairs, declared := 0, 0
 	for _, name := range stdlibFixtureNames {
 		fixture := loadStdlibFixture(t, name)
 		baseline, _ := stdlibIndependentFailures(t, fixture, "")
@@ -524,8 +534,14 @@ func TestStdlibDeclaredMutationsAreObservedByIndependentInterpreter(t *testing.T
 		if len(fixture.Mutations) == 0 {
 			t.Fatalf("stdlib/%s: empty mutation ledger", name)
 		}
+		declared += fixture.MutationFloor
 		fixturePairs := 0
-		for _, mutation := range fixture.Mutations {
+		// Every ledger entry the runner LOADED must be APPLIED: a loop that
+		// filtered or skipped entries would otherwise clear every floor below
+		// while proving nothing about the entries it dropped.
+		applied := make([]bool, len(fixture.Mutations))
+		for entry, mutation := range fixture.Mutations {
+			applied[entry] = true
 			failed, probe := stdlibIndependentFailures(t, fixture, mutation.Operator)
 			// An operator with no interpreter arm is a HARD failure, never a
 			// skip: a silently unimplemented operator is the same vacuity as a
@@ -568,11 +584,21 @@ func TestStdlibDeclaredMutationsAreObservedByIndependentInterpreter(t *testing.T
 			t.Fatalf("stdlib/%s: applied %d (operator, scenario) pairs, below the "+
 				"declared mutation_floor %d", name, fixturePairs, fixture.MutationFloor)
 		}
+		for entry, ran := range applied {
+			if !ran {
+				t.Fatalf("stdlib/%s: loaded %d mutation entries but entry %d was never "+
+					"applied", name, len(applied), entry)
+			}
+		}
 		pairs += fixturePairs
 	}
-	if pairs < stdlibMutationPairFloor {
-		t.Fatalf("applied only %d (operator, scenario) pairs, below the %d this corpus "+
-			"declares today", pairs, stdlibMutationPairFloor)
+	// The aggregate floor, DERIVED from the corpus rather than typed here.
+	if pairs < declared {
+		t.Fatalf("applied only %d (operator, scenario) pairs, below the %d the corpus "+
+			"declares across %d fixtures", pairs, declared, len(stdlibFixtureNames))
+	}
+	if declared == 0 {
+		t.Fatal("the corpus declared no mutation floor at all — this run proved nothing")
 	}
 	t.Logf("applied %d (operator, scenario) pairs across %d stdlib fixtures",
 		pairs, len(stdlibFixtureNames))
