@@ -369,6 +369,37 @@ func TestReplayCanonicalEncodingEqualityClasses(t *testing.T) {
 		{"int and the boolean", int64(1), true, false},
 		{"text and the equal bytes", "1", []byte{0x31}, false},
 		{"member framing", []any{"a", "bc"}, []any{"ab", "c"}, false},
+		// The four rows below pin the member LENGTH, which the row above does
+		// not (#lzreplayframing). With a tag in front of every member,
+		// ["a","bc"] and ["ab","c"] already differ as byte strings, so an
+		// encoder that drops the length prefix ENTIRELY still passes that row.
+		// A pair that merely differs is not a pair that pins the length.
+		//
+		// This binding's frame is `<tag><decimal length>:<body>`, and its string
+		// tag IS the reference layout's byte `s`. But the frame also carries a
+		// `:` terminator after the digits, so what a member's content has to
+		// spell to swallow the next member's prefix is `s:`, not `s`. The
+		// corpus's ["a","sbc"] vs ["as","bc"] therefore does NOT collide here
+		// once only the digits are gone — `s:a`+`s:sbc` is `s:as:sbc` while
+		// `s:as`+`s:bc` is `s:ass:bc`. The `s:`-spelling pair is this binding's
+		// own colliding pair: remove the length and both sides concatenate to
+		// `s:as:s:bc`, so the digest equality this row forbids becomes true.
+		{"member length framing, this layout spells s-colon", []any{"a", "s:bc"}, []any{"as:", "bc"}, false},
+		// The mapping analogue: a key is framed apart from its value, so the
+		// same trick must not let a key swallow its value's prefix. Without the
+		// length both entries encode to `s:as:s:b`.
+		{"mapping key length framing, this layout spells s-colon", map[string]any{"a": "s:b"}, map[string]any{"as:": "b"}, false},
+		// Layout-INDEPENDENT: a nested container's boundary has no tag to hide
+		// behind, so an unframed concatenation merges these two whatever the
+		// tags are. This is the row that survives a re-tagging of the encoding,
+		// and the one that catches a length dropped from the CONTAINER frame
+		// rather than from a leaf.
+		{"nested container framing", []any{[]any{"a"}, "b"}, []any{[]any{"a", "b"}}, false},
+		// The corpus's reference-layout pair, kept locally as well because this
+		// binding's string tag is the reference's `s`: it collides under an
+		// encoder that drops the whole `<length>:` prefix, which the `s:` pair
+		// above does not catch.
+		{"member length framing, reference layout spells s", []any{"a", "sbc"}, []any{"as", "bc"}, false},
 		{"adjacent integers past 2^53", int64(9007199254740993), int64(9007199254740994), false},
 		{"signed and unsigned of one value", int64(7), uint64(7), true},
 		{"nil and the empty string", nil, "", false},

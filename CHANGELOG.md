@@ -41,6 +41,20 @@ All notable changes to lazily-go are documented here. This project adheres to
   digest IS the digest of the subject's declared final state — without it the
   fixture would accept a harness that observed some other value entirely and
   still produced a well-formed, log-bound, correctly-strided fingerprint.
+- The member-LENGTH framing of the canonical replay encoding is pinned in this
+  binding's own bytes (`#lzreplayframing`). `lazily-spec` 4010d99 grew
+  `canonical_encoding_equality.json` from 11 steps to 14, because
+  `["a","bc"]` vs `["ab","c"]` states the equality class but does not pin the
+  length: with a type tag in front of every member those two already differ as
+  byte strings, so an encoder with no length prefix at all still passes that
+  row. The corpus's two new leaf rows collide only in a layout whose string tag
+  is the byte `s`; the nested row `[["a"],"b"]` vs `[["a","b"]]` collides in
+  any layout. This binding frames as `<tag><decimal length>:<body>`, so its
+  string prefix is `s:`, not `s` — `TestReplayCanonicalEncodingEqualityClasses`
+  therefore carries `["a","s:bc"]` vs `["as:","bc"]` and the mapping analogue
+  `{"a":"s:b"}` vs `{"as:":"b"}`, which collide in THESE bytes the moment the
+  length is dropped, alongside the nested pair and the reference-layout pair.
+  The corpus step floor is re-pinned from 11 to 14.
 - Conformance rung 6 — an OBJECT-VALUED assertion key is checked by its KEY SET
   (`#lzsubblockkeyset`). Rung 2 proved every key a BLOCK carries is named; it
   said nothing about the keys one level down, inside an assertion key whose value

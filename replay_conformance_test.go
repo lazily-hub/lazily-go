@@ -416,8 +416,12 @@ func TestReplayCanonicalEncodingEqualityConformance(t *testing.T) {
 	values := jsMap(config["values"])
 
 	steps := jsList(fixture["steps"])
-	if len(steps) < 11 {
-		t.Fatalf("%s: %d steps, want at least 11 — the corpus shrank or the runner is reading the wrong file",
+	// 14 steps: the eleven original equality classes plus the three member-length
+	// rows lazily-spec 4010d99 added (#lzreplayframing). Pinned at what a clone
+	// of the PUBLISHED corpus carries, exactly — a smaller number would let a
+	// corpus that quietly dropped the length rows still report green here.
+	if len(steps) < 14 {
+		t.Fatalf("%s: %d steps, want at least 14 — the corpus shrank or the runner is reading the wrong file",
 			name, len(steps))
 	}
 
