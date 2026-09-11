@@ -345,8 +345,8 @@ fi
 # a drop here means the corpus or the recorder shrank, which IS the finding.
 #
 # These floors track WHAT CI ACTUALLY REPLAYS, exactly — no margin, no slack.
-# Pinned 2026-08-09 from CI run 31340402500 against the published corpus:
-# 141/150 fixtures OPENED, 147/147 scenarios REPLAYED. A local `make test` on the
+# Pinned 2026-09-11 from CI run 34629316668 against the published corpus:
+# 147/156 fixtures OPENED, 151/151 scenarios REPLAYED. A local `make test` on the
 # same commit reproduced both numbers.
 #
 # Do NOT raise a floor "by however many replays this change adds" and leave the
@@ -360,7 +360,7 @@ fi
 # An upstream fixture that lands without a Go runner raises `total` and leaves
 # `covered` alone, so it does not trip MIN_FIXTURES; only a replay that STOPS
 # running does.
-MIN_FIXTURES="${MIN_FIXTURES:-141}"
+MIN_FIXTURES="${MIN_FIXTURES:-147}"
 if [ "$total" -eq 0 ]; then
   echo "ERROR: the corpus at $SPEC_DIR listed ZERO fixtures." >&2
   echo "       Every check above is vacuously green over an empty population." >&2
@@ -381,8 +381,8 @@ echo "conformance coverage OK: $covered/$total canonical fixtures OPENED by the 
 # scenarios — OK reported having compared nothing.
 #
 # Same rule as MIN_FIXTURES above: this equals the scenario total a completed CI
-# run reports, exactly. Pinned 2026-08-09 from run 31340402500 at 147/147.
-MIN_SCENARIOS="${MIN_SCENARIOS:-147}"
+# run reports, exactly. Pinned 2026-09-11 from run 34629316668 at 151/151.
+MIN_SCENARIOS="${MIN_SCENARIOS:-151}"
 if [ "$SCENARIO_TOTAL" -eq 0 ]; then
   echo "ERROR: ZERO scenarios were found across the opened fixtures." >&2
   echo "       The rung above is vacuously green over an empty population." >&2
