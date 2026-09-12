@@ -13,6 +13,7 @@ import (
 	"reflect"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -331,6 +332,93 @@ func jsonFieldTypes(typ reflect.Type) map[string]reflect.Type {
 var unboundBlockExcuses = map[string]string{}
 
 // ---------------------------------------------------------------------------
+// A CEILING on how much may be ledgered (#lzledgerceiling)
+// ---------------------------------------------------------------------------
+//
+// The ledger above is an EQUALITY against the run, failing in BOTH directions:
+// an unbound block nobody excused fails, and an excuse the run outlived fails as
+// stale or rotted. That is stronger than a one-directional allowlist and it is
+// still satisfied by ANY CONSISTENT PAIR. A commit that detaches a bind AND
+// writes the matching entry passes both directions, because the two sides agree
+// about the new state — which is all an equality can ask.
+//
+// Nothing else here sees that either. The magnitude rung (#lzblocksitepin) counts
+// DECLARED sites and distinct digests; a detached bind removes neither, so 725 /
+// 616 hold with the block no longer bound by anything. The coverage guard counts
+// fixtures OPENED, and the fixture is still opened. This was demonstrated against
+// this binding rather than argued: dropping the bind for
+// `signaling/frames.json .frames[0].assertions` and adding its ledger entry left
+// every other rung green.
+//
+// What closes it is not a count of what IS excused — a number that mirrors the
+// current population is redundant with the equality (equal sets have equal
+// counts) and adds a second edit site that drifts, which is the `MIN_BLOCKS = 30`
+// defect in a new costume. What closes it is a CEILING on how much MAY be. A
+// ceiling is POLICY rather than MEASUREMENT: it does not move with the corpus, it
+// never needs re-pinning except deliberately and upward in review, and at zero it
+// needs no maintenance at all. What it buys is that a regression and its excuse
+// can no longer land in the same commit unnoticed — raising the line is the
+// explicit act.
+//
+// Raise it ONLY for a block that genuinely cannot be bound by any seam this
+// package has, with the reason spelled in the entry, and expect to be asked why
+// the capability cannot exist. Never to park a block someone means to bind later:
+// that is the laundering this rung exists to refuse.
+const maxLedgeredBlocksEnv = "MAX_LEDGERED_BLOCKS"
+
+// defaultMaxLedgeredBlocks is where this binding sits TODAY. unboundBlockExcuses
+// is EMPTY — lazily-go binds every assertion-bearing block in every fixture it
+// opens — so the ceiling is zero, landing it changes no verdict, and the first
+// entry anyone adds fails until this line is raised on purpose.
+const defaultMaxLedgeredBlocks = 0
+
+// maxLedgeredBlocks reads the ceiling. An unreadable override is a hard error and
+// not a fallback to the default: a ceiling that cannot be read must not be
+// assumed away, which is the same rule every other missing-evidence path in this
+// file follows.
+func maxLedgeredBlocks() (int, error) {
+	raw := strings.TrimSpace(os.Getenv(maxLedgeredBlocksEnv))
+	if raw == "" {
+		return defaultMaxLedgeredBlocks, nil
+	}
+	ceiling, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s=%q is not an integer, so the ledger ceiling cannot be read. Falling back to the "+
+			"default here would let a typo silently relax a policy line (#lzledgerceiling)", maxLedgeredBlocksEnv, raw)
+	}
+	if ceiling < 0 {
+		return 0, fmt.Errorf("%s=%d is negative. A negative ceiling is unsatisfiable by an empty ledger and reads "+
+			"as an attempt to disable the check (#lzledgerceiling)", maxLedgeredBlocksEnv, ceiling)
+	}
+	return ceiling, nil
+}
+
+// ledgerCeilingProblems is the decision, split out from the exit path so both
+// directions can be mutation-checked with an ordinary test.
+func ledgerCeilingProblems(excuses map[string]string, ceiling int) []string {
+	if len(excuses) <= ceiling {
+		return nil
+	}
+	keys := make([]string, 0, len(excuses))
+	for key := range excuses {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var detail strings.Builder
+	for _, key := range keys {
+		fmt.Fprintf(&detail, "\n        %s — %s", key, excuses[key])
+	}
+	return []string{fmt.Sprintf(
+		"%d assertion-block site(s) are ledgered as unbound in unboundBlockExcuses; the ceiling is %d. This ledger "+
+			"may only SHRINK: the equality above only checks that the ledger and the run AGREE, which any "+
+			"consistent pair satisfies — a commit that detaches a bind and writes the matching entry passes both "+
+			"of its directions, and the magnitude rung does not see it either because the site is still DECLARED. "+
+			"Bind the block. Raise %s only for a block that genuinely cannot be bound by consumeKeys or a "+
+			"strictJSON struct, with the reason in the entry (#lzledgerceiling).%s",
+		len(excuses), ceiling, maxLedgeredBlocksEnv, detail.String())}
+}
+
+// ---------------------------------------------------------------------------
 // The walk and the decision
 // ---------------------------------------------------------------------------
 
@@ -499,6 +587,25 @@ func snapshotUnboundInputs() (map[string]string, map[string]bool) {
 // cannot tell an inventory of 725 sites from one of 12, and every rung in this
 // file is scoped to the blocks the inventory holds.
 func checkUnboundAssertionBlocks() bool {
+	// The CEILING first (#lzledgerceiling). It is a property of COMMITTED SOURCE
+	// rather than of this run, so it is judged before the two early returns
+	// below: a filtered run and a run that opened nothing both leave the ledger
+	// exactly as large as the tree says it is, and there is no reason for either
+	// to be the state in which the ledger may grow unremarked.
+	ceiling, ceilingErr := maxLedgeredBlocks()
+	if ceilingErr != nil {
+		fmt.Fprintf(os.Stderr, "FAIL: %v\n", ceilingErr)
+		return false
+	}
+	if ceilingProblems := ledgerCeilingProblems(unboundBlockExcuses, ceiling); len(ceilingProblems) > 0 {
+		fmt.Fprintf(os.Stderr, "FAIL: %d assertion-block problem(s) before any fixture was examined:\n",
+			len(ceilingProblems))
+		for _, problem := range ceilingProblems {
+			fmt.Fprintf(os.Stderr, "  %s\n", problem)
+		}
+		return false
+	}
+
 	// A FILTERED run cannot judge boundness, and this is not a convenience —
 	// it is the one place where a false RED is manufacturable. A fixture is
 	// routinely opened by one test and bound by another (a shared loader reads
@@ -564,8 +671,10 @@ func checkUnboundAssertionBlocks() bool {
 		if deriveErr == nil {
 			fmt.Fprintf(os.Stderr,
 				"assertion-block inventory OK: %d site(s) / %d distinct digest(s) inventoried from %d opened "+
-					"fixture(s) (derived from the canonical corpus: %d site(s) / %d digest(s))\n",
-				inventory.sites, inventory.digests, fixtures, expected.sites, expected.digests)
+					"fixture(s) (derived from the canonical corpus: %d site(s) / %d digest(s)); %d ledgered as "+
+					"unbound of at most %d\n",
+				inventory.sites, inventory.digests, fixtures, expected.sites, expected.digests,
+				len(unboundBlockExcuses), ceiling)
 		}
 		return true
 	}
@@ -1160,4 +1269,89 @@ func TestBlockMagnitudeProblemsDecides(t *testing.T) {
 	if problems := blockMagnitudeProblems(blockMagnitude{sites: 700, digests: 600}, expected, "/corpus"); len(problems) != 2 {
 		t.Fatalf("both dimensions moved and %d problem(s) were reported, want 2: %v", len(problems), problems)
 	}
+}
+
+// TestLedgerCeilingDecides is the mutation check for the ceiling
+// (#lzledgerceiling): it fires when the ledger is one entry over, stays silent
+// at the line, and names both the population and the limit so a reader does not
+// have to count the map to learn which one moved.
+func TestLedgerCeilingDecides(t *testing.T) {
+	one := map[string]string{"probe/probe.json .steps[0].expected": "no seam can reach it"}
+	two := map[string]string{
+		"probe/probe.json .steps[0].expected": "no seam can reach it",
+		"probe/probe.json .steps[1].expected": "nor this one",
+	}
+
+	if problems := ledgerCeilingProblems(nil, 0); len(problems) != 0 {
+		t.Fatalf("an empty ledger tripped a ceiling of 0: %v", problems)
+	}
+	if problems := ledgerCeilingProblems(one, 1); len(problems) != 0 {
+		t.Fatalf("a ledger AT the ceiling was refused: %v", problems)
+	}
+
+	problems := ledgerCeilingProblems(one, 0)
+	if len(problems) != 1 {
+		t.Fatalf("one entry over a ceiling of 0 reported %d problem(s), want 1: %v", len(problems), problems)
+	}
+	for _, want := range []string{"1 assertion-block site(s) are ledgered", "the ceiling is 0", "may only SHRINK",
+		"probe/probe.json .steps[0].expected", "no seam can reach it", maxLedgeredBlocksEnv} {
+		if !strings.Contains(problems[0], want) {
+			t.Errorf("the refusal does not mention %q: %s", want, problems[0])
+		}
+	}
+
+	// It is the SIZE that is judged, not the identity of any entry: a second
+	// entry under the same ceiling is refused the same way, and every entry is
+	// listed so the diff that raised the line is legible.
+	problems = ledgerCeilingProblems(two, 1)
+	if len(problems) != 1 || !strings.Contains(problems[0], "2 assertion-block site(s) are ledgered") ||
+		!strings.Contains(problems[0], "the ceiling is 1") {
+		t.Fatalf("two entries over a ceiling of 1 were not refused with both numbers: %v", problems)
+	}
+	if !strings.Contains(problems[0], ".steps[0].expected") || !strings.Contains(problems[0], ".steps[1].expected") {
+		t.Fatalf("the refusal does not list every ledgered site: %s", problems[0])
+	}
+
+	// Raising the line is the explicit act, and it works — a ceiling nobody can
+	// raise would be pressure to delete the whole rung instead.
+	if problems := ledgerCeilingProblems(two, 2); len(problems) != 0 {
+		t.Fatalf("a deliberately raised ceiling still refused: %v", problems)
+	}
+}
+
+// TestMaxLedgeredBlocksReadsTheCeiling pins the override seam. A ceiling that
+// silently fell back to the default on a malformed value would let a typo relax
+// a policy line, which is the failure mode the hard error exists for.
+func TestMaxLedgeredBlocksReadsTheCeiling(t *testing.T) {
+	t.Setenv(maxLedgeredBlocksEnv, "")
+	ceiling, err := maxLedgeredBlocks()
+	if err != nil || ceiling != defaultMaxLedgeredBlocks {
+		t.Fatalf("unset: ceiling=%d err=%v, want %d / nil", ceiling, err, defaultMaxLedgeredBlocks)
+	}
+	t.Setenv(maxLedgeredBlocksEnv, " 3 ")
+	if ceiling, err := maxLedgeredBlocks(); err != nil || ceiling != 3 {
+		t.Fatalf("override: ceiling=%d err=%v, want 3 / nil", ceiling, err)
+	}
+	for _, bad := range []string{"lots", "1.5", "-1"} {
+		t.Setenv(maxLedgeredBlocksEnv, bad)
+		if _, err := maxLedgeredBlocks(); err == nil {
+			t.Fatalf("%s=%q was accepted; an unreadable ceiling must not fall back to the default",
+				maxLedgeredBlocksEnv, bad)
+		}
+	}
+}
+
+// TestThisBindingsLedgerIsUnderItsCeiling asserts the committed state, so the
+// ceiling is not merely a function nothing calls with the real ledger. It runs
+// under any filter, because the committed ledger does not depend on which tests
+// a run selects.
+func TestThisBindingsLedgerIsUnderItsCeiling(t *testing.T) {
+	ceiling, err := maxLedgeredBlocks()
+	if err != nil {
+		t.Fatalf("reading the ceiling: %v", err)
+	}
+	if problems := ledgerCeilingProblems(unboundBlockExcuses, ceiling); len(problems) != 0 {
+		t.Fatalf("this binding's ledger is over its own ceiling: %v", problems)
+	}
+	t.Logf("unboundBlockExcuses: %d entry(ies) of at most %d", len(unboundBlockExcuses), ceiling)
 }
