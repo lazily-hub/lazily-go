@@ -267,6 +267,74 @@ own_commands() {
 	dry_run "$target" | tail -n +"$((prefix + 1))"
 }
 
+# `make -n` must SUCCEED for every target in the closure (#lzgrepcpipefail).
+#
+# `dry_run` above reads a recipe through `make -n` with `2>/dev/null` on make and a
+# trailing `|| true` on the pipeline. Both are individually right — a `grep -v`
+# that filters out every line of make's chatter is a legitimate zero, and that is
+# what the `|| true` is for — but together they also swallow make FAILING. make
+# exits 2 on a prerequisite it has no rule for, writes its diagnosis to stderr, and
+# produces an EMPTY stdout. Empty stdout is exactly what a recipe with nothing
+# checkable in it produces, so the target lands in `nogate` and this guard reports
+# OK having verified nothing whatsoever about it. The `|| true` is correct about
+# the grep and still leaves make's own failure indistinguishable from a legitimate
+# zero; those are two different questions sharing one exit status.
+#
+# MEASURED, not reasoned. Reasoning is what missed it: judged against the Makefile
+# as written, no target has a file prerequisite, so no `make -n` can fail — which
+# is a property of today's source, not a safety property, and this guard's whole
+# job is to survive the commit that changes it. Adding a stamp file, a generated
+# header or a vendored directory as a prerequisite is an ordinary commit that
+# disarms the guard without touching the guard.
+#
+# Add `test: does-not-exist.stamp` to a byte-verified scratch copy of this repo's
+# Makefile and, before this probe existed:
+#
+#   no gate  test                     recipe runs no checkable command
+#   no gate  conformance-coverage     recipe runs no checkable command
+#   check-ci-reach: OK — 7 target(s) reached by CI, 0 excused, 3 carrying no gate
+#   exit 0
+#
+# Two gates, not one: `conformance-coverage` depends on `test`, so `make -n` fails
+# for it too. The gate that proves the suite ran and the gate that audits the
+# coverage ledger both went invisible to the reachability guard, and nothing went
+# red.
+#
+# So make's status is checked HERE, in the MAIN shell, per target, before any
+# verdict is printed. It cannot live inside `dry_run`: every caller runs that in a
+# `$(...)` or a pipeline, where an `exit 1` kills only the subshell and the caller
+# reads back the same empty string. Per target so the diagnostic names the one
+# that dropped out, and make's stderr is carried VERBATIM because that message
+# names the missing prerequisite, which is the whole diagnosis.
+probe_failures=""
+probe_count=0
+while IFS= read -r target; do
+	[ -n "$target" ] || continue
+	# 2>&1 >/dev/null captures stderr ONLY: stderr is duplicated onto the
+	# substitution's pipe first, then stdout is discarded. Order matters.
+	if ! probe_err="$("$MAKE_BIN" -n "$target" 2>&1 >/dev/null)"; then
+		probe_failures="$probe_failures  - $target"$'\n'
+		while IFS= read -r eline; do
+			[ -n "$eline" ] || continue
+			probe_failures="$probe_failures      $eline"$'\n'
+		done <<<"$probe_err"
+		probe_count=$((probe_count + 1))
+	fi
+done <<<"$closure"
+
+if [ "$probe_count" -gt 0 ]; then
+	echo "check-ci-reach: '$MAKE_BIN -n' FAILED for $probe_count target(s) in '$ROOT_TARGET''s closure:" >&2
+	printf '%s' "$probe_failures" >&2
+	echo >&2
+	echo "This guard reads every recipe through \`make -n\`. A target make cannot even" >&2
+	echo "DRY-RUN yields an empty recipe, which is indistinguishable from a recipe that" >&2
+	echo "carries no checkable command — so each target above would be reported as" >&2
+	echo "'carrying no gate' and the verdict would be OK over a gate nobody checked." >&2
+	echo "Fix the Makefile. Do not silence this by excusing the target: an excuse says" >&2
+	echo "CI deliberately does not run a gate, not that the gate cannot be read." >&2
+	exit 1
+fi
+
 # ------------------------------------------------------------- workflow scraping
 
 # Command lines from every `run:` step. Comment lines inside a run body are
