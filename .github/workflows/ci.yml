@@ -71,6 +71,14 @@ jobs:
       # the same thing here or the guard below is auditing a file nobody wrote.
       # Truncate, do not merely create: a manifest carried over from a previous
       # step would credit this run with fixtures it never opened.
+      #
+      # Do NOT add a `test -s` on either file after the test step below. Stamping
+      # made every evidence file NON-EMPTY (#lzstampsatisfiesnonempty): a
+      # byte-length test passes on a recorder that attached, wrote its
+      # `# lazily-run-id` line and recorded nothing — lazily-cpp shipped exactly
+      # that as a "manifest written" step. Substance is asserted where it can be
+      # COUNTED: the coverage guard below refuses an evidence file with ZERO
+      # records, and names the file it refused.
       - name: Prepare conformance evidence files (#lzguardsnotinci)
         run: |
           mkdir -p build

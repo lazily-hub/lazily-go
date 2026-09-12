@@ -16,6 +16,12 @@
 # were read"; it means the suite ran without the recorder attached, and passing in
 # that state is the vacuous green this guard exists to prevent.
 #
+# A manifest that EXISTS is not automatically a manifest with anything IN it. The
+# run-id stamp made every evidence file non-empty, so `test -s` — which is what
+# the two reads below used to be — is satisfied by a recorder that attached and
+# recorded nothing. Every read here counts RECORDS instead
+# (#lzstampsatisfiesnonempty).
+#
 # A manifest that exists is not automatically evidence about THIS run either: the
 # file is written by a separate process, `go test` serves a cached package without
 # running its binary, and a file nobody rewrote still parses perfectly. So every
@@ -182,11 +188,58 @@ evidence_data() {
   grep -v '^#' -- "$1" || true
 }
 
+# The RECORDS an evidence file carries: data lines with something on them.
+# COUNTED, never measured (#lzstampsatisfiesnonempty).
+#
+# `test -s` used to be this check. The run-id protocol (#lzstalemanifest) broke it
+# in one stroke: a stamped file is NON-EMPTY, so a recorder that attached, wrote
+# its `# lazily-run-id` line and then recorded nothing satisfies every
+# byte-length test on disk. lazily-cpp shipped that hole into CI — its "manifest
+# written" step tested `-s`, which a bare stamp passes. Bytes stopped being
+# evidence the moment the stamp was added; records are what was ever meant.
+#
+# A blank line is not a record. `grep -c .` counts lines carrying at least one
+# character, so a trailing newline and a file of nothing but newlines both count
+# ZERO, and the number is the same one the loops below will iterate over.
+evidence_record_count() {
+  [ -f "$1" ] || { printf '0\n'; return 0; }
+  evidence_data "$1" | grep -c . || true
+}
+
+# The one reader of an evidence file: it exists, it carries records, and every
+# stamp on it is THIS run's. One function rather than an existence-or-bytes test
+# at each call site plus a record test in here — that split is exactly what let
+# the stamp weaken the emptiness checks with nothing going red.
 require_fresh_evidence() {
-  local file="$1" label="$2" stamps stale
+  local file="$1" label="$2" path_var="$3" stamps stale records
+  if [ ! -f "$file" ]; then
+    echo "FAIL: no $label at $file." >&2
+    echo "      Run the suite with $path_var set so the recorder attaches. An" >&2
+    echo "      absent $label is missing evidence, not evidence of absence." >&2
+    return 1
+  fi
+  # Records are checked BEFORE stamps so the ordinary empty case keeps the message
+  # that says what to do about it: `make test` truncates both files, and a fully
+  # cached `go test` writes nothing back, leaving a zero-byte file that has no
+  # stamp to complain about and no records to reason from.
+  records="$(evidence_record_count "$file")"
+  if [ "$records" -eq 0 ]; then
+    if [ -n "$(evidence_stamps "$file")" ]; then
+      echo "FAIL: no $label at $file — it carries a '${RUN_ID_PREFIX}' stamp and ZERO records." >&2
+      echo "      The recorder attached, stamped the file, and recorded nothing. The stamp" >&2
+      echo "      alone makes the file non-empty, so a byte-length test accepts it; this" >&2
+      echo "      counts records instead (#lzstampsatisfiesnonempty). Reporting coverage" >&2
+      echo "      from an empty evidence file is the vacuous green this guard prevents." >&2
+    else
+      echo "FAIL: no $label at $file — the file holds ZERO records." >&2
+      echo "      Run the suite with $path_var set so the recorder attaches. An" >&2
+      echo "      empty $label is missing evidence, not evidence of absence." >&2
+    fi
+    return 1
+  fi
   stamps="$(evidence_stamps "$file")"
   if [ -z "$stamps" ]; then
-    echo "FAIL: $label at $file carries no '${RUN_ID_PREFIX}' line." >&2
+    echo "FAIL: the $label at $file carries no '${RUN_ID_PREFIX}' line." >&2
     echo "      Unstamped evidence is evidence about an unknown run: an older file" >&2
     echo "      predating #lzstalemanifest has no stamp, and so does one written by a" >&2
     echo "      suite that was never told which run it was recording. Re-run the suite" >&2
@@ -195,7 +248,7 @@ require_fresh_evidence() {
   fi
   stale="$(printf '%s\n' "$stamps" | grep -vxF "$RUN_ID" || true)"
   if [ -n "$stale" ]; then
-    echo "FAIL: $label at $file was written by a DIFFERENT run." >&2
+    echo "FAIL: the $label at $file was written by a DIFFERENT run." >&2
     echo "      found:  $(printf '%s' "$stale" | tr '\n' ' ')" >&2
     echo "      wanted: $RUN_ID" >&2
     echo "      The test step did not write this file during this invocation — a cached" >&2
@@ -203,12 +256,6 @@ require_fresh_evidence() {
     echo "      guard run by hand after an earlier suite, or a build/ directory left" >&2
     echo "      over from a previous checkout. The numbers below would describe that" >&2
     echo "      other run (#lzstalemanifest)." >&2
-    return 1
-  fi
-  if [ -z "$(evidence_data "$file")" ]; then
-    echo "FAIL: $label at $file carries this run's stamp and NO data lines." >&2
-    echo "      The recorder attached and recorded nothing. Reporting coverage from an" >&2
-    echo "      empty evidence file is the vacuous green this guard exists to prevent." >&2
     return 1
   fi
   return 0
@@ -225,14 +272,7 @@ collect_sources() {
   done
 }
 
-if [ ! -s "$MANIFEST" ]; then
-  echo "FAIL: no conformance manifest at $MANIFEST." >&2
-  echo "      Run the suite with LAZILY_CONFORMANCE_MANIFEST set so the recorder" >&2
-  echo "      attaches. An absent manifest is missing evidence, not evidence of" >&2
-  echo "      absence." >&2
-  exit 1
-fi
-require_fresh_evidence "$MANIFEST" "the conformance manifest" || exit 1
+require_fresh_evidence "$MANIFEST" "conformance manifest" "LAZILY_CONFORMANCE_MANIFEST" || exit 1
 OPENED="$(evidence_data "$MANIFEST" | sort -u)"
 
 missing=0
@@ -315,14 +355,7 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-if [ ! -s "$SCENARIOS" ]; then
-  echo "FAIL: no scenario ledger at $SCENARIOS." >&2
-  echo "      Run the suite with LAZILY_CONFORMANCE_SCENARIOS set so the recorder" >&2
-  echo "      attaches. An absent ledger is missing evidence, not evidence that" >&2
-  echo "      every scenario ran." >&2
-  exit 1
-fi
-require_fresh_evidence "$SCENARIOS" "the scenario ledger" || exit 1
+require_fresh_evidence "$SCENARIOS" "scenario ledger" "LAZILY_CONFORMANCE_SCENARIOS" || exit 1
 REPLAYED="$(evidence_data "$SCENARIOS" | sort -u)"
 
 # scenario_ids prints a fixture's scenario ids in the ONE resolution order every

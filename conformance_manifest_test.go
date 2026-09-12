@@ -349,6 +349,11 @@ func coverageGuardScript(t *testing.T) string {
 // runCoverageGuard executes the committed guard against synthetic evidence and a
 // synthetic (empty) corpus root, and returns its combined output.
 //
+// A nil `manifest` or `scenarios` means that file is ABSENT; an empty non-nil one
+// means it exists and holds zero bytes. The guard refuses both, for different
+// reasons and with different advice, so the two have to be expressible here
+// (#lzstampsatisfiesnonempty).
+//
 // The corpus is a real empty directory rather than the canonical checkout, so
 // these cases are hermetic: they never read ../lazily-spec, and they cannot be
 // affected by what the corpus currently holds. An empty corpus means the guard
@@ -369,11 +374,15 @@ func runCoverageGuard(t *testing.T, runID string, manifest, scenarios []byte) (s
 	}
 	manifestPath := filepath.Join(dir, "fixtures-loaded.txt")
 	scenariosPath := filepath.Join(dir, "scenarios-replayed.txt")
-	if err := os.WriteFile(manifestPath, manifest, 0o644); err != nil {
-		t.Fatalf("writing the synthetic manifest: %v", err)
+	if manifest != nil {
+		if err := os.WriteFile(manifestPath, manifest, 0o644); err != nil {
+			t.Fatalf("writing the synthetic manifest: %v", err)
+		}
 	}
-	if err := os.WriteFile(scenariosPath, scenarios, 0o644); err != nil {
-		t.Fatalf("writing the synthetic ledger: %v", err)
+	if scenarios != nil {
+		if err := os.WriteFile(scenariosPath, scenarios, 0o644); err != nil {
+			t.Fatalf("writing the synthetic ledger: %v", err)
+		}
 	}
 
 	cmd := exec.Command("bash", script)
@@ -469,13 +478,55 @@ func TestCoverageGuardRefusesStaleEvidence(t *testing.T) {
 		scenarios: fresh(thisRun, ledgerLines...),
 		want:      []string{"DIFFERENT run", otherRun},
 	}, {
-		// A stamp with no data under it is a recorder that attached and recorded
-		// nothing — the vacuous green, one layer in.
-		name:      "stamped but empty",
+		// A stamp with no records under it is a recorder that attached and
+		// recorded nothing — the vacuous green, one layer in.
+		//
+		// It is also the hazard the stamp itself introduced
+		// (#lzstampsatisfiesnonempty). This file is 33 bytes, so `test -s`, the
+		// check that stood here before the run-id protocol landed, PASSES on it.
+		// The guard has to count records, and the refusal has to name the file —
+		// "no records" without a path sends the reader looking at the wrong one
+		// of the two.
+		name:      "manifest carries a stamp and zero records",
 		runID:     thisRun,
 		manifest:  []byte("# lazily-run-id " + thisRun + "\n"),
 		scenarios: fresh(thisRun, ledgerLines...),
-		want:      []string{"NO data lines"},
+		want:      []string{"conformance manifest", "ZERO records", "fixtures-loaded.txt"},
+	}, {
+		// The ledger is the second reader of the same rule. The guard JOINS the
+		// two files, so a manifest that counted records while the ledger only
+		// measured bytes would let a real fixture list vouch for a ledger that
+		// recorded nothing.
+		name:      "ledger carries a stamp and zero records",
+		runID:     thisRun,
+		manifest:  fresh(thisRun, manifestLines...),
+		scenarios: []byte("# lazily-run-id " + thisRun + "\n"),
+		want:      []string{"scenario ledger", "ZERO records", "scenarios-replayed.txt"},
+	}, {
+		// The ordinary empty case, which must keep refusing: neither stamp nor
+		// records. This is what `make test`'s truncation plus a fully cached
+		// `go test` leaves behind, so its message carries the variable to set
+		// rather than the stamp to fix.
+		name:      "manifest exists and is empty",
+		runID:     thisRun,
+		manifest:  []byte{},
+		scenarios: fresh(thisRun, ledgerLines...),
+		want:      []string{"conformance manifest", "ZERO records", "LAZILY_CONFORMANCE_MANIFEST"},
+	}, {
+		// And the file that was never written at all. Absence and emptiness are
+		// one refusal in one function now (they used to be a `test -s` at the
+		// call site), so both branches need a probe or half of it is unexercised.
+		name:      "manifest absent",
+		runID:     thisRun,
+		manifest:  nil,
+		scenarios: fresh(thisRun, ledgerLines...),
+		want:      []string{"no conformance manifest", "fixtures-loaded.txt", "LAZILY_CONFORMANCE_MANIFEST"},
+	}, {
+		name:      "ledger absent",
+		runID:     thisRun,
+		manifest:  fresh(thisRun, manifestLines...),
+		scenarios: nil,
+		want:      []string{"no scenario ledger", "scenarios-replayed.txt", "LAZILY_CONFORMANCE_SCENARIOS"},
 	}}
 
 	for _, tc := range cases {
