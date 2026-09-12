@@ -84,12 +84,24 @@ import (
 // the binding seam knows it, so at least an `expected` never credits an
 // `assertions`.
 
-// assertionBearingBlockNames is the canonical set of keys whose object value is
-// a block of assertions. `assertions` is the corpus-wide name; `expect` and
-// `expected` are the per-step and per-scenario names the runners in this package
-// hand to consumeKeys. Taxonomy and payload objects (`wire`, `input`, `seed`,
-// `op`) are deliberately absent: they are replay INPUT, and a guard that demanded
-// they be bound would be demanding assertions about the fixture's own stimulus.
+// assertionBearingBlockNames is the canonical set of keys that carry a block of
+// assertions. `assertions` is the corpus-wide name; `expect` and `expected` are
+// the per-step and per-scenario names the runners in this package hand to
+// consumeKeys. Taxonomy and payload objects (`wire`, `input`, `seed`, `op`) are
+// deliberately absent: they are replay INPUT, and a guard that demanded they be
+// bound would be demanding assertions about the fixture's own stimulus.
+//
+// The VALUE at one of these keys may be an object or an ARRAY of objects, and
+// both spellings are sites — see walkAssertionBlocks (#lzarrayelementsites).
+//
+// Known narrowness, stated rather than hidden: the corpus also uses
+// `expect_initial` and `expect_after`, which lazily-py, lazily-js and
+// lazily-dart track and this set does not. They are 6 sites / 6 digests in
+// collections/semtree_incremental.json, whose runner asserts them entry by
+// entry (see checkSemTreeAfterEntry) without routing them through either rung-0
+// seam. Adding the two names here is a widening in its own right, on the NAME
+// axis rather than the array axis, and it moves this binding's derived
+// magnitude by exactly +6/+6.
 var assertionBearingBlockNames = map[string]bool{
 	"assertions": true,
 	"expect":     true,
@@ -343,8 +355,8 @@ var unboundBlockExcuses = map[string]string{}
 // about the new state — which is all an equality against the RUN can ask.
 //
 // Nothing else here sees that either. The magnitude rung (#lzblocksitepin) counts
-// DECLARED sites and distinct digests; a detached bind removes neither, so 725 /
-// 616 hold with the block no longer bound by anything. The coverage guard counts
+// DECLARED sites and distinct digests; a detached bind removes neither, so 737 /
+// 628 hold with the block no longer bound by anything. The coverage guard counts
 // fixtures OPENED, and the fixture is still opened. This was demonstrated against
 // this binding rather than argued: dropping the bind for
 // `signaling/frames.json .frames[0].assertions` and adding its ledger entry left
@@ -363,7 +375,7 @@ var unboundBlockExcuses = map[string]string{}
 // migration the ledger shrinks, the constant stays put, slack becomes >= 1, and
 // the same detach-plus-excuse commit passes again. Slack accumulates with every
 // migration and converges on exactly the retired hand-typed block floor — 30
-// against an actual 725, a number so far above the population that it never
+// against an actual 737, a number so far above the population that it never
 // fired and so was never updated. That is the defect this family of rungs exists
 // to replace, and a ceiling walks back into it one migration at a time.
 //
@@ -514,6 +526,49 @@ type fixtureBlock struct {
 
 // walkAssertionBlocks collects every assertion-bearing block in a decoded
 // fixture, descending through arrays as well as objects.
+//
+// An assertion-bearing key is a site when its value is a plain OBJECT, and ALSO
+// when its value is an ARRAY: then each plain-object ELEMENT of that array is a
+// site of its own (#lzarrayelementsites). The second half is the whole reason
+// this comment is long, because it was missing and pointed at a real hole:
+// `signaling/anti_spoof_session.json` states its expected outbound frames as
+// eight array-valued `steps[].expect` keys carrying 1+2+3+1+1+1+1+2 = 12
+// plain-object elements — a routing target, a frame type, peer ids, SDP
+// payloads, ICE candidates, an error code — and under an objects-only rule all
+// twelve were invisible to rung 0. "A runner binds ELEMENTS, not the array" is
+// true and was exactly the argument for skipping the array; it is an argument
+// for emitting one site PER ELEMENT, not for emitting none.
+//
+// Four properties of the array arm, each of which can be got wrong silently, so
+// each is probed on a synthetic shape in
+// TestWalkAssertionBlocksCountsArrayElements rather than left to the corpus —
+// which carries exactly ONE of these shapes and so cannot catch over-widening:
+//
+//   - ONE LEVEL ONLY. A nested array `[[{...}]]` emits nothing. The element of
+//     the outer array is an array, not an object, so it is not a site; anything
+//     tracked inside it is still reached by the ordinary descent below.
+//   - PLAIN OBJECTS ONLY. A scalar, an array or a null element is not a block.
+//     An array of scalars — `"expect": [1, 2]` — emits nothing at all.
+//   - TRUE INDEXES. In a mixed array `[{...}, 3, {...}]` the sites are
+//     `expect[0]` and `expect[2]`. Numbering the emitted elements 0,1 would
+//     make a path that resolves to the wrong element of the fixture, and the
+//     excuse ledger addresses blocks BY path.
+//   - `<path>[<index>]` LABELS. Two elements of the SAME array must be named
+//     separately or the excuse ledger and the seen/bound path sets collapse them
+//     into one site, which is the set-identity failure this family cares about
+//     (see TestArrayElementSitesAreIndividuallyAddressable).
+//
+// The walk descends past a site as well as emitting it, arrays included, so a
+// tracked key nested inside an emitted block or inside an emitted element is
+// found too. No block in the corpus nests another today; the descent is here so
+// that the first one to do so is pinned by the change that adds it.
+//
+// There is only one walk, and BOTH sides of the magnitude equality call it —
+// unboundBlockReport over what the run opened, deriveBlockMagnitude over the
+// canonical corpus. That is what makes a one-sided widening impossible to land
+// green: a site the derivation counts and the inventory does not fails as a
+// magnitude mismatch, and a site the inventory counts and no runner bound fails
+// as unbound. Widening this function moves both sides in step by construction.
 func walkAssertionBlocks(fixture string, tree any) []fixtureBlock {
 	var out []fixtureBlock
 	var walk func(node any, path string)
@@ -528,8 +583,28 @@ func walkAssertionBlocks(fixture string, tree any) []fixtureBlock {
 			for _, key := range keys {
 				child := value[key]
 				childPath := path + "." + key
-				if obj, isObject := child.(map[string]any); isObject && assertionBearingBlockNames[key] {
-					out = append(out, fixtureBlock{fixture: fixture, path: childPath, name: key, obj: obj})
+				if assertionBearingBlockNames[key] {
+					switch held := child.(type) {
+					case map[string]any:
+						out = append(out, fixtureBlock{
+							fixture: fixture, path: childPath, name: key, obj: held})
+					case []any:
+						// The index is the element's TRUE position, so a mixed
+						// array skips the non-object positions rather than
+						// renumbering past them.
+						for i, element := range held {
+							obj, isObject := element.(map[string]any)
+							if !isObject {
+								continue
+							}
+							out = append(out, fixtureBlock{
+								fixture: fixture,
+								path:    fmt.Sprintf("%s[%d]", childPath, i),
+								name:    key,
+								obj:     obj,
+							})
+						}
+					}
 				}
 				walk(child, childPath)
 			}
@@ -666,7 +741,7 @@ func snapshotUnboundInputs() (map[string]string, map[string]bool) {
 // It also asserts the MAGNITUDE of what it examined, in both dimensions, against
 // a number derived from the canonical corpus rather than typed here
 // (#lzblocksitepin). The zero-check above is only the floor of that argument: it
-// cannot tell an inventory of 725 sites from one of 12, and every rung in this
+// cannot tell an inventory of 737 sites from one of 12, and every rung in this
 // file is scoped to the blocks the inventory holds.
 func checkUnboundAssertionBlocks() bool {
 	// The SIZE PIN first (#lzledgerratchet). It is a property of COMMITTED SOURCE
@@ -777,7 +852,7 @@ func checkUnboundAssertionBlocks() bool {
 // zero inventoried blocks means zero unbound blocks — OK reported having
 // compared nothing. The `fixtures == 0 || sites == 0` guard in
 // checkUnboundAssertionBlocks rejects only the floor of that: it cannot tell an
-// inventory of 725 from one of 12.
+// inventory of 737 from one of 12.
 //
 // So the magnitude is asserted, and it is DERIVED and an EQUALITY. Two things
 // make each of those non-negotiable.
@@ -808,7 +883,12 @@ func checkUnboundAssertionBlocks() bool {
 // so the two sides cannot disagree about what counts as a block, and both
 // dimensions come out of one traversal. That is also why this binding derives a
 // different number from a sibling over an almost identical opened set: this walk
-// reads three block names and object-valued blocks only.
+// reads three block names — `expect_initial` and `expect_after`, which
+// lazily-py, lazily-js and lazily-dart track, are NOT in
+// assertionBearingBlockNames here, and the six such blocks in
+// collections/semtree_incremental.json are correspondingly outside this
+// inventory. It does read each plain-object element of an array-valued tracked
+// key (#lzarrayelementsites).
 //
 // What it deliberately does NOT read: openedFixturePaths, boundBlocks, or
 // anything else this run produced. An expectation derived from what the run read
@@ -1104,6 +1184,231 @@ func TestUnboundBlockWalkIsNotVacuous(t *testing.T) {
 	t.Logf("signaling/frames.json: %d assertion-bearing blocks (%d nested in arrays)", len(blocks), nested)
 }
 
+// TestWalkAssertionBlocksCountsArrayElements is the SYNTHETIC probe for the
+// array arm (#lzarrayelementsites), and it is synthetic on purpose.
+//
+// The corpus exercises exactly ONE array-valued shape — a flat array of plain
+// objects, in `signaling/anti_spoof_session.json` — so replaying it can show the
+// widening does something and can never show it does not do too much. Every
+// over-widening this rule can suffer is green against that fixture: numbering
+// the emitted elements instead of their true positions, treating a scalar or a
+// nested array as a block, recursing into arrays of arrays, or emitting for an
+// untracked key. Each gets its own row here, with the expected site paths
+// written out, so a change to the walk has to restate them.
+func TestWalkAssertionBlocksCountsArrayElements(t *testing.T) {
+	for _, probe := range []struct {
+		name  string
+		doc   string
+		sites []string
+	}{
+		// An object-valued tracked key is UNCHANGED by the widening: still one
+		// site, still labelled by the bare key.
+		{
+			name:  "object value",
+			doc:   `{"expect":{"to":"a"}}`,
+			sites: []string{".expect"},
+		},
+		// The shape the corpus carries: one site per element, indexed.
+		{
+			name:  "array of two objects",
+			doc:   `{"expect":[{"to":"a"},{"to":"b"}]}`,
+			sites: []string{".expect[0]", ".expect[1]"},
+		},
+		// A scalar is not a block, so an array of scalars is not a population of
+		// blocks. `len(array)` as the site count would report two here.
+		{
+			name:  "array of scalars",
+			doc:   `{"expect":[1,2]}`,
+			sites: nil,
+		},
+		// TRUE indexes. Numbering the emitted elements would call the second
+		// object `expect[1]`, a path that resolves to the number 3 in the
+		// fixture — and the excuse ledger addresses blocks BY path.
+		{
+			name:  "mixed array keeps true indexes",
+			doc:   `{"expect":[{"to":"a"},3,{"to":"b"}]}`,
+			sites: []string{".expect[0]", ".expect[2]"},
+		},
+		// ONE level only. The outer array's element is an array, not an object.
+		{
+			name:  "nested array",
+			doc:   `{"expect":[[{"to":"a"}]]}`,
+			sites: nil,
+		},
+		// An untracked key is not a block whatever it holds. `wire` is replay
+		// INPUT; demanding a binding for it would be demanding assertions about
+		// the fixture's own stimulus.
+		{
+			name:  "untracked key holding objects",
+			doc:   `{"wire":[{"to":"a"},{"to":"b"}]}`,
+			sites: nil,
+		},
+	} {
+		t.Run(probe.name, func(t *testing.T) {
+			var tree any
+			if err := json.Unmarshal([]byte(probe.doc), &tree); err != nil {
+				t.Fatalf("decode probe: %v", err)
+			}
+			var got []string
+			for _, block := range walkAssertionBlocks("probe/probe.json", tree) {
+				got = append(got, block.path)
+			}
+			sort.Strings(got)
+			want := append([]string(nil), probe.sites...)
+			sort.Strings(want)
+			if len(got) != len(want) {
+				t.Fatalf("%s: walk emitted %d site(s) %v, want %d %v", probe.doc, len(got), got, len(want), want)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("%s: walk emitted %v, want %v", probe.doc, got, want)
+				}
+			}
+			// The emitted block must be the element itself, not the array that
+			// held it: a site whose obj is the whole array would digest as one
+			// thing and bind as another.
+			for _, block := range walkAssertionBlocks("probe/probe.json", tree) {
+				if block.obj == nil {
+					t.Fatalf("%s: site %s carries no object", probe.doc, block.path)
+				}
+				if _, ok := block.obj["to"]; !ok {
+					t.Fatalf("%s: site %s carries %v, not the element object", probe.doc, block.path, block.obj)
+				}
+				if block.name != "expect" {
+					t.Fatalf("%s: site %s is named %q — an element must be salted with the KEY that carried "+
+						"the array, or its digest cannot match the binding the runner records", probe.doc, block.path, block.name)
+				}
+			}
+		})
+	}
+}
+
+// TestArrayElementSitesAreIndividuallyAddressable is the label-disambiguation
+// proof (#lzarrayelementsites), on the 3-element shape
+// `signaling/anti_spoof_session.json` carries at its step 2.
+//
+// A per-ARRAY label — `.steps[2].expect` for all three elements — passes the
+// magnitude equality just as well, because three sites are still counted. What
+// it loses is IDENTITY: the seen/bound path sets and the excuse ledger are keyed
+// by `<fixture> <path>`, so three elements sharing one key become one entry, an
+// excuse for the first silently excuses the third, and a report can no longer
+// say WHICH element is unbound. So this detaches the binding of two elements of
+// ONE array and requires them to be named, reported and excused separately.
+func TestArrayElementSitesAreIndividuallyAddressable(t *testing.T) {
+	dir := t.TempDir()
+	fixture := dir + "/session.json"
+	// Three content-distinct elements, so nothing here is cleared by the global
+	// content-addressed digest crediting a byte-identical sibling.
+	const doc = `{"steps":[{"expect":[{"to":"a"},{"to":"b"},{"to":"c"}]}]}`
+	if err := os.WriteFile(fixture, []byte(doc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	opened := map[string]string{"probe/session.json": fixture}
+
+	// Bind the MIDDLE element only. Whatever the walk does with the other two,
+	// it cannot be answered by "the array was bound".
+	bound := map[string]bool{}
+	digest, ok := blockDigest("expect", map[string]any{"to": "b"})
+	if !ok {
+		t.Fatal("digest failed")
+	}
+	bound[digest] = true
+
+	problems, fixtures, inventory := unboundBlockReport(opened, bound, nil)
+	if fixtures != 1 || inventory.sites != 3 || inventory.digests != 3 {
+		t.Fatalf("the walk examined %d fixture(s) / %d site(s) / %d digest(s), want 1 / 3 / 3 — one site per "+
+			"plain-object element of the array", fixtures, inventory.sites, inventory.digests)
+	}
+	if len(problems) != 2 {
+		t.Fatalf("binding 1 of 3 array elements left %d problem(s), want 2: %v", len(problems), problems)
+	}
+	// Sorted, so element 0 comes before element 2. Both paths are spelled out:
+	// a per-array label would produce two problems naming the SAME path, which
+	// is the collapse this test exists to reject.
+	for i, want := range []string{".steps[0].expect[0]", ".steps[0].expect[2]"} {
+		if !strings.Contains(problems[i], want) {
+			t.Fatalf("problem %d does not name %s — elements of one array must be addressable "+
+				"separately: %q", i, want, problems[i])
+		}
+	}
+	if problems[0] == problems[1] {
+		t.Fatal("the two unbound elements of one array produced the SAME report line — the label collapses " +
+			"them, so the ledger cannot excuse one without excusing the other")
+	}
+
+	// And the ledger addresses them separately too: excusing element 0 leaves
+	// element 2 reported, and does not go stale or rot on the way.
+	excused := map[string]string{"probe/session.json .steps[0].expect[0]": "probe"}
+	problems, _, _ = unboundBlockReport(opened, bound, excused)
+	if len(problems) != 1 {
+		t.Fatalf("excusing ONE element of the array left %d problem(s), want exactly 1: %v", len(problems), problems)
+	}
+	if !strings.Contains(problems[0], ".steps[0].expect[2]") {
+		t.Fatalf("excusing element 0 cleared the wrong element: %q", problems[0])
+	}
+
+	// An excuse for an index the array does not carry is ROTTED, which is only
+	// detectable because the index is part of the path.
+	rotted := map[string]string{"probe/session.json .steps[0].expect[7]": "probe"}
+	problems, _, _ = unboundBlockReport(opened, bound, rotted)
+	rottedSeen := false
+	for _, problem := range problems {
+		if strings.Contains(problem, "rotted") && strings.Contains(problem, ".steps[0].expect[7]") {
+			rottedSeen = true
+		}
+	}
+	if !rottedSeen {
+		t.Fatalf("an excuse naming array index 7 of a 3-element array was not reported as rotted: %v", problems)
+	}
+}
+
+// TestCorpusArrayValuedBlockSitesAreInventoried is the CORPUS witness for the
+// same widening, so the synthetic probe above cannot be the only thing holding
+// it. If `signaling/anti_spoof_session.json` stopped carrying array-valued
+// `expect` keys the magnitude equality would move and be attributed to "the
+// corpus moved"; this names the fixture and the shape directly.
+func TestCorpusArrayValuedBlockSitesAreInventoried(t *testing.T) {
+	path := specPath("signaling", "anti_spoof_session.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		specFixtureMissing(t, "signaling/anti_spoof_session.json unreadable: %v", err)
+		return
+	}
+	var tree any
+	if err := json.Unmarshal(data, &tree); err != nil {
+		t.Fatalf("decode signaling/anti_spoof_session.json: %v", err)
+	}
+	var elements []string
+	for _, block := range walkAssertionBlocks("signaling/anti_spoof_session.json", tree) {
+		if strings.HasPrefix(block.path, ".steps[") && strings.Contains(block.path, ".expect[") {
+			elements = append(elements, block.path)
+		}
+	}
+	// 8 array-valued `expect` keys carrying 1+2+3+1+1+1+1+2 elements. Pinned as
+	// an equality, not a floor: this is the entire array-element population of
+	// the corpus, so a floor here could not see it shrink.
+	const wantElements = 12
+	if len(elements) != wantElements {
+		sort.Strings(elements)
+		t.Fatalf("the walk found %d array-element site(s) under steps[].expect in "+
+			"signaling/anti_spoof_session.json, want exactly %d — this fixture is the ONLY array-valued "+
+			"tracked key in the corpus, so these 12 sites are the whole array dimension of this rung "+
+			"(#lzarrayelementsites): %v", len(elements), wantElements, elements)
+	}
+	// Each of the 12 must be separately named, which is the property a per-array
+	// label loses and which nothing else in the corpus can witness (step 2
+	// carries three elements, steps 3-6 carry one each).
+	distinct := map[string]bool{}
+	for _, path := range elements {
+		distinct[path] = true
+	}
+	if len(distinct) != wantElements {
+		t.Fatalf("the 12 array-element sites share %d distinct path(s) — elements of one array are being "+
+			"collapsed into a single site", len(distinct))
+	}
+	t.Logf("signaling/anti_spoof_session.json: %d array-element site(s) under steps[].expect", len(elements))
+}
+
 // TestUnboundBlockReportDecides is the mutation check for the four arms of the
 // decision: an unbound block fails, a bound one does not, a stale excuse fails,
 // and a rotted excuse fails.
@@ -1315,7 +1620,7 @@ func TestDerivedBlockMagnitudeIsNotVacuous(t *testing.T) {
 // each dimension must fail on its own, in both directions, and an exact match
 // must report nothing.
 func TestBlockMagnitudeProblemsDecides(t *testing.T) {
-	expected := blockMagnitude{sites: 725, digests: 616}
+	expected := blockMagnitude{sites: 737, digests: 628}
 	if problems := blockMagnitudeProblems(expected, expected, "/corpus"); len(problems) != 0 {
 		t.Fatalf("an exact match reported %d problem(s): %v", len(problems), problems)
 	}
@@ -1327,13 +1632,13 @@ func TestBlockMagnitudeProblemsDecides(t *testing.T) {
 		// A block whose digest RECURS was lost: the site count drops and the
 		// digest count cannot see it. This is the arm a digest-only equality
 		// misses entirely.
-		{"site short", blockMagnitude{sites: 724, digests: 616}, []string{"SITE(s) were inventoried, expected exactly 725", "1 FEWER"}},
-		{"site over", blockMagnitude{sites: 726, digests: 616}, []string{"SITE(s) were inventoried, expected exactly 725", "1 MORE"}},
+		{"site short", blockMagnitude{sites: 736, digests: 628}, []string{"SITE(s) were inventoried, expected exactly 737", "1 FEWER"}},
+		{"site over", blockMagnitude{sites: 738, digests: 628}, []string{"SITE(s) were inventoried, expected exactly 737", "1 MORE"}},
 		// A unique-digest block was collapsed into another's spelling: every
 		// site is still there and the digest count drops. This is the arm a
 		// site-only equality misses entirely.
-		{"digest short", blockMagnitude{sites: 725, digests: 615}, []string{"DIGEST(s) were inventoried, expected exactly 616", "1 FEWER"}},
-		{"digest over", blockMagnitude{sites: 725, digests: 617}, []string{"DIGEST(s) were inventoried, expected exactly 616", "1 MORE"}},
+		{"digest short", blockMagnitude{sites: 737, digests: 627}, []string{"DIGEST(s) were inventoried, expected exactly 628", "1 FEWER"}},
+		{"digest over", blockMagnitude{sites: 737, digests: 629}, []string{"DIGEST(s) were inventoried, expected exactly 628", "1 MORE"}},
 	} {
 		problems := blockMagnitudeProblems(testCase.inventory, expected, "/corpus")
 		if len(problems) != 1 {
