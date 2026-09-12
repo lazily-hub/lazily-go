@@ -497,19 +497,49 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 			// the tree before any edit, and `downstream_consumer_reran` cannot
 			// be stated before there is an edit to re-run from, so a fixture
 			// that states it here is wrong rather than ignorable.
-			if _, stated := scenario["expect_initial"]; stated {
-				assertKeyEach(t, scenario, "expect_initial", func(id string, value any) {
+			if initial := jsMap(scenario["expect_initial"]); initial != nil {
+				// Rung 0 (#lzgothreenames): BIND the block. These six blocks —
+				// three `expect_initial` and three `expect_after` — were read
+				// and compared here from the day this runner was written and
+				// bound by NOTHING, so the bind ledger had no record of them and
+				// every rung above it was scoped past all six. trackAssertions
+				// is the map-shaped seam: it books the bind AND opens the
+				// disposition ledger, so each entry now owes an assertion or an
+				// excuse, and the `declared` list is read off the BLOCK rather
+				// than typed — a key the corpus grows arrives as a comparison
+				// through the walk below or as a missing disposition, never as a
+				// silent omission.
+				//
+				// This closes the FIXTURE-TO-RUN direction only: every key the
+				// block names is now read and compared, with the presence check
+				// in assertSemTreeNodeValue making "read" mean something. The
+				// RUN-TO-FIXTURE direction is open and deliberately left open —
+				// `expect_initial` and `expect_after` name a SUBSET of the tree's
+				// nodes by design (scenario 1's tree carries root/a/b/a1/a2/b1
+				// and its block names only root/a/b), so a1/a2/b1 are compared by
+				// nothing directly. Closing it means deciding what the corpus
+				// contract is for a block that asserts a subset, which is a
+				// lazily-spec question affecting all ten bindings and is filed as
+				// #lzsemtreesubset. Naming every node here, weakening the
+				// fixture, or excusing the difference would each answer that
+				// question unilaterally and in the wrong repo.
+				trackAssertions(t, name+" "+sv.Label()+" expect_initial", initial, blockKeys(initial))
+				assertKeyEach(t, scenario, "expect_initial", func(id string, _ any) {
 					switch id {
 					case "sibling_a_cached":
-						if got := tree.IsCached("a"); got != (value == true) {
-							t.Errorf("initial sibling_a_cached = %v, want %v", got, value)
-						}
+						assertSemTreeSiblingCached(t, tree, initial)
 					case "downstream_consumer_reran":
-						t.Errorf("expect_initial states downstream_consumer_reran; there has been no edit to re-run from")
+						// Reported through the tracker so the fixture's own
+						// value is TAKEN: a bare t.Errorf here would leave the
+						// key with no disposition and the report would name the
+						// missing disposition rather than the wrong fixture.
+						assertKeyWith(t, initial, id, func(wantValue fixtureValue) {
+							_ = wantValue.Value()
+							t.Errorf("%s: expect_initial states downstream_consumer_reran; there has been no edit to re-run from",
+								assertionLabel(initial))
+						})
 					default:
-						if got, _ := tree.NodeValue(id); got != jsInt(value) {
-							t.Errorf("initial %s = %d, want %d", id, got, jsInt(value))
-						}
+						assertSemTreeNodeValue(t, tree, initial, "initial", id)
 					}
 				})
 			}
@@ -526,6 +556,12 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 			// depend on Go's randomized map iteration order over expect_after,
 			// since the root's value is read from the same loop.
 			after := jsMap(scenario["expect_after"])
+			if after != nil {
+				// Same bind, same reason (#lzgothreenames). Booked once, before
+				// either mutation arm, so the two arms below share one ledger
+				// and a scenario carrying both would not open two.
+				trackAssertions(t, name+" "+sv.Label()+" expect_after", after, blockKeys(after))
+			}
 			downstreamRuns := 0
 			var downstream *Computed[int]
 			if _, checked := after["downstream_consumer_reran"]; checked {
@@ -547,8 +583,8 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 					downstream.Get() // pull the consumer, as rs and js do
 				}
 				mutated = true
-				assertKeyEach(t, scenario, "expect_after", func(id string, want any) {
-					checkSemTreeAfterEntry(t, tree, id, want, downstreamRuns > runsBefore)
+				assertKeyEach(t, scenario, "expect_after", func(id string, _ any) {
+					checkSemTreeAfterEntry(t, tree, after, id, downstreamRuns > runsBefore)
 				})
 			}
 
@@ -560,8 +596,8 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 					downstream.Get() // pull the consumer, as rs and js do
 				}
 				mutated = true
-				assertKeyEach(t, scenario, "expect_after", func(id string, want any) {
-					checkSemTreeAfterEntry(t, tree, id, want, downstreamRuns > runsBefore)
+				assertKeyEach(t, scenario, "expect_after", func(id string, _ any) {
+					checkSemTreeAfterEntry(t, tree, after, id, downstreamRuns > runsBefore)
 				})
 			}
 			if !mutated {
@@ -575,23 +611,125 @@ func TestCollectionsSemTreeIncremental(t *testing.T) {
 // iteration lives in assertKeyEach rather than here (#lzsubblockkeyset), so a
 // key added to the block upstream reaches this switch instead of being walked
 // past by a loop that only knows the names it was written with.
-func checkSemTreeAfterEntry(t *testing.T, tree *SemTree[int, int], id string, want any, didRerun bool) {
+//
+// `block` is the `expect_after` map itself, not the scenario, and every arm
+// takes the fixture's value THROUGH it (#lzgothreenames). That is what makes the
+// comparison visible to the rungs above rung 0: a value the block carries and
+// this switch does not compare is reported as read-but-never-compared instead of
+// being walked past.
+func checkSemTreeAfterEntry(t *testing.T, tree *SemTree[int, int], block map[string]any, id string, didRerun bool) {
 	t.Helper()
 	switch id {
 	case "sibling_a_cached":
-		if got := tree.IsCached("a"); got != (want == true) {
-			t.Errorf("sibling_a_cached = %v, want %v", got, want)
-		}
+		assertSemTreeSiblingCached(t, tree, block)
 	case "downstream_consumer_reran":
-		if didRerun != (want == true) {
-			t.Errorf("downstream_consumer_reran = %v, want %v (memo guard)",
-				didRerun, want)
-		}
+		assertSemTreeFlag(t, block, id, didRerun, "memo guard")
 	default:
-		if got, _ := tree.NodeValue(id); got != jsInt(want) {
-			t.Errorf("after %s = %d, want %d", id, got, jsInt(want))
-		}
+		assertSemTreeNodeValue(t, tree, block, "after", id)
 	}
+}
+
+// blockKeys is a block's own key set, sorted. Handed to trackAssertions as the
+// `declared` list so the obligation is derived from the fixture rather than
+// typed: a key the corpus grows is declared by that fact alone, and owes a
+// disposition without anyone editing a list here.
+func blockKeys(block map[string]any) []string {
+	out := make([]string, 0, len(block))
+	for key := range block {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// assertSemTreeNodeValue compares node id's derived value against the fixture's
+// own value for that key, and reports a MISSING node as a missing node.
+//
+// PRESENCE IS CHECKED FIRST, ahead of any value comparison, and that ordering is
+// the whole point (#lzgothreenames). SemTree.NodeValue returns `(zero, false)`
+// for a node the tree does not carry, and this comparison used to be written
+// `got, _ := tree.NodeValue(id)` — discarding the bool. So a block key naming a
+// node that does not exist compared the ZERO VALUE against the fixture and
+// PASSED for any expectation of 0, reading as an assertion about a node while
+// asserting nothing about anything. It was latent only because no scenario
+// expects 0 today, which is a property of the corpus rather than of this
+// runner: the first fixture to assert a zero — a `count_positive` fold over a
+// subtree with no positive value, say — makes the hole live. Presence is tested
+// through NodeHandle rather than NodeValue because NodeValue pulls the slot, and
+// a pull is exactly what the `sibling_a_cached` assertion is measuring.
+func assertSemTreeNodeValue(t *testing.T, tree *SemTree[int, int], block map[string]any, phase, id string) {
+	t.Helper()
+	assertKeyWith(t, block, id, func(wantValue fixtureValue) {
+		t.Helper()
+		want := wantValue.Value()
+		if _, present := tree.NodeHandle(id); !present {
+			t.Errorf("%s: %s %s names a node the tree does not carry, so there is no derived value to "+
+				"compare against the fixture's %v. NodeValue reports the ZERO value for an absent node, "+
+				"so discarding its `found` bool made this key pass for any expectation of 0 "+
+				"(#lzgothreenames)", assertionLabel(block), phase, id, want)
+			return
+		}
+		got, _ := tree.NodeValue(id)
+		if !jsonComparisonIsExact(want, got) {
+			t.Errorf("%s: %s %s = %v cannot be compared exactly against the fixture's %v",
+				assertionLabel(block), phase, id, got, want)
+			return
+		}
+		if !jsonValueEqual(want, got) {
+			t.Errorf("%s: %s %s = %d, want %v (the fixture's value)", assertionLabel(block), phase, id, got, want)
+		}
+	})
+}
+
+// assertSemTreeSiblingCached asserts the reserved `sibling_a_cached` key.
+//
+// Two separate laxities, both closed here. IsCached also reports false for an
+// ABSENT node, so a fixture stating `false` for a sibling the tree does not
+// carry was satisfied by the node's non-existence rather than by its cache
+// state; presence is asserted first. And the comparison was `got != (want ==
+// true)`, which coerces EVERY non-true value to false — see assertSemTreeFlag.
+func assertSemTreeSiblingCached(t *testing.T, tree *SemTree[int, int], block map[string]any) {
+	t.Helper()
+	const sibling = "a"
+	if _, present := tree.NodeHandle(sibling); !present {
+		assertKeyWith(t, block, "sibling_a_cached", func(wantValue fixtureValue) {
+			t.Helper()
+			t.Errorf("%s: sibling_a_cached states %v about node %q, which the tree does not carry — "+
+				"IsCached reports false for an ABSENT node too, so this key was satisfied by the node's "+
+				"non-existence rather than by its cache state (#lzgothreenames)",
+				assertionLabel(block), wantValue.Value(), sibling)
+		})
+		return
+	}
+	assertSemTreeFlag(t, block, "sibling_a_cached", tree.IsCached(sibling), "cache state")
+}
+
+// assertSemTreeFlag compares a boolean observation against the fixture's own
+// value for key, and REQUIRES the fixture's value to be a JSON boolean.
+//
+// The comparison it replaces was `got != (want == true)`. `want` is an `any`
+// holding whatever the fixture spelled, so `want == true` is false for every
+// value that is not the boolean true — `0`, `"false"`, `"true"`, `null`, `1`,
+// an object. A fixture stating any of those asserted "this flag is false" no
+// matter what it meant, and a fixture stating `"true"` asserted the OPPOSITE of
+// what it reads as. Comparing the type first turns each of those into a named
+// failure (#lzgothreenames).
+func assertSemTreeFlag(t *testing.T, block map[string]any, key string, got bool, what string) {
+	t.Helper()
+	assertKeyWith(t, block, key, func(wantValue fixtureValue) {
+		t.Helper()
+		want, isBool := wantValue.Value().(bool)
+		if !isBool {
+			t.Errorf("%s: key %q is %T (%v) and must be a JSON boolean — the comparison this replaces read "+
+				"`got != (want == true)`, which coerces every non-true value to FALSE, so a fixture "+
+				"spelling 0, null or the STRING \"true\" asserted `false` whatever it meant "+
+				"(#lzgothreenames)", assertionLabel(block), key, wantValue.Value(), wantValue.Value())
+			return
+		}
+		if got != want {
+			t.Errorf("%s: %s = %v, want %v (%s)", assertionLabel(block), key, got, want, what)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------

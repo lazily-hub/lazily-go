@@ -94,18 +94,23 @@ import (
 // The VALUE at one of these keys may be an object or an ARRAY of objects, and
 // both spellings are sites — see walkAssertionBlocks (#lzarrayelementsites).
 //
-// Known narrowness, stated rather than hidden: the corpus also uses
-// `expect_initial` and `expect_after`, which lazily-py, lazily-js and
-// lazily-dart track and this set does not. They are 6 sites / 6 digests in
-// collections/semtree_incremental.json, whose runner asserts them entry by
-// entry (see checkSemTreeAfterEntry) without routing them through either rung-0
-// seam. Adding the two names here is a widening in its own right, on the NAME
-// axis rather than the array axis, and it moves this binding's derived
-// magnitude by exactly +6/+6.
+// The set is FIVE names, which is the family rule. It carried three until
+// #lzgothreenames, and the two it was missing were not hypothetical:
+// `collections/semtree_incremental.json` states its per-scenario
+// `expect_initial` and `expect_after` — six blocks — and
+// TestCollectionsSemTreeIncremental read and compared them from the day it was
+// written while binding NOTHING. So rung 0 had no record of all six and every
+// rung above it was scoped past them: the unconsumed-key guard, the
+// read-but-never-compared guard and the sub-block key-set guard all reason about
+// a block a runner already HAS, and a block nothing binds is in none of their
+// populations. Adding the two names moved this binding's derived magnitude by
+// exactly +6/+6, onto the audit's "all five names" row.
 var assertionBearingBlockNames = map[string]bool{
-	"assertions": true,
-	"expect":     true,
-	"expected":   true,
+	"assertions":     true,
+	"expect":         true,
+	"expect_after":   true,
+	"expect_initial": true,
+	"expected":       true,
 }
 
 // anyBlockName is the digest salt used by a seam that binds a block without
@@ -355,8 +360,8 @@ var unboundBlockExcuses = map[string]string{}
 // about the new state — which is all an equality against the RUN can ask.
 //
 // Nothing else here sees that either. The magnitude rung (#lzblocksitepin) counts
-// DECLARED sites and distinct digests; a detached bind removes neither, so 737 /
-// 628 hold with the block no longer bound by anything. The coverage guard counts
+// DECLARED sites and distinct digests; a detached bind removes neither, so 743 /
+// 634 hold with the block no longer bound by anything. The coverage guard counts
 // fixtures OPENED, and the fixture is still opened. This was demonstrated against
 // this binding rather than argued: dropping the bind for
 // `signaling/frames.json .frames[0].assertions` and adding its ledger entry left
@@ -375,7 +380,7 @@ var unboundBlockExcuses = map[string]string{}
 // migration the ledger shrinks, the constant stays put, slack becomes >= 1, and
 // the same detach-plus-excuse commit passes again. Slack accumulates with every
 // migration and converges on exactly the retired hand-typed block floor — 30
-// against an actual 737, a number so far above the population that it never
+// against an actual 743, a number so far above the population that it never
 // fired and so was never updated. That is the defect this family of rungs exists
 // to replace, and a ceiling walks back into it one migration at a time.
 //
@@ -741,7 +746,7 @@ func snapshotUnboundInputs() (map[string]string, map[string]bool) {
 // It also asserts the MAGNITUDE of what it examined, in both dimensions, against
 // a number derived from the canonical corpus rather than typed here
 // (#lzblocksitepin). The zero-check above is only the floor of that argument: it
-// cannot tell an inventory of 737 sites from one of 12, and every rung in this
+// cannot tell an inventory of 743 sites from one of 12, and every rung in this
 // file is scoped to the blocks the inventory holds.
 func checkUnboundAssertionBlocks() bool {
 	// The SIZE PIN first (#lzledgerratchet). It is a property of COMMITTED SOURCE
@@ -852,7 +857,7 @@ func checkUnboundAssertionBlocks() bool {
 // zero inventoried blocks means zero unbound blocks — OK reported having
 // compared nothing. The `fixtures == 0 || sites == 0` guard in
 // checkUnboundAssertionBlocks rejects only the floor of that: it cannot tell an
-// inventory of 737 from one of 12.
+// inventory of 743 from one of 12.
 //
 // So the magnitude is asserted, and it is DERIVED and an EQUALITY. Two things
 // make each of those non-negotiable.
@@ -882,13 +887,12 @@ func checkUnboundAssertionBlocks() bool {
 // The walk is walkAssertionBlocks — the SAME function the inventory side uses —
 // so the two sides cannot disagree about what counts as a block, and both
 // dimensions come out of one traversal. That is also why this binding derives a
-// different number from a sibling over an almost identical opened set: this walk
-// reads three block names — `expect_initial` and `expect_after`, which
-// lazily-py, lazily-js and lazily-dart track, are NOT in
-// assertionBearingBlockNames here, and the six such blocks in
-// collections/semtree_incremental.json are correspondingly outside this
-// inventory. It does read each plain-object element of an array-valued tracked
-// key (#lzarrayelementsites).
+// different number from a sibling over an almost identical opened set: a
+// sibling on a narrower rule derives a smaller number over the same fixtures.
+// This walk reads all five block names (#lzgothreenames) and each plain-object
+// element of an array-valued tracked key (#lzarrayelementsites), which is the
+// widest rule in the family and the one lazily-spec's audit calls "all five
+// names, + array elements".
 //
 // What it deliberately does NOT read: openedFixturePaths, boundBlocks, or
 // anything else this run produced. An expectation derived from what the run read
@@ -1620,7 +1624,7 @@ func TestDerivedBlockMagnitudeIsNotVacuous(t *testing.T) {
 // each dimension must fail on its own, in both directions, and an exact match
 // must report nothing.
 func TestBlockMagnitudeProblemsDecides(t *testing.T) {
-	expected := blockMagnitude{sites: 737, digests: 628}
+	expected := blockMagnitude{sites: 743, digests: 634}
 	if problems := blockMagnitudeProblems(expected, expected, "/corpus"); len(problems) != 0 {
 		t.Fatalf("an exact match reported %d problem(s): %v", len(problems), problems)
 	}
@@ -1632,13 +1636,13 @@ func TestBlockMagnitudeProblemsDecides(t *testing.T) {
 		// A block whose digest RECURS was lost: the site count drops and the
 		// digest count cannot see it. This is the arm a digest-only equality
 		// misses entirely.
-		{"site short", blockMagnitude{sites: 736, digests: 628}, []string{"SITE(s) were inventoried, expected exactly 737", "1 FEWER"}},
-		{"site over", blockMagnitude{sites: 738, digests: 628}, []string{"SITE(s) were inventoried, expected exactly 737", "1 MORE"}},
+		{"site short", blockMagnitude{sites: 742, digests: 634}, []string{"SITE(s) were inventoried, expected exactly 743", "1 FEWER"}},
+		{"site over", blockMagnitude{sites: 744, digests: 634}, []string{"SITE(s) were inventoried, expected exactly 743", "1 MORE"}},
 		// A unique-digest block was collapsed into another's spelling: every
 		// site is still there and the digest count drops. This is the arm a
 		// site-only equality misses entirely.
-		{"digest short", blockMagnitude{sites: 737, digests: 627}, []string{"DIGEST(s) were inventoried, expected exactly 628", "1 FEWER"}},
-		{"digest over", blockMagnitude{sites: 737, digests: 629}, []string{"DIGEST(s) were inventoried, expected exactly 628", "1 MORE"}},
+		{"digest short", blockMagnitude{sites: 743, digests: 633}, []string{"DIGEST(s) were inventoried, expected exactly 634", "1 FEWER"}},
+		{"digest over", blockMagnitude{sites: 743, digests: 635}, []string{"DIGEST(s) were inventoried, expected exactly 634", "1 MORE"}},
 	} {
 		problems := blockMagnitudeProblems(testCase.inventory, expected, "/corpus")
 		if len(problems) != 1 {
