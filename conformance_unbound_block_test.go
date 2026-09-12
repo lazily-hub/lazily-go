@@ -4,10 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -37,7 +41,7 @@ import (
 // THIS RUN ACTUALLY OPENED, is there an assertion-bearing block that no runner
 // bound?
 //
-// Three properties make the answer trustworthy:
+// Four properties make the answer trustworthy:
 //
 //   - The population comes from the RUNTIME MANIFEST, not from a source scan. A
 //     grep for fixture names proves a filename is mentioned; only the recorded
@@ -51,6 +55,11 @@ import (
 //     `map[string]any` there — so no handle survives from the file on disk to the
 //     value the runner holds. The digest is computed over the JSON tree in both
 //     places, so the two sides can be compared at all.
+//   - The MAGNITUDE of the inventory is asserted, not just its cleanliness. "No
+//     unbound block" over an inventory of zero is OK reported having compared
+//     nothing, and the number it is held to is DERIVED from the canonical corpus
+//     minus this binding's own committed ledger — never typed. See
+//     deriveBlockMagnitude (#lzblocksitepin).
 //
 // What "bound" means, precisely. A block is bound when a runner took
 // responsibility for its KEY SET, by one of the two seams this package has:
@@ -369,7 +378,7 @@ func walkAssertionBlocks(fixture string, tree any) []fixtureBlock {
 //
 // opened maps a fixture id to the path it was read from; bound is the digest set
 // the two seams recorded; excuses is the table above.
-func unboundBlockReport(opened map[string]string, bound map[string]bool, excuses map[string]string) (problems []string, fixtures, blocks int) {
+func unboundBlockReport(opened map[string]string, bound map[string]bool, excuses map[string]string) (problems []string, fixtures int, inventory blockMagnitude) {
 	ids := make([]string, 0, len(opened))
 	for id := range opened {
 		ids = append(ids, id)
@@ -378,6 +387,10 @@ func unboundBlockReport(opened map[string]string, bound map[string]bool, excuses
 
 	seenPaths := map[string]bool{}
 	boundPaths := map[string]bool{}
+	// The digest dimension of the inventory. Sites are counted as they are
+	// walked; digests dedupe by content, which is the whole reason both are
+	// carried (#lzblocksitepin).
+	inventoryDigests := map[string]bool{}
 	for _, id := range ids {
 		data, err := os.ReadFile(opened[id])
 		if err != nil {
@@ -389,7 +402,14 @@ func unboundBlockReport(opened map[string]string, bound map[string]bool, excuses
 		}
 		fixtures++
 		for _, block := range walkAssertionBlocks(id, tree) {
-			blocks++
+			digest, digestible := blockDigest(block.name, block.obj)
+			if !digestible {
+				// Booked on NEITHER dimension, exactly as deriveBlockMagnitude
+				// skips it, so the two sides stay comparable.
+				continue
+			}
+			inventory.sites++
+			inventoryDigests[digest] = true
 			key := block.fixture + " " + block.path
 			seenPaths[key] = true
 			isBound := blockIsBound(bound, block.name, block.obj)
@@ -432,7 +452,8 @@ func unboundBlockReport(opened map[string]string, bound map[string]bool, excuses
 		}
 	}
 	sort.Strings(problems)
-	return problems, fixtures, blocks
+	inventory.digests = len(inventoryDigests)
+	return problems, fixtures, inventory
 }
 
 // openedFixtureOfExcuse reports whether the fixture an excuse names was opened
@@ -471,6 +492,12 @@ func snapshotUnboundInputs() (map[string]string, map[string]bool) {
 // opened fixtures and found no assertion-bearing block in any of them IS judged,
 // and fails: a walk that examined nothing is indistinguishable from a walk that
 // found nothing, and the second reads as green.
+//
+// It also asserts the MAGNITUDE of what it examined, in both dimensions, against
+// a number derived from the canonical corpus rather than typed here
+// (#lzblocksitepin). The zero-check above is only the floor of that argument: it
+// cannot tell an inventory of 725 sites from one of 12, and every rung in this
+// file is scoped to the blocks the inventory holds.
 func checkUnboundAssertionBlocks() bool {
 	// A FILTERED run cannot judge boundness, and this is not a convenience —
 	// it is the one place where a false RED is manufacturable. A fixture is
@@ -487,22 +514,363 @@ func checkUnboundAssertionBlocks() bool {
 	if len(opened) == 0 {
 		return true
 	}
-	problems, fixtures, blocks := unboundBlockReport(opened, bound, unboundBlockExcuses)
-	if fixtures == 0 || blocks == 0 {
+	problems, fixtures, inventory := unboundBlockReport(opened, bound, unboundBlockExcuses)
+	if fixtures == 0 || inventory.sites == 0 || inventory.digests == 0 {
 		fmt.Fprintf(os.Stderr,
-			"FAIL: the unbound-block guard examined %d fixture(s) and %d assertion-bearing block(s) after a run "+
-				"that opened %d conformance fixture(s) — a guard that examined nothing reports the same green as a "+
-				"guard that found nothing (#lzunboundblockguard)\n", fixtures, blocks, len(opened))
+			"FAIL: the unbound-block guard examined %d fixture(s) and %d assertion-bearing block(s) (%d distinct "+
+				"digest(s)) after a run that opened %d conformance fixture(s) — a guard that examined nothing "+
+				"reports the same green as a guard that found nothing (#lzunboundblockguard)\n",
+			fixtures, inventory.sites, inventory.digests, len(opened))
 		return false
 	}
+
+	// The derived magnitude (#lzblocksitepin). The check above rejects only an
+	// inventory of ZERO; this one pins how big it is, in both dimensions, against
+	// a number computed from the canonical corpus rather than typed here.
+	expected, root, deriveErr := deriveBlockMagnitude()
+	switch {
+	case errors.Is(deriveErr, errNoCanonicalCorpus):
+		// A contributor without the sibling checkout replays the vendored mirror
+		// and is not making a false claim. Under CI the same state is missing
+		// EVIDENCE and fails, exactly as an absent corpus does in
+		// scripts/check-conformance-coverage.sh.
+		if os.Getenv("CI") != "" {
+			fmt.Fprintf(os.Stderr,
+				"FAIL: the assertion-block magnitude cannot be derived and CI is set: %v. Under CI this is a "+
+					"wrong checkout, not an absent corpus, and reporting the inventory OK here would be OK over "+
+					"an unmeasured magnitude (#lzvacuousrun)\n", deriveErr)
+			return false
+		}
+		fmt.Fprintf(os.Stderr,
+			"NOTE: %d assertion-block site(s) / %d distinct digest(s) inventoried, magnitude NOT compared: %v. "+
+				"Local checkout only — this is a hard failure under CI (#lzblocksitepin)\n",
+			inventory.sites, inventory.digests, deriveErr)
+	case deriveErr != nil:
+		// Missing evidence, reported the way a gap is. Deriving is the only way
+		// this rung knows a magnitude at all, so "could not derive" must not read
+		// as "nothing to compare".
+		fmt.Fprintf(os.Stderr, "FAIL: %v\n", deriveErr)
+		return false
+	default:
+		problems = append(problems, blockMagnitudeProblems(inventory, expected, root)...)
+	}
+
 	if len(problems) == 0 {
+		// Positive evidence. Every rung above is a negative check that says
+		// nothing about magnitude, so the magnitude is printed — both the live
+		// inventory and the number DERIVED from the corpus listing minus
+		// KNOWN_UNCOVERED. Nothing is re-pinned from this line; it is here so a
+		// reader can see the two agree, and see which side moved when they do not.
+		if deriveErr == nil {
+			fmt.Fprintf(os.Stderr,
+				"assertion-block inventory OK: %d site(s) / %d distinct digest(s) inventoried from %d opened "+
+					"fixture(s) (derived from the canonical corpus: %d site(s) / %d digest(s))\n",
+				inventory.sites, inventory.digests, fixtures, expected.sites, expected.digests)
+		}
 		return true
 	}
-	fmt.Fprintf(os.Stderr, "FAIL: %d assertion-bearing block(s) the run opened were bound by no runner:\n", len(problems))
+	fmt.Fprintf(os.Stderr, "FAIL: %d assertion-block problem(s) after a run that opened %d fixture(s):\n",
+		len(problems), len(opened))
 	for _, problem := range problems {
 		fmt.Fprintf(os.Stderr, "  %s\n", problem)
 	}
 	return false
+}
+
+// ---------------------------------------------------------------------------
+// Positive-evidence magnitude (#lzblocksitepin / #lzvacuousrun)
+// ---------------------------------------------------------------------------
+//
+// Everything above this point is a NEGATIVE check: of the blocks the run
+// inventoried, none was unbound. It says nothing about HOW MANY there were, and
+// zero inventoried blocks means zero unbound blocks — OK reported having
+// compared nothing. The `fixtures == 0 || sites == 0` guard in
+// checkUnboundAssertionBlocks rejects only the floor of that: it cannot tell an
+// inventory of 725 from one of 12.
+//
+// So the magnitude is asserted, and it is DERIVED and an EQUALITY. Two things
+// make each of those non-negotiable.
+//
+// Derived, not typed. A `MIN_BLOCKS` literal re-pinned by hand after reading a
+// log lags the corpus by however long nobody reads the log. lazily-py's pin sat
+// at 578 from 2026-08-11 while the real inventory was 620: 42 blocks could have
+// stopped being inventoried with the rung still green. The two inputs here both
+// move on their own — the canonical corpus listing, and this binding's own
+// committed KNOWN_UNCOVERED ledger — so corpus MINUS ledger is computed, never
+// transcribed. A fixture landing upstream moves this number with no edit here; a
+// fixture this binding stops opening moves it only through a committed ledger
+// line.
+//
+// EQUALITY, not `>=`. A floor cannot see slack, and slack is what rots a pin.
+//
+// TWO dimensions, from ONE walk, because neither subsumes the other:
+//
+//   - SITES — one per "<fixture> <json path>", so it counts what the corpus
+//     CARRIES. A block whose content digest recurs elsewhere can be deleted
+//     outright and the digest count does not move; this is the number that sees
+//     it.
+//   - DISTINCT DIGESTS — what the corpus SAYS, deduplicated. A content edit that
+//     collapses two distinct claims into one spelling leaves every site in place
+//     and this is the number that sees it.
+//
+// The walk is walkAssertionBlocks — the SAME function the inventory side uses —
+// so the two sides cannot disagree about what counts as a block, and both
+// dimensions come out of one traversal. That is also why this binding derives a
+// different number from a sibling over an almost identical opened set: this walk
+// reads three block names and object-valued blocks only.
+//
+// What it deliberately does NOT read: openedFixturePaths, boundBlocks, or
+// anything else this run produced. An expectation derived from what the run read
+// goes to zero alongside the count it is compared against the moment the
+// recorder detaches, and the rung is vacuously green again.
+
+// blockMagnitude is the two-dimensional size of an assertion-block population.
+type blockMagnitude struct {
+	sites   int
+	digests int
+}
+
+// errNoCanonicalCorpus reports an absent lazily-spec sibling checkout. Split out
+// from every other derivation failure because it is the one that is legitimate
+// locally: a contributor without the sibling is not making a false claim. Under
+// CI it is missing EVIDENCE and fails, exactly as an absent corpus does in
+// scripts/check-conformance-coverage.sh.
+var errNoCanonicalCorpus = errors.New("no canonical lazily-spec conformance corpus")
+
+// coverageScriptCandidates spells the path to this binding's committed ledger.
+func coverageScriptCandidates() []string {
+	out := []string{filepath.Join("scripts", "check-conformance-coverage.sh")}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		out = append(out, filepath.Join(filepath.Dir(file), "scripts", "check-conformance-coverage.sh"))
+	}
+	return out
+}
+
+// knownUncoveredFixtures reads the corpus-relative paths of the fixtures this
+// binding does not open, out of the bash `KNOWN_UNCOVERED=( ... )` array in
+// scripts/check-conformance-coverage.sh.
+//
+// Parsed rather than restated in Go on purpose. A second copy would be one more
+// thing to re-pin by hand, which is the defect this whole seam removes, and the
+// array has to stay in the script anyway: lazily-spec's check-corpus-floors.mjs
+// classifies the ledger arrays declared there and fails on an unclassified one.
+//
+// Every failure here is HARD. Treating an unreadable or unmatched array as empty
+// would derive a LARGER expectation, from a set the suite never opens, and
+// report the guard's own blindness as a corpus problem.
+func knownUncoveredFixtures() (map[string]bool, error) {
+	var (
+		text  string
+		found string
+	)
+	for _, candidate := range coverageScriptCandidates() {
+		data, err := os.ReadFile(candidate)
+		if err == nil {
+			text, found = string(data), candidate
+			break
+		}
+	}
+	if found == "" {
+		return nil, fmt.Errorf(
+			"cannot read %s, which holds the KNOWN_UNCOVERED ledger the assertion-block "+
+				"expectation is derived from", coverageScriptCandidates()[0])
+	}
+	const marker = "\nKNOWN_UNCOVERED=(\n"
+	start := strings.Index(text, marker)
+	if start < 0 {
+		return nil, fmt.Errorf(
+			"%s no longer declares a KNOWN_UNCOVERED=( array. The assertion-block "+
+				"expectation is derived from it, so a rename has to be mirrored here rather "+
+				"than quietly deriving over a different set", found)
+	}
+	start += len(marker)
+	end := strings.Index(text[start:], "\n)\n")
+	if end < 0 {
+		return nil, fmt.Errorf(
+			"%s: the KNOWN_UNCOVERED=( array is never closed by a line holding only ')'", found)
+	}
+	entries := map[string]bool{}
+	for _, line := range strings.Split(text[start:start+end], "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		for {
+			open := strings.Index(trimmed, `"`)
+			if open < 0 {
+				break
+			}
+			rest := trimmed[open+1:]
+			close := strings.Index(rest, `"`)
+			if close < 0 {
+				break
+			}
+			entries[rest[:close]] = true
+			trimmed = rest[close+1:]
+		}
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf(
+			"%s: KNOWN_UNCOVERED parsed as EMPTY. Shrinking that list to nothing is the "+
+				"goal state, but so is a parser that has stopped matching its entries, and "+
+				"the two are indistinguishable from here. If the list is genuinely empty, "+
+				"relax this check deliberately", found)
+	}
+	return entries, nil
+}
+
+// Derived expectations, cached by resolved canonical root.
+var (
+	derivedMagnitudeMu    sync.Mutex
+	derivedMagnitudeCache = map[string]blockMagnitude{}
+)
+
+// deriveBlockMagnitude returns the (sites, digests) the fixtures this binding
+// opens really carry, and the canonical root it was derived from.
+//
+// CANONICAL corpus minus knownUncoveredFixtures, walked with
+// walkAssertionBlocks. The fixtures are read with os.ReadFile and NOT
+// specReadFile: specReadFile books every read into openedFixturePaths and the
+// prose ledger, so deriving through it would inventory the whole corpus as
+// "opened" and the expectation would then be compared against an inventory it
+// had just populated itself.
+//
+// Either dimension deriving as ZERO is a hard failure. Zero compares equal to an
+// inventory of zero, which is the vacuous green this rung exists to reject,
+// reached from the expectation side instead of the inventory side.
+func deriveBlockMagnitude() (blockMagnitude, string, error) {
+	root, ok := canonicalSpecRoot()
+	if !ok {
+		return blockMagnitude{}, "", fmt.Errorf(
+			"%w at %s: pointing %s somewhere else does not substitute for it — these "+
+				"numbers are what the run is judged AGAINST, not what it replayed",
+			errNoCanonicalCorpus, canonicalSpecRootCandidates()[0], specDirEnv)
+	}
+	derivedMagnitudeMu.Lock()
+	cached, hit := derivedMagnitudeCache[root]
+	derivedMagnitudeMu.Unlock()
+	if hit {
+		return cached, root, nil
+	}
+
+	excused, err := knownUncoveredFixtures()
+	if err != nil {
+		return blockMagnitude{}, root, err
+	}
+
+	var relatives []string
+	walkErr := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			return nil
+		}
+		rel, relErr := filepath.Rel(root, path)
+		if relErr != nil {
+			return relErr
+		}
+		relatives = append(relatives, filepath.ToSlash(rel))
+		return nil
+	})
+	if walkErr != nil {
+		return blockMagnitude{}, root, fmt.Errorf(
+			"cannot derive the assertion-block expectation: listing the canonical corpus at "+
+				"%s failed: %w. A corpus we cannot list is missing evidence, not a corpus "+
+				"carrying no blocks", root, walkErr)
+	}
+	sort.Strings(relatives)
+
+	sites := 0
+	digests := map[string]bool{}
+	for _, rel := range relatives {
+		if excused[rel] {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return blockMagnitude{}, root, fmt.Errorf(
+				"cannot derive the assertion-block expectation: %s under %s is unreadable "+
+					"(%w). A fixture we cannot read is missing evidence, not a fixture carrying "+
+					"no blocks", rel, root, err)
+		}
+		var tree any
+		if err := json.Unmarshal(data, &tree); err != nil {
+			return blockMagnitude{}, root, fmt.Errorf(
+				"cannot derive the assertion-block expectation: %s under %s is not JSON (%w)",
+				rel, root, err)
+		}
+		for _, block := range walkAssertionBlocks(rel, tree) {
+			digest, ok := blockDigest(block.name, block.obj)
+			if !ok {
+				// Booked on NEITHER side. unboundBlockReport skips an
+				// undigestible block the same way, so the two dimensions stay
+				// comparable.
+				continue
+			}
+			sites++
+			digests[digest] = true
+		}
+	}
+	if sites == 0 || len(digests) == 0 {
+		return blockMagnitude{}, root, fmt.Errorf(
+			"the assertion-block expectation derived as %d site(s) / %d digest(s) from the "+
+				"canonical corpus at %s minus the KNOWN_UNCOVERED ledger. Zero of either is "+
+				"not a corpus with nothing to check: zero compares EQUAL to an inventory of "+
+				"zero, which is exactly the vacuous green this rung exists to reject, reached "+
+				"from the expectation side. Either the corpus is empty, the ledger now excuses "+
+				"every fixture, or walkAssertionBlocks has stopped matching the fixtures it "+
+				"walks", sites, len(digests), root)
+	}
+
+	total := blockMagnitude{sites: sites, digests: len(digests)}
+	derivedMagnitudeMu.Lock()
+	derivedMagnitudeCache[root] = total
+	derivedMagnitudeMu.Unlock()
+	return total, root, nil
+}
+
+// blockMagnitudeProblems compares the inventory this run booked against the
+// expectation derived from the canonical corpus, in BOTH dimensions, for
+// EQUALITY. Split out from the process exit path so every arm is
+// mutation-checkable with an ordinary test.
+func blockMagnitudeProblems(inventory, expected blockMagnitude, root string) []string {
+	var problems []string
+	direction := func(short int) string {
+		if short > 0 {
+			return fmt.Sprintf("%d FEWER than the canonical corpus owes", short)
+		}
+		return fmt.Sprintf("%d MORE than the canonical corpus owes", -short)
+	}
+	if inventory.sites != expected.sites {
+		problems = append(problems, fmt.Sprintf(
+			"%d assertion-block SITE(s) were inventoried, expected exactly %d — %s. A site is "+
+				"one '<fixture> <json path>', so this dimension counts what the corpus CARRIES "+
+				"rather than what it distinctly SAYS: a block whose content digest recurs "+
+				"elsewhere can be deleted with the digest count unmoved, and this is the number "+
+				"that sees it. The expectation is derived from the canonical corpus at %s minus "+
+				"the KNOWN_UNCOVERED ledger in scripts/check-conformance-coverage.sh, by the "+
+				"same walk the inventory uses. Two plain causes: either the CORPUS MOVED — "+
+				"re-pull the lazily-spec sibling, and say so in KNOWN_UNCOVERED if this binding "+
+				"now opens a different set; a doctored or older copy reached through %s shows up "+
+				"here, which is the point — or the READ-TIME RECORDER DETACHED. There is no "+
+				"number to re-pin (#lzblocksitepin)",
+			inventory.sites, expected.sites, direction(expected.sites-inventory.sites), root, specDirEnv))
+	}
+	if inventory.digests != expected.digests {
+		problems = append(problems, fmt.Sprintf(
+			"%d distinct assertion-block DIGEST(s) were inventoried, expected exactly %d — %s. "+
+				"This dimension counts what the corpus SAYS, deduplicated by content, so it "+
+				"moves when a fixture changes what a block claims without moving any site — a "+
+				"content edit that collapses two distinct claims into one spelling is invisible "+
+				"to the site count above. The expectation is derived from the canonical corpus "+
+				"at %s minus the KNOWN_UNCOVERED ledger in "+
+				"scripts/check-conformance-coverage.sh, by the same walk the inventory uses. "+
+				"Same two causes as the site count: the CORPUS MOVED, or the READ-TIME RECORDER "+
+				"DETACHED. There is no number to re-pin (#lzblocksitepin)",
+			inventory.digests, expected.digests, direction(expected.digests-inventory.digests), root))
+	}
+	return problems
 }
 
 // ---------------------------------------------------------------------------
@@ -558,9 +926,15 @@ func TestUnboundBlockReportDecides(t *testing.T) {
 	opened := map[string]string{"probe/probe.json": fixture}
 
 	unbound := map[string]bool{}
-	problems, fixtures, blocks := unboundBlockReport(opened, unbound, nil)
-	if fixtures != 1 || blocks != 2 {
-		t.Fatalf("walk examined %d fixture(s) / %d block(s), want 1 / 2", fixtures, blocks)
+	problems, fixtures, inventory := unboundBlockReport(opened, unbound, nil)
+	if fixtures != 1 || inventory.sites != 2 {
+		t.Fatalf("walk examined %d fixture(s) / %d site(s), want 1 / 2", fixtures, inventory.sites)
+	}
+	// The two blocks say DIFFERENT things ({"count":41} and {"count":42}), so the
+	// digest dimension sees two as well. The probe below with identical content
+	// is what separates the dimensions.
+	if inventory.digests != 2 {
+		t.Fatalf("walk inventoried %d distinct digest(s), want 2", inventory.digests)
 	}
 	if len(problems) != 2 {
 		t.Fatalf("two unbound blocks reported %d problem(s): %v", len(problems), problems)
@@ -646,5 +1020,144 @@ func TestStrictBindRecordsOnlyStructurallyCheckedBlocks(t *testing.T) {
 	// TestConformanceStructFieldsAreRead exists to reject.
 	if len(out.Steps[0].Opaque) == 0 {
 		t.Fatal("the probe's json.RawMessage field decoded nothing, so the assertion above proves nothing")
+	}
+}
+
+// TestKnownUncoveredLedgerParses is the positive evidence for the ledger half of
+// the derivation. A parser that silently stopped matching the bash array would
+// derive a LARGER expectation from a set the suite never opens, and the failure
+// would read as a corpus problem rather than as the guard's own blindness.
+func TestKnownUncoveredLedgerParses(t *testing.T) {
+	excused, err := knownUncoveredFixtures()
+	if err != nil {
+		t.Fatalf("parsing the KNOWN_UNCOVERED ledger: %v", err)
+	}
+	if len(excused) == 0 {
+		t.Fatal("the ledger parsed as empty, which knownUncoveredFixtures is supposed to refuse")
+	}
+	// Every entry is a corpus-relative fixture path, not a scenario excuse
+	// ("fixture|id|reason") and not a stray quoted word from a neighbouring
+	// array: the parser is bounded to one array, and this is what proves it.
+	for entry := range excused {
+		if !strings.HasSuffix(entry, ".json") || strings.Contains(entry, "|") {
+			t.Errorf("KNOWN_UNCOVERED entry %q is not a corpus-relative fixture path — the parser has "+
+				"widened past the array it is bounded to", entry)
+		}
+	}
+	root, ok := canonicalSpecRoot()
+	if !ok {
+		t.Skip("no canonical lazily-spec sibling checkout")
+	}
+	// A ledger entry naming a fixture the corpus no longer carries excuses
+	// nothing, so it INFLATES the derived expectation by exactly the blocks it
+	// fails to exclude. Named here rather than left to surface as a magnitude
+	// mismatch nobody can attribute.
+	for entry := range excused {
+		if _, err := os.Stat(filepath.Join(root, filepath.FromSlash(entry))); err != nil {
+			t.Errorf("KNOWN_UNCOVERED names %q, which the canonical corpus at %s does not carry (%v) — "+
+				"the entry has rotted and now excuses nothing", entry, root, err)
+		}
+	}
+	t.Logf("KNOWN_UNCOVERED: %d fixture(s) this binding does not open", len(excused))
+}
+
+// TestDerivedBlockMagnitudeIsNotVacuous is the positive evidence for the
+// expectation side itself, and for the one property that makes the comparison
+// worth making: the expectation must come from somewhere OTHER than the run.
+func TestDerivedBlockMagnitudeIsNotVacuous(t *testing.T) {
+	if _, ok := canonicalSpecRoot(); !ok {
+		t.Skip("no canonical lazily-spec sibling checkout")
+	}
+	// Derive from cold, so the side-effect assertion below is not answered by a
+	// cached value another test warmed.
+	root, _ := canonicalSpecRoot()
+	derivedMagnitudeMu.Lock()
+	delete(derivedMagnitudeCache, root)
+	derivedMagnitudeMu.Unlock()
+
+	boundBlocksMu.Lock()
+	openedBefore := len(openedFixturePaths)
+	boundBefore := len(boundBlocks)
+	boundBlocksMu.Unlock()
+
+	expected, derivedRoot, err := deriveBlockMagnitude()
+	if err != nil {
+		t.Fatalf("deriving the assertion-block magnitude: %v", err)
+	}
+	if expected.sites == 0 || expected.digests == 0 {
+		t.Fatalf("the expectation derived as %d site(s) / %d digest(s) — zero compares EQUAL to an "+
+			"inventory of zero", expected.sites, expected.digests)
+	}
+	// The derivation must not BOOK what it reads. specReadFile records every
+	// conformance read into openedFixturePaths (and the prose ledger), so a
+	// derivation routed through it would inventory the whole canonical corpus as
+	// opened and then compare the expectation against an inventory it had just
+	// populated itself — agreeing with itself whatever the suite replayed.
+	boundBlocksMu.Lock()
+	openedAfter := len(openedFixturePaths)
+	boundAfter := len(boundBlocks)
+	boundBlocksMu.Unlock()
+	if openedAfter != openedBefore {
+		t.Errorf("deriving the expectation booked %d fixture(s) as OPENED (%d -> %d) — the expectation is "+
+			"now derived from what the run read, which goes to zero alongside the inventory the moment "+
+			"the recorder detaches", openedAfter-openedBefore, openedBefore, openedAfter)
+	}
+	if boundAfter != boundBefore {
+		t.Errorf("deriving the expectation recorded %d BINDING(s) (%d -> %d) — the expectation would then "+
+			"clear the very blocks it is supposed to demand a binding for", boundAfter-boundBefore, boundBefore, boundAfter)
+	}
+	// The two dimensions must be genuinely different numbers on this corpus. If
+	// every site carried a unique digest the site count would be observationally
+	// identical to the digest count, and #lzblocksitepin's whole argument — that
+	// deleting a RECURRING block moves one and not the other — would have no
+	// witness here.
+	if expected.digests >= expected.sites {
+		t.Fatalf("derived %d site(s) and %d distinct digest(s): the digest count does not dedupe anything "+
+			"on this corpus, so the two dimensions cannot be shown to be independent from here",
+			expected.sites, expected.digests)
+	}
+	t.Logf("derived from %s: %d site(s) / %d distinct digest(s) (%d site(s) carry a recurring shape)",
+		derivedRoot, expected.sites, expected.digests, expected.sites-expected.digests)
+}
+
+// TestBlockMagnitudeProblemsDecides is the mutation check for the comparison:
+// each dimension must fail on its own, in both directions, and an exact match
+// must report nothing.
+func TestBlockMagnitudeProblemsDecides(t *testing.T) {
+	expected := blockMagnitude{sites: 725, digests: 616}
+	if problems := blockMagnitudeProblems(expected, expected, "/corpus"); len(problems) != 0 {
+		t.Fatalf("an exact match reported %d problem(s): %v", len(problems), problems)
+	}
+	for _, testCase := range []struct {
+		name      string
+		inventory blockMagnitude
+		wants     []string
+	}{
+		// A block whose digest RECURS was lost: the site count drops and the
+		// digest count cannot see it. This is the arm a digest-only equality
+		// misses entirely.
+		{"site short", blockMagnitude{sites: 724, digests: 616}, []string{"SITE(s) were inventoried, expected exactly 725", "1 FEWER"}},
+		{"site over", blockMagnitude{sites: 726, digests: 616}, []string{"SITE(s) were inventoried, expected exactly 725", "1 MORE"}},
+		// A unique-digest block was collapsed into another's spelling: every
+		// site is still there and the digest count drops. This is the arm a
+		// site-only equality misses entirely.
+		{"digest short", blockMagnitude{sites: 725, digests: 615}, []string{"DIGEST(s) were inventoried, expected exactly 616", "1 FEWER"}},
+		{"digest over", blockMagnitude{sites: 725, digests: 617}, []string{"DIGEST(s) were inventoried, expected exactly 616", "1 MORE"}},
+	} {
+		problems := blockMagnitudeProblems(testCase.inventory, expected, "/corpus")
+		if len(problems) != 1 {
+			t.Fatalf("%s: reported %d problem(s), want exactly 1 (the OTHER dimension must stay silent, "+
+				"which is what makes it an independent signal): %v", testCase.name, len(problems), problems)
+		}
+		for _, want := range testCase.wants {
+			if !strings.Contains(problems[0], want) {
+				t.Errorf("%s: report does not mention %q: %s", testCase.name, want, problems[0])
+			}
+		}
+	}
+	// Both dimensions moving reports both, so a run cannot fix one and infer the
+	// other was fine.
+	if problems := blockMagnitudeProblems(blockMagnitude{sites: 700, digests: 600}, expected, "/corpus"); len(problems) != 2 {
+		t.Fatalf("both dimensions moved and %d problem(s) were reported, want 2: %v", len(problems), problems)
 	}
 }

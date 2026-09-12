@@ -94,8 +94,9 @@ func resolveSpecRoots() {
 			return
 		}
 
+		canonical := canonicalSpecRootCandidates()
 		roots := []string{
-			filepath.Join("..", specRepoSegment, "conformance"),
+			canonical[0],
 			// The vendored offline mirror. TestVendoredFixturesMatchCanonical
 			// holds it byte-identical to the canonical corpus whenever the
 			// sibling is present.
@@ -105,15 +106,53 @@ func resolveSpecRoots() {
 		}
 		// Source-relative duplicates, for a run whose working directory is not
 		// the package directory. Previously open-coded in three loaders.
+		roots = append(roots, canonical[1:]...)
 		if _, file, _, ok := runtime.Caller(0); ok {
-			dir := filepath.Dir(file)
-			roots = append(roots,
-				filepath.Join(dir, "..", specRepoSegment, "conformance"),
-				filepath.Join(dir, "test", "conformance"),
-			)
+			roots = append(roots, filepath.Join(filepath.Dir(file), "test", "conformance"))
 		}
 		specRootsVal = roots
 	})
+}
+
+// ---------------------------------------------------------------------------
+// The CANONICAL root, with the override deliberately not applied
+// ---------------------------------------------------------------------------
+
+// canonicalSpecRootCandidates spells the canonical sibling checkout's corpus
+// root — and nothing else. No mirror, no in-repo fallback, and NOT the
+// LAZILY_SPEC_CONFORMANCE_DIR override.
+//
+// Every runner and every guard that reasons about what this run READ must go
+// through specPath / specCandidatePaths so the override moves it
+// (#lzoverrideallrunners). There is exactly one caller allowed to reach past
+// that: the derived assertion-block magnitude (#lzblocksitepin), which needs the
+// corpus the run is JUDGED AGAINST rather than the bytes it happened to replay.
+// If the expectation followed the override it would shrink in step with a
+// doctored scratch copy and agree with itself — the vacuous green the rung
+// exists to reject — and no perturbation probe could exist, because moving the
+// inventory would move the expectation with it.
+//
+// First entry is working-directory-relative, the rest source-relative, for a run
+// whose working directory is not the package directory.
+func canonicalSpecRootCandidates() []string {
+	out := []string{filepath.Join("..", specRepoSegment, "conformance")}
+	if _, file, _, ok := runtime.Caller(0); ok {
+		out = append(out, filepath.Join(filepath.Dir(file), "..", specRepoSegment, "conformance"))
+	}
+	return out
+}
+
+// canonicalSpecRoot returns the first canonical candidate that resolves to a
+// readable directory, and whether one did. A false is an absent sibling
+// checkout, which is a legitimate local state and an illegitimate CI one — the
+// caller decides, exactly as scripts/check-conformance-coverage.sh does.
+func canonicalSpecRoot() (string, bool) {
+	for _, root := range canonicalSpecRootCandidates() {
+		if info, err := os.Stat(root); err == nil && info.IsDir() {
+			return root, true
+		}
+	}
+	return "", false
 }
 
 // specCorpusError reports why an explicitly-set override is unusable, or nil.
