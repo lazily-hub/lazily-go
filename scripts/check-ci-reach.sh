@@ -319,6 +319,35 @@ EXPECTED_NOGATE_TARGETS=(
 # a target has no CI-side spelling to pin, so it is excluded from this mapping and
 # pinning it is refused.
 #
+# IT ALSO CLOSES THE SAME WEAKNESS RUNNING THE OTHER WAY: DELETING A STEP.
+# Found in lazily-cs, which deleted its whole `test` step and stayed green because
+# a NARROWER step's anchor was a token superset of the broad member's. Swept here
+# against all 9 mapped gates, by deleting each pinned step from a byte-verified
+# scratch copy of ci.yml and running the d8cc305 guard: every one exits 1 already.
+# It does not reproduce in go — but it is ONE FLAG deep, and the flag is in the
+# Makefile:
+#
+#   go test -count=1 ./...        -> anchor `go test -count`
+#   go test -run Conformance -v . -> anchor `go test -run Conformance -v`
+#
+# `-count` is the only token keeping the `test` member out of the conformance
+# step's command. Drop `-count=1` from the `test` recipe — an ordinary edit,
+# defensible on its own terms — and, measured against d8cc305 with the `test` step
+# deleted from ci.yml outright:
+#
+#   reached  test
+#   check-ci-reach: OK — 9 target(s) reached by CI, 0 excused, 1 carrying no gate
+#   exit 0, byte-identical (`cmp`) to the healthy verdict
+#
+# `go test ./...` — the entire suite — gone from CI, credited to the `-run
+# Conformance` step that replays a filtered subset of it. Post-fix that is exit 1
+# at the step-exists rung, naming the pin and the step ci.yml no longer has.
+#
+# So `-count=1` in the `test` recipe is load-bearing for THIS GUARD and not only
+# for Go's test cache, which is the only reason the Makefile gives for it. Both
+# reasons are real and neither is a substitute for the other. The step mapping is
+# what makes that coupling stop mattering.
+#
 # THE ARRAY IS NOT THE CHECK, and the verdict line LIES without the scoping.
 # Falsified by reverting only the one line that asks the scoped question —
 # `anchor_reached_in "$a" "$step_scope_file"` back to `anchor_reached "$a"` —
@@ -1297,7 +1326,13 @@ while IFS= read -r target; do
 	# (#reversereachdirection). This workflow invokes make zero times, so today
 	# this branch is never taken; it exists so that the day a `make <target>` step
 	# appears, the mapping requirement DROPS that target by name instead of going
-	# quietly stale around it.
+	# quietly stale around it. Measured: replacing the `race (cgo)` step's body
+	# with `make race` keeps `reached  race` and refuses its mapping entry —
+	# "1 entr(ies) in EXPECTED_GATE_STEPS map a target that does not need a step:
+	# - race". The remedy is to delete the entry, not to point it at whichever
+	# step runs make; that entry would assert nothing. Same calibration as
+	# lazily-cs, which maps 8 of its 10 members and refuses a pin for the one
+	# reached through `make package-check`.
 	if make_invokes "$target"; then
 		if is_excused "$target"; then
 			stale="$stale$target"$'\n'

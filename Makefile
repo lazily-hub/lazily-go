@@ -49,6 +49,15 @@ build:
 # false red: whether the evidence exists must not depend on a warm cache. CI does
 # the same thing for the same reason (#lzguardsnotinci).
 #
+# It has a SECOND, unrelated job, so do not drop it on cache grounds alone
+# (#reversereachdirection). `-count` is the only token that keeps this target's
+# reach anchor — `go test -count` — out of the `-run Conformance` CI step's
+# command, which replays a filtered SUBSET of this suite. Measured without it:
+# deleting the whole `test` step from ci.yml left check-ci-reach at
+# "OK — 9 target(s) reached by CI", exit 0, byte-identical to healthy, with the
+# entire suite gone from CI. EXPECTED_GATE_STEPS now catches that independently;
+# the coupling is recorded here because this is where the flag is.
+#
 # The truncation on the first line is what keeps a cached run from being a false
 # GREEN here — an empty file is missing evidence and the guard says so. It is not
 # a freshness check, though: it only covers the case where `test` and the guard
