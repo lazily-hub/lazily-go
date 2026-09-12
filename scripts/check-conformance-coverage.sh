@@ -344,56 +344,188 @@ fi
 # magnitude explicitly before reporting OK. Do not lower these to fix a red run —
 # a drop here means the corpus or the recorder shrank, which IS the finding.
 #
-# These floors track WHAT CI ACTUALLY REPLAYS, exactly — no margin, no slack.
-# Pinned 2026-09-11 from CI run 34629316668 against the published corpus:
-# 147/156 fixtures OPENED, 151/151 scenarios REPLAYED. A local `make test` on the
-# same commit reproduced both numbers.
+# DERIVED, and an EQUALITY (#lzgotypedfloors). Both magnitudes used to be numbers
+# typed into this file and compared with `-lt`, re-pinned by hand from a completed
+# CI run, and both halves were wrong in the way the assertion-block magnitude in
+# conformance_unbound_block_test.go already was (#lzblocksitepin):
 #
-# Do NOT raise a floor "by however many replays this change adds" and leave the
-# old margin in place. That convention is the bug: the floor only ever trails
-# further behind, and every unit of slack is that many replays that could stop
-# running with this guard still green. When a change genuinely adds replays,
-# re-read the coverage lines from a COMPLETED CI run — which clones the published
-# corpus (#lzspecpushbeforebindings) rather than trusting a working tree — and set
-# the floor to that total.
+#   * a TYPED number is re-pinned by hand, so it drifts by hand. The comment that
+#     used to sit here told the next reader to re-read the coverage lines from a
+#     COMPLETED CI run and set the number to that total — a ritual nobody performs
+#     on a green run, which is how lazily-dart's hand-typed block floor sat 3
+#     below reality for an afternoon;
+#   * a FLOOR cannot see a shrink that stays above it, and a shrink is exactly
+#     what a detached recorder looks like.
 #
-# An upstream fixture that lands without a Go runner raises `total` and leaves
-# `covered` alone, so it does not trip MIN_FIXTURES; only a replay that STOPS
-# running does.
-MIN_FIXTURES="${MIN_FIXTURES:-147}"
+# They were also not what catches a SHRINKING CORPUS, which is what a floor looks
+# like it is for. `lazily-spec/corpus-counts.json` pins the fixture total and
+# `lazily-spec/scripts/check-corpus-floors.mjs` asserts it EQUAL for all ten
+# bindings, so a corpus that loses a fixture is refused centrally, at one edit
+# site — verified rather than assumed, by pointing that audit at a scratch copy
+# of the corpus with one fixture removed: "the corpus carries 155 fixtures;
+# corpus-counts.json pins 156", exit 1. Ten hand-typed floors were the weaker
+# half of that pair, not the load-bearing one.
+#
+# The expectation below is the corpus listing minus this binding's own
+# KNOWN_UNCOVERED. The two directions above already enforce that composition
+# fixture by fixture — every corpus fixture is opened or excused, and every excuse
+# names a fixture in the corpus that the run did NOT open — so
+# `corpus \ KNOWN_UNCOVERED` IS the opened set, and its CARDINALITY is checkable
+# without a second source of truth. What the equality adds over those two loops is
+# the ARITHMETIC: a duplicated excuse entry passes both directions while making
+# the count disagree, which is why the duplicate check comes first.
+#
+# Do not re-spell either retired constant in its assignment form anywhere under
+# scripts/. check-corpus-floors.mjs greps this directory for that literal shape,
+# so a commented example keeps the audit comparing a number that no longer runs —
+# the trap lazily-py fell into, and one lazily-rs is in right now: its
+# `#lzrstypedfloors` comments quote both retired spellings, and the central audit
+# still reads them as rs's declared floors of 150 and 166.
+uniq_known=0
+if [ "${#KNOWN_UNCOVERED[@]}" -gt 0 ]; then
+  dupes="$(printf '%s\n' "${KNOWN_UNCOVERED[@]}" | grep -v '^$' | sort | uniq -d || true)"
+  if [ -n "$dupes" ]; then
+    echo "ERROR: KNOWN_UNCOVERED lists the same fixture more than once:" >&2
+    printf '         %s\n' $dupes >&2
+    echo "       Both directions above still pass on a duplicate — the fixture is in" >&2
+    echo "       the corpus and the suite does not open it, once per copy — while the" >&2
+    echo "       derived opened count below silently drops by one per repeat. Delete" >&2
+    echo "       the duplicates." >&2
+    exit 1
+  fi
+  uniq_known="$(printf '%s\n' "${KNOWN_UNCOVERED[@]}" | grep -v '^$' | sort -u | wc -l)"
+fi
+
 if [ "$total" -eq 0 ]; then
   echo "ERROR: the corpus at $SPEC_DIR listed ZERO fixtures." >&2
   echo "       Every check above is vacuously green over an empty population." >&2
   exit 1
 fi
-if [ "$covered" -lt "$MIN_FIXTURES" ]; then
-  echo "ERROR: only $covered distinct canonical fixtures were OPENED, expected >= $MIN_FIXTURES." >&2
-  echo "       A replay was removed, renamed, or short-circuited, or the recorder" >&2
-  echo "       detached mid-run. Do not lower MIN_FIXTURES to fix this." >&2
+expected_opened=$((total - uniq_known))
+if [ "$expected_opened" -le 0 ]; then
+  echo "ERROR: the corpus at $SPEC_DIR minus KNOWN_UNCOVERED derives $expected_opened" >&2
+  echo "       fixtures to open. An expectation of zero is a green badge over an" >&2
+  echo "       empty comparison (#lzvacuousrun)." >&2
+  exit 1
+fi
+if [ "$covered" -ne "$expected_opened" ]; then
+  if [ "$covered" -lt "$expected_opened" ]; then
+    echo "ERROR: only $covered distinct canonical fixtures were OPENED; the corpus at" >&2
+    echo "       $SPEC_DIR minus KNOWN_UNCOVERED derives $expected_opened." >&2
+    echo "       A replay was removed, renamed, or short-circuited, or the recorder" >&2
+    echo "       detached mid-run. There is no number to lower here — the expectation" >&2
+    echo "       is computed from the corpus, not typed." >&2
+  else
+    echo "ERROR: $covered distinct fixtures were OPENED but the corpus minus" >&2
+    echo "       KNOWN_UNCOVERED derives only $expected_opened, so the manifest and the" >&2
+    echo "       corpus this guard walked are not the same tree: a leftover manifest, a" >&2
+    echo "       corpus that shrank underneath it, or LAZILY_SPEC_CONFORMANCE_DIR" >&2
+    echo "       pointing the two halves at different trees." >&2
+  fi
   exit 1
 fi
 
 echo "conformance coverage OK: $covered/$total canonical fixtures OPENED by the suite" \
-     "(${#KNOWN_UNCOVERED[@]} listed as known-uncovered; runtime manifest — these bytes were really read)"
+     "($uniq_known listed as known-uncovered; $expected_opened DERIVED from the corpus" \
+     "listing minus that ledger and asserted EQUAL; runtime manifest — these bytes were" \
+     "really read)"
 
-# The same floor for rung 4. Its loop walks the scenarios of OPENED fixtures, so
-# zero opened fixtures means zero scenarios, which means zero unreplayed
+# The same treatment for rung 4. Its loop walks the scenarios of OPENED fixtures,
+# so zero opened fixtures means zero scenarios, which means zero unreplayed
 # scenarios — OK reported having compared nothing.
 #
-# Same rule as MIN_FIXTURES above: this equals the scenario total a completed CI
-# run reports, exactly. Pinned 2026-09-11 from run 34629316668 at 151/151.
-MIN_SCENARIOS="${MIN_SCENARIOS:-151}"
-if [ "$SCENARIO_TOTAL" -eq 0 ]; then
+# `SCENARIO_TOTAL` is NOT the independent witness. It walks only fixtures the
+# MANIFEST says were opened, so a detached recorder shrinks the manifest,
+# SCENARIO_TOTAL and SCENARIO_REPLAYED together, and an expectation derived from
+# it follows them into the ditch. The walk below starts from the CORPUS LISTING
+# minus KNOWN_UNCOVERED instead — the same composition the fixture rung just
+# asserted the cardinality of — and resolves ids through the SAME `scenario_ids`
+# the rung above uses, so there is one id-resolution rule with two callers rather
+# than two rules that can disagree about what a scenario is.
+#
+# Unidentified ids are counted here exactly as the rung above counts them, so the
+# two halves stay comparable. They cannot survive to this point anyway: the rung
+# above books each one into `missing`, and `missing` exits before the floor.
+DERIVED_OPENED=""
+derived_scenario_total=0
+while IFS= read -r fixture; do
+  is_known=0
+  for known in "${KNOWN_UNCOVERED[@]:-}"; do
+    [ -n "$known" ] || continue
+    if [ "$known" = "$fixture" ]; then is_known=1; break; fi
+  done
+  [ "$is_known" -eq 0 ] || continue
+  DERIVED_OPENED+="$fixture"$'\n'
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    derived_scenario_total=$((derived_scenario_total + 1))
+  done < <(scenario_ids "$fixture")
+done < <(cd "$SPEC_DIR" && find . -name '*.json' | sed 's|^\./||' | sort)
+
+# An excuse only subtracts when its fixture is one the corpus composition says is
+# OPENED. An excuse naming an uncovered fixture contributes no scenario to
+# `derived_scenario_total`, so counting it would take the expectation one below
+# reality. Duplicates are refused first, for the same arithmetic reason
+# KNOWN_UNCOVERED duplicates are.
+excuse_keys=""
+for entry in "${SCENARIO_EXCUSES[@]:-}"; do
+  [ -n "$entry" ] || continue
+  fixture="${entry%%|*}"
+  rest="${entry#*|}"
+  excuse_keys+="$fixture|${rest%%|*}"$'\n'
+done
+if [ -n "$excuse_keys" ]; then
+  dupes="$(printf '%s' "$excuse_keys" | grep -v '^$' | sort | uniq -d || true)"
+  if [ -n "$dupes" ]; then
+    echo "ERROR: excuse_scenario names the same fixture and scenario more than once:" >&2
+    printf '         %s\n' $dupes >&2
+    echo "       Both directions above still pass on a duplicate, while the derived" >&2
+    echo "       replay count below silently drops by one per repeat. Delete the" >&2
+    echo "       duplicates." >&2
+    exit 1
+  fi
+fi
+derived_excused=0
+while IFS= read -r key; do
+  [ -n "$key" ] || continue
+  if grep -qxF "${key%%|*}" <<< "$DERIVED_OPENED"; then
+    derived_excused=$((derived_excused + 1))
+  fi
+done <<< "$(printf '%s' "$excuse_keys" | grep -v '^$' | sort -u || true)"
+
+if [ "$SCENARIO_TOTAL" -eq 0 ] || [ "$derived_scenario_total" -eq 0 ]; then
   echo "ERROR: ZERO scenarios were found across the opened fixtures." >&2
   echo "       The rung above is vacuously green over an empty population." >&2
   exit 1
 fi
-if [ "$SCENARIO_REPLAYED" -lt "$MIN_SCENARIOS" ]; then
-  echo "ERROR: only $SCENARIO_REPLAYED distinct scenarios were REPLAYED, expected >= $MIN_SCENARIOS." >&2
-  echo "       A scenario dispatch stopped matching, or the ledger detached." >&2
-  echo "       Do not lower MIN_SCENARIOS to fix this." >&2
+expected_replayed=$((derived_scenario_total - derived_excused))
+if [ "$expected_replayed" -le 0 ]; then
+  echo "ERROR: the corpus at $SPEC_DIR minus KNOWN_UNCOVERED carries" >&2
+  echo "       $derived_scenario_total scenario(s) and excuse_scenario excuses" >&2
+  echo "       $derived_excused of them, deriving an expectation of $expected_replayed." >&2
+  echo "       An expectation of zero is a green badge over an empty comparison" >&2
+  echo "       (#lzvacuousrun)." >&2
+  exit 1
+fi
+if [ "$SCENARIO_REPLAYED" -ne "$expected_replayed" ]; then
+  if [ "$SCENARIO_REPLAYED" -lt "$expected_replayed" ]; then
+    echo "ERROR: only $SCENARIO_REPLAYED distinct scenarios were REPLAYED; the corpus at" >&2
+    echo "       $SPEC_DIR minus KNOWN_UNCOVERED carries $derived_scenario_total, less" >&2
+    echo "       $derived_excused excused, deriving $expected_replayed." >&2
+    echo "       A scenario dispatch stopped matching, or the ledger detached. There is" >&2
+    echo "       no number to lower here — the expectation is computed from the corpus," >&2
+    echo "       not typed." >&2
+  else
+    echo "ERROR: $SCENARIO_REPLAYED distinct scenarios were REPLAYED but the corpus at" >&2
+    echo "       $SPEC_DIR minus KNOWN_UNCOVERED derives only $expected_replayed" >&2
+    echo "       ($derived_scenario_total carried, less $derived_excused excused)." >&2
+    echo "       The ledger and the corpus this guard walked are not the same tree: a" >&2
+    echo "       leftover ledger, a corpus that shrank underneath it, or" >&2
+    echo "       LAZILY_SPEC_CONFORMANCE_DIR pointing the two halves apart." >&2
+  fi
   exit 1
 fi
 
 echo "scenario coverage OK: $SCENARIO_REPLAYED/$SCENARIO_TOTAL scenarios of those fixtures REPLAYED" \
-     "(${#SCENARIO_EXCUSES[@]} excused; runtime ledger — recorded at the point of replay)"
+     "($derived_excused excused; $expected_replayed DERIVED from the corpus listing minus" \
+     "KNOWN_UNCOVERED and asserted EQUAL; runtime ledger — recorded at the point of replay)"
