@@ -143,9 +143,41 @@ fi
 # and this list is a claim about what it DOES.
 #
 # Yes, it duplicates the Makefile's `check:` line. That is the mechanism, not an
-# accident: the attack's whole advantage was being invisible in a diff of one
-# line, and the pin turns it into a two-place edit whose second place is a
-# reviewable statement of intent.
+# accident: the pin makes a retiring edit INCOMPLETE, so it cannot be a one-line
+# deletion, and its second place is a reviewable statement of intent.
+#
+# Not "the attack was invisible in a diff" — that argument was measured and does
+# not hold. lazily-kt checked it against five attacks and it explained exactly
+# one: the rename, the `ifeq` decoupling, the neutered recipe and the recipe swap
+# are all equally visible one-line edits, and three of those four went undetected
+# before #pinreachclosure. Visibility is not what these pins buy. What they buy
+# is stated once, in lazily-gd's words: NO SILENT CHANGE, never correctness. A
+# pin cannot name a gate that never existed, and written from a broken Makefile
+# it would faithfully pin the breakage.
+#
+# THREE THINGS THESE PINS DO NOT CATCH. Recorded here rather than in a commit
+# message, because this is where the next reader looks.
+#
+#   * A RECIPE SWAPPED FOR A GATE CI ALREADY RUNS. Point `test-interop-peer:` at
+#     `go build ./...` and every rung is satisfied with the verdict byte-identical
+#     to healthy at exit 0, while the wire gate runs zero times. Half of it IS
+#     caught — an anchor-collision rung refuses two members that reduce to the
+#     same anchor set, so borrowing another MEMBER's gate fails. Borrowing a step
+#     no member runs does not. Closing that needs a per-target recipe anchor: a
+#     second spelling of every recipe inside this guard, whose churn is
+#     recipe-rate rather than closure-rate, so it would be updated reflexively and
+#     become the passes-when-stale check this family already removed once. Decided
+#     against deliberately; see #closeremaininghalf.
+#   * ORDER. `check:`'s prerequisites are a set here, and a set cannot carry
+#     order. Nothing in go depends on it today: every closure target is
+#     self-contained and the one real ordering (the suite writes evidence, the
+#     coverage guard reads it) lives inside `test`'s own recipe.
+#   * EDGES. Dropping an edge between two closure members can leave this set
+#     identical AND pass the oracle, when another member already pulls the
+#     dependency into the root's run — `make check` keeps working while
+#     `make <target>` alone breaks. go's closure is a depth-1 star today, so
+#     there is no such edge to drop; it arrives the moment a member gains a
+#     prerequisite that is also a member.
 EXPECTED_ROOT_TARGET="check"
 EXPECTED_CLOSURE_TARGETS=(
 	"assertion-ordering-check" # observation ordering (#lzassertordering)
