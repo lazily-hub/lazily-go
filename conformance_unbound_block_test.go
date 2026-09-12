@@ -391,23 +391,60 @@ const defaultExpectedLedgeredBlocks = 0
 // and not a fallback to the default: a pin that cannot be read must not be
 // assumed away, which is the same rule every other missing-evidence path in this
 // file follows.
+//
+// ONE parse for the whole family (#lzpinparsestrict): a NON-EMPTY run of bare
+// ASCII digits '0'-'9', and nothing else, checked BEFORE strconv runs. Ten
+// bindings wrote ten readers for this one constant, so the family's real contract
+// became whichever was loosest, and this reader had two of the loose parts.
+// strconv.Atoi honours a sign, so "+1" was 1 (and "-1" only failed one step
+// later, on the negative check). And os.Getenv cannot tell an UNSET variable
+// from an explicitly EMPTY one, so with TrimSpace ahead of it both "" and " "
+// silently became the committed default — `export EXPECTED_LEDGERED_BLOCKS=` and
+// a typo that expanded to nothing were indistinguishable from no override at all
+// to anyone reading a green run. os.LookupEnv makes that distinction, so only a
+// genuinely absent variable takes the default now.
+//
+// Refused: empty, whitespace around or inside, a leading '+' or '-', separators,
+// a radix prefix, a float or an exponent, and any non-ASCII digit. Leading zeros
+// are fine and "0" stays valid — this binding pins at zero.
 func expectedLedgeredBlocks() (int, error) {
-	raw := strings.TrimSpace(os.Getenv(expectedLedgeredBlocksEnv))
-	if raw == "" {
+	raw, present := os.LookupEnv(expectedLedgeredBlocksEnv)
+	if !present {
 		return defaultExpectedLedgeredBlocks, nil
+	}
+	if !isBareASCIIDigits(raw) {
+		return 0, fmt.Errorf("%s=%q is not a non-negative integer in bare ASCII digits, so the ledger size "+
+			"pin cannot be read. Falling back to the default here would let a typo silently relax a policy "+
+			"line — an EMPTY value included, which os.Getenv could not have told apart from no override at "+
+			"all (#lzpinparsestrict, #lzledgerratchet)",
+			expectedLedgeredBlocksEnv, raw)
 	}
 	expected, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%s=%q is not an integer, so the ledger size pin cannot be read. Falling back to "+
-			"the default here would let a typo silently relax a policy line (#lzledgerratchet)",
-			expectedLedgeredBlocksEnv, raw)
-	}
-	if expected < 0 {
-		return 0, fmt.Errorf("%s=%d is negative. No ledger has a negative size, so no state of the tree could "+
-			"ever satisfy it and this reads as an attempt to disable the check (#lzledgerratchet)",
-			expectedLedgeredBlocksEnv, expected)
+		// Unreachable for bare digits short of an overflowing value, and still
+		// reported rather than assumed away.
+		return 0, fmt.Errorf("%s=%q is bare digits that strconv could not read: %w (#lzpinparsestrict)",
+			expectedLedgeredBlocksEnv, raw, err)
 	}
 	return expected, nil
+}
+
+// isBareASCIIDigits is the family's pin rule (#lzpinparsestrict): at least one
+// byte, every byte in '0'-'9'. Deliberately NOT unicode.IsDigit, which is true
+// for the Arabic-Indic three and every other Unicode decimal digit, and not a
+// regexp \d either — Go's \d is ASCII-only but Python's is not, and lazily-dart
+// had a reader built on the wrong half of that. Byte-wise, so a multi-byte rune
+// cannot pass by having a digit byte in it.
+func isBareASCIIDigits(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	for index := 0; index < len(raw); index++ {
+		if raw[index] < '0' || raw[index] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ledgeredSiteListCap bounds how many entries a refusal prints. The list is what
@@ -1424,21 +1461,47 @@ func TestLedgerSiteListIsCapped(t *testing.T) {
 // TestExpectedLedgeredBlocksReadsThePin pins the override seam. A pin that
 // silently fell back to the default on a malformed value would let a typo relax
 // a policy line, which is the failure mode the hard error exists for.
+//
+// Only an UNSET variable takes the default. An explicitly EMPTY one is in the
+// rejection set below, not here: this test used to call t.Setenv(env, "") "unset"
+// and assert the default, which is exactly the conflation os.Getenv forced and
+// os.LookupEnv removes (#lzpinparsestrict).
 func TestExpectedLedgeredBlocksReadsThePin(t *testing.T) {
-	t.Setenv(expectedLedgeredBlocksEnv, "")
+	// t.Setenv first so the cleanup restores whatever the caller had, then
+	// actually remove it — t.Setenv cannot express absence.
+	t.Setenv(expectedLedgeredBlocksEnv, "0")
+	if err := os.Unsetenv(expectedLedgeredBlocksEnv); err != nil {
+		t.Fatalf("unsetting %s: %v", expectedLedgeredBlocksEnv, err)
+	}
 	pinned, err := expectedLedgeredBlocks()
 	if err != nil || pinned != defaultExpectedLedgeredBlocks {
 		t.Fatalf("unset: pin=%d err=%v, want %d / nil", pinned, err, defaultExpectedLedgeredBlocks)
 	}
-	t.Setenv(expectedLedgeredBlocksEnv, " 3 ")
-	if pinned, err := expectedLedgeredBlocks(); err != nil || pinned != 3 {
-		t.Fatalf("override: pin=%d err=%v, want 3 / nil", pinned, err)
+
+	// Leading zeros are fine and "0" is valid: five bindings in this family pin
+	// at zero, so a rule that refused it would be unusable there.
+	for raw, want := range map[string]int{"3": 3, "007": 7, "0": 0} {
+		t.Setenv(expectedLedgeredBlocksEnv, raw)
+		if pinned, err := expectedLedgeredBlocks(); err != nil || pinned != want {
+			t.Fatalf("override %q: pin=%d err=%v, want %d / nil", raw, pinned, err, want)
+		}
 	}
-	for _, bad := range []string{"lots", "1.5", "-1"} {
+
+	// The family's rejection set. " 3 " and "+1" were ACCEPTED here before
+	// (TrimSpace, then strconv.Atoi honouring the sign) and "" fell through to
+	// the default — three pins nobody typed. None was a hole, since a wrong pin
+	// fails the equality loudly; the point is that ten bindings disagreed about
+	// which of these were pins at all.
+	for _, bad := range []string{"lots", "1.5", "-1", "", " ", "1_0", " 3 ", "+1", "1.0", "0x19", "\u0663"} {
 		t.Setenv(expectedLedgeredBlocksEnv, bad)
-		if _, err := expectedLedgeredBlocks(); err == nil {
+		_, err := expectedLedgeredBlocks()
+		if err == nil {
 			t.Fatalf("%s=%q was accepted; an unreadable pin must not fall back to the default",
 				expectedLedgeredBlocksEnv, bad)
+		}
+		if !strings.Contains(err.Error(), fmt.Sprintf("%q", bad)) {
+			t.Fatalf("%s=%q was refused without being NAMED: %v. A reader who cannot see what was "+
+				"rejected cannot tell a typo from a policy change", expectedLedgeredBlocksEnv, bad, err)
 		}
 	}
 }
