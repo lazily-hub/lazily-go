@@ -582,6 +582,157 @@ if [ -n "$map_dupes" ]; then
 	exit 1
 fi
 
+# --------------------------------------------------------------- activation pins
+
+# WHETHER THE WORKFLOW AND THE JOB RUN AT ALL (#verifyworkflowactually).
+#
+# Everything above asks what CI *contains*. A pinned gate step can exist, be
+# unique, be unconditional, be the only step that runs its gate — and be in a job
+# or a workflow that never starts. Measured on this tree at 7bf9c00, on
+# byte-verified scratch copies of ci.yml restored and re-`cmp`ed after each case,
+# exit codes read UNPIPED. Every one of these was exit 0 with the three verdict
+# lines byte-identical to healthy:
+#
+#   job `test` gains `if: false`                                        exit 0
+#   job `test` gains `continue-on-error: true`                          exit 0
+#   `on:` reduced to `workflow_dispatch:`                               exit 0
+#   `branches: [main]` -> `branches: [release]` (both triggers)         exit 0
+#   `paths: ["**.go"]` introduced on push                               exit 0
+#   job `test` gains `if: github.repository == 'nobody/nothing'`        exit 0
+#   the interop peer's step MOVED to a second job                       exit 0
+#
+# The third is the widest: with `on:` reduced to `workflow_dispatch`, no push and
+# no pull request starts this workflow, so all nine gates run in CI never — and
+# the step that runs THIS GUARD does not run either, which is what makes the state
+# self-concealing. The reduction and a gate-retiring edit fit in one commit, and
+# the run that would have objected is the run the same commit removed.
+#
+# And `scripts/ci-reach.conf` asserted the missing half IN A COMMENT: "Listing one
+# here is a claim that it runs on every push/PR". That claim was the thing every
+# other mechanism in this guard rested on, and nothing checked it.
+#
+# PINNED AS EXACT VALUES, NOT AS ABSENCES. lazily-zig has a legitimate job-level
+# `continue-on-error: ${{ matrix.zig == 'master' }}` for its advisory master leg,
+# so "no job-level continue-on-error" would false-red a correct config. Values, in
+# both directions, by set equality: absent -> present, present -> changed, and
+# present -> absent are each named. `<absent>` is a VALUE here, spelled, so the
+# normal case is pinned rather than merely unmentioned.
+#
+# go's shape, measured rather than assumed: `on:` is a block map of exactly two
+# events, each filtered to `branches: [main]`, with no `paths:`, no
+# `branches-ignore:`, and no `types:`; one job, `test`, with no `if:`, no
+# `continue-on-error:` and NO `strategy:` — so there is no matrix here and no
+# advisory leg. A matrix arriving later is named by the `strategy=<absent>` pin,
+# which is why presence is pinned even though matrix CONTENT is not: an advisory
+# leg needs a `continue-on-error` to be advisory, and that value is pinned
+# exactly. What the pin cannot see is a matrix whose only BLOCKING leg is deleted
+# while a `continue-on-error` expression stays byte-identical; go has no matrix to
+# do that to today, and the day it gains one that cell needs its own pin.
+EXPECTED_TRIGGERS=(
+	".github/workflows/ci.yml|pull_request"
+	".github/workflows/ci.yml|push"
+)
+
+# The exact filters, per workflow per trigger, as `<key>=<comma-joined values>`.
+# Set-equal in both directions, so an INTRODUCED filter is named by being an entry
+# nothing pins — no binding in the family has a `paths:` filter today, and this is
+# the check that keeps it that way. It is not cosmetic: a `paths:` filter that
+# excludes `Makefile` means a commit that retires a gate from `check` does not
+# trigger the workflow that would have caught it.
+EXPECTED_TRIGGER_FILTERS=(
+	".github/workflows/ci.yml|pull_request|branches=main"
+	".github/workflows/ci.yml|push|branches=main"
+)
+
+# A pin can be edited in the same commit as the thing it pins. That is how the
+# mode edit above got to exit 0 before #reversereachdirection, and a trigger pin
+# has the same shape: reduce `on:` to `workflow_dispatch` AND rewrite
+# EXPECTED_TRIGGERS to match, and set equality holds while nothing runs.
+#
+# Here that can be closed, because ci-reach.conf's meaning is FIXED rather than
+# per-repo: listing a workflow there is a claim that it runs on every push and
+# every pull request. So these are REQUIREMENTS, not pins — a floor the pin above
+# cannot be edited below:
+#
+#   * every counted workflow triggers on BOTH push and pull_request,
+#   * neither of those triggers carries `paths:`, `paths-ignore:` or
+#     `branches-ignore:`, and
+#   * if either carries `branches:`, the default branch is in it.
+#
+# Deleting the `workflow:` line from ci-reach.conf does not escape this: with no
+# workflow listed the script falls back to `.github/workflows/ci.yml` and audits
+# it anyway. A workflow that genuinely should not run on every push/PR must not be
+# the workflow this guard counts, and saying so is a conf edit plus a pin edit,
+# both visible.
+REQUIRED_TRIGGERS=("push" "pull_request")
+EXPECTED_DEFAULT_BRANCH="main"
+
+# WHICH JOB each pinned gate step lives in, by set equality over the jobs the
+# pinned steps are actually found in. A gate step moved to another job is then
+# named — including moved into a job with its own never-true `if:`, which is the
+# same defect one level down and was exit 0, byte-identical, before this.
+EXPECTED_GATE_JOBS=(
+	".github/workflows/ci.yml|test"
+)
+
+# The activation of each pinned gate job, by exact value. `<absent>` is spelled
+# out so the normal case is a pin rather than a silence; `strategy` is pinned for
+# PRESENCE only (see above). Read from the jobs EXPECTED_GATE_JOBS names, which is
+# sound only because that array is proven set-equal to the observed gate jobs
+# FIRST — every cell of this partition terminates in a pin, not in a set the
+# audited file gets to choose.
+EXPECTED_GATE_JOB_ACTIVATION=(
+	".github/workflows/ci.yml|test|continue-on-error=<absent>"
+	".github/workflows/ci.yml|test|if=<absent>"
+	".github/workflows/ci.yml|test|strategy=<absent>"
+)
+
+# The two literal forms that are never legitimate on a gate job, refused
+# outright rather than pinned — `if: false` and `continue-on-error: true` say the
+# job is advisory, and an advisory gate is not a gate. Refusing the LITERALS
+# false-reds nothing: zig's advisory leg is an expression, and an expression is
+# still pinned by value above rather than refused. A never-true EXPRESSION
+# (`if: github.repository == 'nobody/nothing'`) cannot be decided statically and
+# so remains pin-only — named when it appears, launderable by a commit that edits
+# the pin with it. That residue is stated here rather than papered over.
+JOB_IF_REFUSED="false"
+JOB_CONTINUE_ON_ERROR_REFUSED="true"
+
+# Vacuity floor for the pins themselves (#lzvacuousrun), and the one exception.
+# EXPECTED_TRIGGER_FILTERS is NOT required to name anything: an empty filter set
+# is a legitimate VALUE — it means every branch and every path — exactly as an
+# empty EXPECTED_MAKE_INVOKED_TARGETS is the honest value for a workflow that
+# invokes make zero times. Requiring it to be non-empty would also send the wrong
+# remedy to a maintainer who widens the trigger deliberately: the pin they must
+# write is the empty one.
+#
+# Not required to name anything is not the same as unchecked: the set equality
+# below is what makes an empty pin a claim. Today go's value is two entries.
+for pin_name in EXPECTED_TRIGGERS EXPECTED_GATE_JOBS EXPECTED_GATE_JOB_ACTIVATION REQUIRED_TRIGGERS; do
+	declare -n pin_ref="$pin_name"
+	if [ "${#pin_ref[@]}" -eq 0 ]; then
+		echo "check-ci-reach: $pin_name is empty — a pin that names nothing pins nothing" >&2
+		exit 1
+	fi
+	unset -n pin_ref
+done
+
+for pin_name in EXPECTED_TRIGGERS EXPECTED_TRIGGER_FILTERS EXPECTED_GATE_JOBS EXPECTED_GATE_JOB_ACTIVATION REQUIRED_TRIGGERS; do
+	declare -n pin_ref="$pin_name"
+	pin_ref_dupes="$(printf '%s\n' "${pin_ref[@]:+${pin_ref[@]}}" | grep -v '^$' | sort | uniq -d || true)"
+	if [ -n "$pin_ref_dupes" ]; then
+		echo "check-ci-reach: $pin_name repeats an entry:" >&2
+		while IFS= read -r d; do
+			[ -n "$d" ] || continue
+			echo "  - $d" >&2
+		done <<<"$pin_ref_dupes"
+		echo "A pin is a SET. A duplicate is harmless to the equality check and a sign the" >&2
+		echo "list was edited by appending rather than read — fix it there." >&2
+		exit 1
+	fi
+	unset -n pin_ref
+done
+
 # ---------------------------------------------------------------- configuration
 
 workflows=()
@@ -1023,6 +1174,11 @@ fi
 # de-duplicated view of them is the one view that cannot see it.
 ci_step_names() {
 	awk '
+		function emit() {
+			printf "%s\t%s\t%s\n", FILENAME, (job == "" ? "<no job>" : job),
+			       (stepname == "" ? "\002unnamed" : stepname)
+		}
+		FNR == 1 { section = ""; job = ""; job_indent = 0; stepname = ""; inblock = 0 }
 		{
 			line = $0
 			indent = match(line, /[^ ]/) - 1
@@ -1032,6 +1188,27 @@ ci_step_names() {
 				if (line ~ /^[[:space:]]*$/) next
 				if (indent <= block_indent) inblock = 0
 				else next
+			}
+
+			# Which JOB the step is in (#verifyworkflowactually). A step name is
+			# the identity a gate is pinned to; the job around it decides whether
+			# that step runs at all, so the two are read together and by the same
+			# reader — two readers would be two answers to "where is this step".
+			if (indent == 0) {
+				section = ""; job = ""; job_indent = 0; stepname = ""
+				k = line; sub(/:.*$/, "", k)
+				if (k == "jobs") section = "jobs"
+				next
+			}
+			if (section == "jobs") {
+				if (job_indent == 0) job_indent = indent
+				if (indent == job_indent && line !~ /^[[:space:]]*-[[:space:]]/) {
+					job = line; sub(/:.*$/, "", job)
+					sub(/^[[:space:]]+/, "", job)
+					if (job ~ /^".*"$/ || job ~ /^'"'"'.*'"'"'$/) job = substr(job, 2, length(job) - 2)
+					stepname = ""
+					next
+				}
 			}
 
 			if (line ~ /^[[:space:]]*-[[:space:]]/) stepname = ""
@@ -1046,13 +1223,182 @@ ci_step_names() {
 			if (line ~ /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*[|>][-+]?[[:space:]]*$/) {
 				inblock = 1
 				block_indent = indent
-				print (stepname == "" ? "\002unnamed" : stepname)
+				emit()
 				next
 			}
 			if (line ~ /^[[:space:]]*(-[[:space:]]+)?run:[[:space:]]*[^|>[:space:]]/) {
-				print (stepname == "" ? "\002unnamed" : stepname)
+				emit()
 			}
 		}
+	' "$@"
+}
+
+# ACTIVATION records: which events start a workflow, with which filters, and how
+# each job is conditioned (#verifyworkflowactually). One tab-separated record per
+# line, prefixed with the workflow path:
+#
+#   <wf>	TRIGGER	<event>
+#   <wf>	FILTER	<event>	<key>=<comma-joined values>
+#   <wf>	JOB	<job id>
+#   <wf>	JOBATTR	<job id>	if|continue-on-error|strategy=<value>
+#
+# Block scalars are OPAQUE here, skipped before anything is matched — the same
+# reason ci_commands strips them. A `run: |` body is arbitrary text: this
+# workflow's `vet` step could carry `if: false` and `continue-on-error: true` as
+# shell lines and a naive line match would read them as job attributes. Measured
+# against a copy that does exactly that: no spurious record of either.
+#
+# Indent widths are DERIVED, not assumed — the first child of `on:` sets the
+# trigger indent, the first child of `jobs:` sets the job indent, and the first
+# child of a job sets the attribute indent — so a reindented workflow parses the
+# same. Job attributes are read at exactly the job's own attribute indent, which
+# is what keeps a STEP-level `if:` (deeper) out of the job's activation; the
+# step-level halves are closed separately and belong to the step map.
+#
+# Accepted `on:` spellings, all measured: a block map, a flow sequence
+# (`on: [push, pull_request]`), a bare scalar (`on: push`), and the quoted key
+# (`"on":`) — YAML 1.1 reads bare `on` as the boolean true, so the true/True
+# spellings are accepted too. Filters are read as flow sequences, block
+# sequences, or a bare scalar.
+wf_activation() {
+	awk '
+		function trim(s) { sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s); return s }
+		function unquote(s) {
+			s = trim(s)
+			if (s ~ /^".*"$/ || s ~ /^'"'"'.*'"'"'$/) s = substr(s, 2, length(s) - 2)
+			return s
+		}
+		function flow_list(s,   n, i, parts, out, p) {
+			sub(/^\[/, "", s); sub(/\]$/, "", s)
+			n = split(s, parts, /,/)
+			out = ""
+			for (i = 1; i <= n; i++) {
+				p = unquote(parts[i])
+				if (p == "") continue
+				out = (out == "" ? p : out "," p)
+			}
+			return out
+		}
+		function flush_filter() {
+			if (fkey != "") {
+				printf "%s\tFILTER\t%s\t%s=%s\n", fwf, ftrigger, fkey, fval
+				fkey = ""; fval = ""; ftrigger = ""
+			}
+		}
+		# One awk invocation reads every counted workflow, so per-file state has to
+		# be reset per file or the previous file bleeds into this one.
+		FNR == 1 {
+			flush_filter()
+			section = ""; on_child_indent = 0; trigger = ""; trigger_child_indent = 0
+			job = ""; job_indent = 0; job_attr_indent = 0; inblock = 0
+		}
+		{
+			line = $0
+			sub(/\r$/, "", line)
+			fwf = FILENAME
+
+			indent = match(line, /[^ ]/) - 1
+			if (line ~ /^[[:space:]]*$/) next
+			if (indent < 0) indent = 9999
+			if (inblock) {
+				if (indent > block_indent) next
+				inblock = 0
+			}
+			if (line ~ /^[[:space:]]*#/) next
+			if (line ~ /^[[:space:]]*(-[[:space:]]+)?[^:]+:[[:space:]]*[|>][-+]?[0-9]*[[:space:]]*$/) {
+				inblock = 1; block_indent = indent
+				# A folded value still HAS a key, and for a job attribute the key
+				# is what is pinned. Record the fold marker as the value so
+				# `if: >` is a named change rather than an absence.
+				key = trim(line); sub(/:.*$/, "", key); key = unquote(key)
+				val = line; sub(/^[^:]*:[[:space:]]*/, "", val); val = trim(val)
+				if (section == "jobs" && job != "" && job_attr_indent > 0 && indent == job_attr_indent &&
+				    (key == "if" || key == "continue-on-error" || key == "strategy"))
+					printf "%s\tJOBATTR\t%s\t%s=%s\n", fwf, job, key, val
+				next
+			}
+
+			if (indent == 0) {
+				flush_filter()
+				section = ""; on_child_indent = 0; trigger = ""; trigger_child_indent = 0
+				job = ""; job_indent = 0; job_attr_indent = 0
+				if (line !~ /^[^:]+:/) next
+				key = line; sub(/:.*$/, "", key); key = unquote(key)
+				val = line; sub(/^[^:]*:[[:space:]]*/, "", val); val = trim(val)
+				if (key == "on" || key == "true" || key == "True") {
+					section = "on"
+					if (val ~ /^\[/) {
+						n = split(flow_list(val), evs, /,/)
+						for (i = 1; i <= n; i++) printf "%s\tTRIGGER\t%s\n", fwf, evs[i]
+						section = ""
+					} else if (val != "") {
+						printf "%s\tTRIGGER\t%s\n", fwf, unquote(val)
+						section = ""
+					}
+				} else if (key == "jobs") {
+					section = "jobs"
+				}
+				next
+			}
+
+			if (section == "on") {
+				if (on_child_indent == 0) on_child_indent = indent
+				if (indent == on_child_indent) {
+					flush_filter()
+					trigger = line; sub(/:.*$/, "", trigger); trigger = unquote(trigger)
+					trigger_child_indent = 0
+					printf "%s\tTRIGGER\t%s\n", fwf, trigger
+					next
+				}
+				if (indent > on_child_indent && trigger != "") {
+					if (trigger_child_indent == 0) trigger_child_indent = indent
+					if (indent == trigger_child_indent && line ~ /^[[:space:]]*-[[:space:]]/) {
+						v = line; sub(/^[[:space:]]*-[[:space:]]*/, "", v)
+						fval = (fval == "" ? unquote(v) : fval "," unquote(v))
+						next
+					}
+					if (indent == trigger_child_indent) {
+						flush_filter()
+						fkey = line; sub(/:.*$/, "", fkey); fkey = unquote(fkey)
+						ftrigger = trigger
+						v = line; sub(/^[^:]*:[[:space:]]*/, "", v); v = trim(v)
+						if (v ~ /^\[/) { fval = flow_list(v); flush_filter() }
+						else if (v != "") { fval = unquote(v); flush_filter() }
+						else fval = ""
+						next
+					}
+					if (indent > trigger_child_indent && line ~ /^[[:space:]]*-[[:space:]]/) {
+						v = line; sub(/^[[:space:]]*-[[:space:]]*/, "", v)
+						fval = (fval == "" ? unquote(v) : fval "," unquote(v))
+						next
+					}
+				}
+				next
+			}
+
+			if (section == "jobs") {
+				if (job_indent == 0) job_indent = indent
+				if (indent == job_indent && line !~ /^[[:space:]]*-[[:space:]]/) {
+					job = line; sub(/:.*$/, "", job); job = unquote(job)
+					job_attr_indent = 0
+					printf "%s\tJOB\t%s\n", fwf, job
+					next
+				}
+				if (job != "" && indent > job_indent) {
+					if (job_attr_indent == 0) job_attr_indent = indent
+					if (indent == job_attr_indent && line !~ /^[[:space:]]*-[[:space:]]/) {
+						key = line; sub(/:.*$/, "", key); key = unquote(key)
+						val = line; sub(/^[^:]*:[[:space:]]*/, "", val); val = trim(val)
+						if (key == "if" || key == "continue-on-error")
+							printf "%s\tJOBATTR\t%s\t%s=%s\n", fwf, job, key, unquote(val)
+						else if (key == "strategy")
+							printf "%s\tJOBATTR\t%s\tstrategy=<present>\n", fwf, job
+					}
+				}
+				next
+			}
+		}
+		END { flush_filter() }
 	' "$@"
 }
 
@@ -1213,7 +1559,9 @@ anchors() {
 ci_raw="$(mktemp)"
 ci_anchor="$(mktemp)"
 ci_step_anchor="$(mktemp)"
-trap 'rm -f "$ci_raw" "$ci_anchor" "$ci_step_anchor"' EXIT
+wf_act="$(mktemp)"
+ci_step_job="$(mktemp)"
+trap 'rm -f "$ci_raw" "$ci_anchor" "$ci_step_anchor" "$wf_act" "$ci_step_job"' EXIT
 ci_commands "${workflows[@]}" >"$ci_raw"
 
 # Anchors, STEP-QUALIFIED: one `<step name>\t<anchor>` line each. The flat
@@ -1266,7 +1614,7 @@ fi
 # collision, and the check above already refuses an unnamed step that carries a
 # gate. Reporting the sentinel here would print a control character at the reader
 # instead of a diagnosis.
-step_name_dupes="$(ci_step_names "${workflows[@]}" | grep -vxF "$UNNAMED_STEP" | sort | uniq -d || true)"
+step_name_dupes="$(ci_step_names "${workflows[@]}" | cut -f3- | grep -vxF "$UNNAMED_STEP" | sort | uniq -d || true)"
 if [ -n "$step_name_dupes" ]; then
 	echo "check-ci-reach: ${workflows[*]} uses the same step name more than once:" >&2
 	while IFS= read -r d; do
@@ -1310,6 +1658,262 @@ if [ "$map_step_unknown_count" -gt 0 ]; then
 	echo "  * A step was deleted: the gate has left CI. That is the failure this guard" >&2
 	echo "    exists for — add the step back, or excuse the target in $CONF with a" >&2
 	echo "    reason and drop its mapping entry." >&2
+	exit 1
+fi
+
+# ----------------------------------------------- the activation pins, checked
+
+# Nothing above asks whether the workflow or the job RUNS (#verifyworkflowactually).
+# Asked here, before the reach verdict, because a gate in a job that never starts
+# is not reached no matter how well it is mapped — and because the step that runs
+# this guard is in that same job, so the reader has to be told about the job
+# before being told about the gates inside it.
+wf_activation "${workflows[@]}" >"$wf_act"
+if [ ! -s "$wf_act" ]; then
+	echo "check-ci-reach: read no activation record at all from ${workflows[*]} — a guard that cannot parse the workflow must not report on it" >&2
+	exit 1
+fi
+
+# Lines present in $1 and not in $2. LC_ALL=C on every side: `comm` compares under
+# the collation its inputs were sorted with, and a set difference computed across
+# two collations reports differences that are not there (#ci-matrix LC_ALL).
+set_minus() {
+	LC_ALL=C comm -23 \
+		<(printf '%s\n' "$1" | grep -v '^$' | LC_ALL=C sort -u) \
+		<(printf '%s\n' "$2" | grep -v '^$' | LC_ALL=C sort -u)
+}
+
+act_bad=0
+
+# --- triggers, set-equal per workflow
+
+act_triggers_seen="$(awk -F'\t' '$2 == "TRIGGER" { print $1 "|" $3 }' "$wf_act" | sort -u)"
+act_triggers_pin="$(printf '%s\n' "${EXPECTED_TRIGGERS[@]}")"
+
+for wf in "${workflows[@]}"; do
+	if ! awk -F'|' -v w="$wf" '$1 == w { f = 1 } END { exit f ? 0 : 1 }' <<<"$act_triggers_seen"; then
+		echo "check-ci-reach: read no 'on:' trigger from '$wf'." >&2
+		echo "  A workflow with no readable trigger either does not run, or was not" >&2
+		echo "  parsed — and both have to be errors here, because the difference between" >&2
+		echo "  them is the difference between a red build and a vacuous pass." >&2
+		exit 1
+	fi
+done
+
+trig_extra="$(set_minus "$act_triggers_seen" "$act_triggers_pin")"
+trig_gone="$(set_minus "$act_triggers_pin" "$act_triggers_seen")"
+if [ -n "$trig_extra" ] || [ -n "$trig_gone" ]; then
+	act_bad=1
+	echo >&2
+	echo "check-ci-reach: the 'on:' triggers are not the pinned set (EXPECTED_TRIGGERS):" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  + $t — present in the workflow, not pinned" >&2
+	done <<<"$trig_extra"
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t — pinned, and the workflow no longer has it" >&2
+	done <<<"$trig_gone"
+	echo "WHICH EVENTS START THE WORKFLOW is the outermost thing a gate depends on: a" >&2
+	echo "step can be pinned, unique, unconditional and still never run. Update" >&2
+	echo "EXPECTED_TRIGGERS in the same commit as a deliberate change." >&2
+fi
+
+# --- trigger filters, set-equal per workflow per trigger
+
+act_filters_seen="$(awk -F'\t' '$2 == "FILTER" { print $1 "|" $3 "|" $4 }' "$wf_act" | sort -u)"
+act_filters_pin="$(printf '%s\n' "${EXPECTED_TRIGGER_FILTERS[@]:+${EXPECTED_TRIGGER_FILTERS[@]}}")"
+filt_extra="$(set_minus "$act_filters_seen" "$act_filters_pin")"
+filt_gone="$(set_minus "$act_filters_pin" "$act_filters_seen")"
+if [ -n "$filt_extra" ] || [ -n "$filt_gone" ]; then
+	act_bad=1
+	echo >&2
+	echo "check-ci-reach: the trigger filters are not the pinned set (EXPECTED_TRIGGER_FILTERS):" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  + $t — present in the workflow, not pinned" >&2
+	done <<<"$filt_extra"
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t — pinned, and the workflow no longer has it" >&2
+	done <<<"$filt_gone"
+	echo "A filter decides WHICH pushes and pull requests start the workflow, so a" >&2
+	echo "narrowed 'branches:' or an INTRODUCED 'paths:' retires every gate in it for" >&2
+	echo "every commit the filter excludes. A 'paths:' that excludes the Makefile means" >&2
+	echo "the commit that retires a gate is exactly the commit CI does not run on." >&2
+fi
+
+# --- the floor the pin cannot be edited below
+
+for wf in "${workflows[@]}"; do
+	for req in "${REQUIRED_TRIGGERS[@]}"; do
+		if ! grep -qxF "$wf|$req" <<<"$act_triggers_seen"; then
+			act_bad=1
+			echo >&2
+			echo "check-ci-reach: '$wf' does not trigger on '$req'." >&2
+			echo "  Listing a workflow in $CONF is a claim that it runs on every push and" >&2
+			echo "  every pull request, and that claim is what every reach verdict here" >&2
+			echo "  rests on. A workflow reduced to 'workflow_dispatch:' reaches no gate on" >&2
+			echo "  any commit — including the commit that reduced it, so the run that" >&2
+			echo "  would have objected is the run the same edit removed." >&2
+			echo "  This is a REQUIREMENT, not a pin: editing EXPECTED_TRIGGERS to match" >&2
+			echo "  does not clear it. A workflow that really should not run on every" >&2
+			echo "  push/PR must not be the workflow this guard counts." >&2
+			continue
+		fi
+		while IFS= read -r frec; do
+			[ -n "$frec" ] || continue
+			fkv="${frec#"$wf|$req|"}"
+			fk="${fkv%%=*}"
+			fv="${fkv#*=}"
+			case "$fk" in
+			paths | paths-ignore | branches-ignore)
+				act_bad=1
+				echo >&2
+				echo "check-ci-reach: '$wf' filters its '$req' trigger with '$fk: $fv'." >&2
+				echo "  That makes reach conditional on WHICH FILES a commit touches, and the" >&2
+				echo "  commits it excludes are commits with no CI run at all. A gate-retiring" >&2
+				echo "  edit to the Makefile is the exact commit such a filter is most likely" >&2
+				echo "  to drop." >&2
+				;;
+			branches)
+				if ! grep -qxF "$EXPECTED_DEFAULT_BRANCH" <<<"${fv//,/$'\n'}"; then
+					act_bad=1
+					echo >&2
+					echo "check-ci-reach: '$wf' restricts its '$req' trigger to branches '$fv', which does not include '$EXPECTED_DEFAULT_BRANCH'." >&2
+					echo "  The default branch is where these gates have to hold. Narrowing the" >&2
+					echo "  trigger away from it retires every gate in this workflow without" >&2
+					echo "  touching a step, a recipe or a pin." >&2
+				fi
+				;;
+			esac
+		done < <(grep -F "$wf|$req|" <<<"$act_filters_seen" || true)
+	done
+done
+
+# --- which job each pinned gate step is in, set-equal
+
+# Derived from EXPECTED_GATE_STEPS — pinned names — rather than from "whatever
+# jobs this workflow has", so the population being compared is not one the audited
+# file gets to choose. Step names are already proven unique, and already proven to
+# name anchor-bearing steps, by the two rungs above; each pinned name therefore
+# resolves to exactly one job.
+ci_step_names "${workflows[@]}" >"$ci_step_job"
+gate_jobs_seen=""
+for i in "${!map_steps[@]}"; do
+	sj="$(awk -F'\t' -v s="${map_steps[$i]}" '$3 == s { print $1 "|" $2 }' "$ci_step_job" | sort -u)"
+	if [ -z "$sj" ]; then
+		echo "check-ci-reach: cannot tell which JOB runs the step pinned for '${map_targets[$i]}' ('${map_steps[$i]}')." >&2
+		echo "  The step was found when its NAME was checked and not when its JOB was," >&2
+		echo "  so these two readings of the same workflow disagree. Refusing to report:" >&2
+		echo "  an unlocated gate step would be checked against nothing." >&2
+		exit 1
+	fi
+	gate_jobs_seen="$gate_jobs_seen$sj"$'\n'
+done
+gate_jobs_pin="$(printf '%s\n' "${EXPECTED_GATE_JOBS[@]}")"
+gj_extra="$(set_minus "$gate_jobs_seen" "$gate_jobs_pin")"
+gj_gone="$(set_minus "$gate_jobs_pin" "$gate_jobs_seen")"
+if [ -n "$gj_extra" ] || [ -n "$gj_gone" ]; then
+	echo >&2
+	echo "check-ci-reach: the pinned gate steps do not live in the pinned set of jobs (EXPECTED_GATE_JOBS):" >&2
+	while IFS= read -r j; do
+		[ -n "$j" ] || continue
+		echo "  + $j — runs a pinned gate step, and is not pinned as a gate job" >&2
+		while IFS= read -r s; do
+			[ -n "$s" ] || continue
+			echo "      step: $s" >&2
+		done < <(awk -F'\t' -v w="${j%%|*}" -v i="${j#*|}" '$1 == w && $2 == i { print $3 }' "$ci_step_job")
+	done <<<"$gj_extra"
+	while IFS= read -r j; do
+		[ -n "$j" ] || continue
+		echo "  - $j — pinned as a gate job, and no pinned gate step is in it any more" >&2
+	done <<<"$gj_gone"
+	echo >&2
+	echo "A job is the unit that RUNS: it carries its own 'if:' and its own" >&2
+	echo "'continue-on-error:', neither of which any step-level check can see. Moving a" >&2
+	echo "gate step to another job moves it under another activation, and the pin below" >&2
+	echo "only covers the jobs named here." >&2
+	echo "  * Deliberate: add the job to EXPECTED_GATE_JOBS and its 'if'," >&2
+	echo "    'continue-on-error' and 'strategy' values to" >&2
+	echo "    EXPECTED_GATE_JOB_ACTIVATION, in the same commit." >&2
+	echo "  * Not deliberate: move the step back." >&2
+	exit 1
+fi
+
+# --- the activation of each pinned gate job, by exact value
+#
+# Read from the PIN, and sound only because the rung above just proved the pinned
+# set and the observed set are the same set. Reading it from the workflow's own
+# job list would let the file choose which jobs get audited.
+act_job_seen=""
+for gj in "${EXPECTED_GATE_JOBS[@]}"; do
+	gj_wf="${gj%%|*}"
+	gj_id="${gj#*|}"
+	if ! awk -F'\t' -v w="$gj_wf" -v j="$gj_id" '$1 == w && $2 == "JOB" && $3 == j { f = 1 } END { exit f ? 0 : 1 }' "$wf_act"; then
+		echo "check-ci-reach: '$gj_id' holds a pinned gate step in '$gj_wf', and no 'jobs:' entry of that name was read from it." >&2
+		echo "  The step reader and the job reader disagree, so every activation value" >&2
+		echo "  below would be read from nothing and every one would report '<absent>' —" >&2
+		echo "  a vacuous pass in the exact shape of a healthy one. Refusing to report." >&2
+		exit 1
+	fi
+	for k in if continue-on-error strategy; do
+		v="$(awk -F'\t' -v w="$gj_wf" -v j="$gj_id" -v k="$k" '
+			$1 == w && $2 == "JOBATTR" && $3 == j {
+				kv = $4
+				sub(/=.*$/, "", kv)
+				if (kv == k) { val = $4; sub(/^[^=]*=/, "", val); print val }
+			}' "$wf_act" | head -1)"
+		[ -n "$v" ] || v="<absent>"
+		act_job_seen="$act_job_seen$gj_wf|$gj_id|$k=$v"$'\n'
+		if [ "$k" = "if" ] && [ "$v" = "$JOB_IF_REFUSED" ]; then
+			act_bad=1
+			echo >&2
+			echo "check-ci-reach: gate job '$gj_id' in '$gj_wf' has 'if: $v'." >&2
+			echo "  The job never runs, so every gate mapped into it is unreached while each" >&2
+			echo "  one still reports 'reached' above. The literal is REFUSED rather than" >&2
+			echo "  pinned: editing EXPECTED_GATE_JOB_ACTIVATION to match does not clear it," >&2
+			echo "  because a gate job that never runs is not a gate." >&2
+		fi
+		if [ "$k" = "continue-on-error" ] && [ "$v" = "$JOB_CONTINUE_ON_ERROR_REFUSED" ]; then
+			act_bad=1
+			echo >&2
+			echo "check-ci-reach: gate job '$gj_id' in '$gj_wf' has 'continue-on-error: $v'." >&2
+			echo "  Every gate in the job can fail with the workflow still green, which is the" >&2
+			echo "  same outcome as not running them. Refused rather than pinned, for the same" >&2
+			echo "  reason as 'if: false'. An advisory LEG of a matrix is legitimate and is an" >&2
+			echo "  expression, not the literal '$v'; that case is pinned by value instead." >&2
+		fi
+	done
+done
+act_job_pin="$(printf '%s\n' "${EXPECTED_GATE_JOB_ACTIVATION[@]}")"
+aj_extra="$(set_minus "$act_job_seen" "$act_job_pin")"
+aj_gone="$(set_minus "$act_job_pin" "$act_job_seen")"
+if [ -n "$aj_extra" ] || [ -n "$aj_gone" ]; then
+	act_bad=1
+	echo >&2
+	echo "check-ci-reach: a pinned gate job's activation is not its pinned value (EXPECTED_GATE_JOB_ACTIVATION):" >&2
+	while IFS= read -r a; do
+		[ -n "$a" ] || continue
+		echo "  + $a — the value the workflow has now" >&2
+	done <<<"$aj_extra"
+	while IFS= read -r a; do
+		[ -n "$a" ] || continue
+		echo "  - $a — the pinned value" >&2
+	done <<<"$aj_gone"
+	echo >&2
+	echo "Values are pinned in BOTH directions, '<absent>' included, so absent becoming" >&2
+	echo "present, present becoming absent and a changed expression are each named." >&2
+	echo "  * A never-true 'if:' EXPRESSION cannot be decided by reading it, so this is" >&2
+	echo "    the only rung that sees one. Do not update the pin to clear it without" >&2
+	echo "    knowing the expression is true on every push and every pull request." >&2
+	echo "  * A 'strategy:' appearing means the job is now a MATRIX. Say which legs are" >&2
+	echo "    blocking, and pin the advisory ones through 'continue-on-error' above: a" >&2
+	echo "    matrix whose only blocking leg is dropped is this same defect one level" >&2
+	echo "    further down, and nothing here can see it." >&2
+fi
+
+if [ "$act_bad" -eq 1 ]; then
 	exit 1
 fi
 
@@ -1406,7 +2010,7 @@ excused_ok=0
 mapped=0
 step_scope_file="$(mktemp)"
 one_step_file="$(mktemp)"
-trap 'rm -f "$ci_raw" "$ci_anchor" "$ci_step_anchor" "$step_scope_file" "$one_step_file"' EXIT
+trap 'rm -f "$ci_raw" "$ci_anchor" "$ci_step_anchor" "$wf_act" "$ci_step_job" "$step_scope_file" "$one_step_file"' EXIT
 # Which targets the mapping is required to cover, filled in as the loop
 # classifies each one. Compared against EXPECTED_GATE_STEPS after the loop.
 need_map=""
@@ -1750,6 +2354,7 @@ fi
 if [ "$status" -eq 0 ]; then
 	echo "check-ci-reach: closure pinned — ${#EXPECTED_CLOSURE_TARGETS[@]} target(s) under root '$EXPECTED_ROOT_TARGET', set-equal, all run by '$MAKE_BIN -n $EXPECTED_ROOT_TARGET'; ${#EXPECTED_NOGATE_TARGETS[@]} pinned exempt"
 	echo "check-ci-reach: step-mapped — $mapped gate(s) matched INSIDE the CI step pinned for each, ${#EXPECTED_GATE_STEPS[@]} mapping entr(ies), set-equal; $mki_ok reached by make invocation, ${#EXPECTED_MAKE_INVOKED_TARGETS[@]} pinned as such, set-equal"
+	echo "check-ci-reach: activated — ${#EXPECTED_TRIGGERS[@]} trigger(s) and ${#EXPECTED_TRIGGER_FILTERS[@]} filter(s) pinned across $workflow_count workflow(s), set-equal, ${REQUIRED_TRIGGERS[*]} required; ${#EXPECTED_GATE_JOBS[@]} gate job(s), ${#EXPECTED_GATE_JOB_ACTIVATION[@]} activation value(s) pinned, set-equal"
 	echo "check-ci-reach: OK — $reached target(s) reached by CI, $excused_ok excused, $nogate_count carrying no gate"
 fi
 exit "$status"
