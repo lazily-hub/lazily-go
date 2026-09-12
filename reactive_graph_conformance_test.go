@@ -205,6 +205,13 @@ type graphModel interface {
 	// This changes *when* assertions are evaluated, never *what* they assert:
 	// an effect that never runs still fails.
 	settle()
+	// settleFault reports a quiescence contract the last settle could not meet:
+	// its deadline expired with work still in flight. Empty when settle really
+	// reached quiescence. A settle that gives up SILENTLY is indistinguishable
+	// from a settled graph, and every assertion after it is then evaluated
+	// mid-cascade — which is how #lzgoasyncflake stayed a flake instead of a
+	// failure.
+	settleFault() string
 	runLog() []string
 	cleanupLog() []string
 	close()
@@ -331,6 +338,7 @@ func newSyncModel() graphModel { return &syncModel{ctx: NewContext()} }
 func (m *syncModel) name() string         { return "Context" }
 func (m *syncModel) close()               {}
 func (m *syncModel) settle()              {}
+func (m *syncModel) settleFault() string  { return "" }
 func (m *syncModel) runLog() []string     { return m.log.snapshotRuns() }
 func (m *syncModel) cleanupLog() []string { return m.log.snapshotCleanups() }
 func (m *syncModel) scope() scopeModel    { return &syncScope{m: m, s: m.ctx.Scope()} }
@@ -553,6 +561,8 @@ type asyncModel struct {
 	log      effectLog
 	computes computeLog
 	armed    armedFailures
+	// fault carries what the last settle could not establish. See settleFault.
+	fault string
 }
 
 func newAsyncModel() graphModel { return &asyncModel{ctx: NewAsyncContext()} }
@@ -567,26 +577,171 @@ func (m *asyncModel) scope() scopeModel    { return &asyncScope{m: m, s: m.ctx.S
 // engine issues is synchronous from the caller's point of view except effect
 // bodies and slot computes, which are spawned; without this the corpus would be
 // asserting against a graph still mid-cascade.
+//
+// Quiescence is the LIBRARY'S OWN test (#lzgoasyncflake): `runningEffects` and
+// `pendingReruns`, the pair AsyncContext maintains for exactly this question and
+// that resetDrainIfQuiescent already uses. This used to scan `c.effects` for a
+// handle with `running` set, and that map is the REGISTERED set:
+// DisposeAsync deletes the handle from it while the body goroutine is still in
+// flight — it cancels the goctx, but `runningEffects` is only decremented later,
+// when the body's completion posts back through onEffectDone. A
+// disposed-but-still-running effect is therefore INVISIBLE to the scan and
+// counted by the counter, so the scan reported quiescence over a live cascade.
+//
+// churn_returns_to_baseline is 500 `dispose_then_create` cycles at live_width 8,
+// which is ~4000 dispose-while-running events, so its settle returned with an
+// arbitrary number of bodies still to run. Their log entries then landed AFTER
+// the next step's `runsBefore` watermark, and that step's `observed_count` read
+// them as its own work: 127 runs where 8 were expected — deterministic at
+// GOMAXPROCS=1, where the settle loop starves the body goroutines, and
+// intermittent above it. The library was right and so was the fixture; this
+// predicate was the defect.
+//
+// `pendingReruns` is the other half of the counter pair and is checked for the
+// same reason: an effect invalidated while running is scheduled to run again,
+// and a graph with a rerun owed is not quiescent.
 func (m *asyncModel) settle() {
+	m.fault = ""
 	deadline := time.Now().Add(30 * time.Second)
 	for {
-		idle := true
-		m.ctx.do(func() {
-			if len(m.ctx.computing) != 0 {
-				idle = false
-				return
-			}
-			for e := range m.ctx.effects {
-				if e.running {
-					idle = false
-					return
-				}
-			}
+		var running, pending, computing int
+		// The return value is READ, not discarded. `do` declines once the loop
+		// has stopped, and the previous spelling initialized its verdict to
+		// "idle" — so a sample that never ran reported quiescence it had not
+		// observed, the same vacuous green every other guard in this repo
+		// refuses.
+		sampled := m.ctx.do(func() {
+			running = m.ctx.runningEffects
+			pending = m.ctx.pendingReruns
+			computing = len(m.ctx.computing)
 		})
-		if idle || time.Now().After(deadline) {
+		if !sampled {
+			// The loop has stopped, so nothing further can run and the graph is
+			// quiescent for good. This is a real settle, not an unobserved one.
+			return
+		}
+		if running == 0 && pending == 0 && computing == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			// Loud, not silent. Every assertion after this point would be
+			// evaluated against a graph still mid-cascade.
+			m.fault = fmt.Sprintf(
+				"settle gave up after 30s with the async plane still busy: %d effect body(ies) running, "+
+					"%d rerun(s) owed, %d compute(s) in flight. Assertions after a settle that did not settle "+
+					"are evaluated mid-cascade (#lzgoasyncflake)", running, pending, computing)
 			return
 		}
 		time.Sleep(50 * time.Microsecond)
+	}
+}
+
+func (m *asyncModel) settleFault() string { return m.fault }
+
+// TestAsyncSettleWaitsForDisposedRunningEffects is the regression test for
+// #lzgoasyncflake, and it is written against the exact state the old predicate
+// could not see: an effect DISPOSED while its body is still in flight.
+//
+// DisposeAsync removes the handle from `ctx.effects` and cancels its goctx, but
+// the body goroutine runs to its own completion and `runningEffects` is only
+// decremented when that completion posts back. So the registered-set scan the
+// old settle used reports "nothing running" over a live body — asserted as a
+// precondition below, so this test documents the hole rather than assuming it —
+// while the counter pair reports the truth.
+//
+// Without the fix settle returns immediately here and the first select arm
+// fires. With it, settle waits for the body, which is what every assertion after
+// a settle depends on.
+func TestAsyncSettleWaitsForDisposedRunningEffects(t *testing.T) {
+	m := newAsyncModel().(*asyncModel)
+	defer m.close()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	handle := m.ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
+		once.Do(func() { close(started) })
+		<-release
+		m.log.run("blocked")
+		return nil
+	})
+	<-started
+
+	handle.DisposeAsync()
+
+	var scanRunning, counterRunning, pending, computing int
+	if !m.ctx.do(func() {
+		counterRunning = m.ctx.runningEffects
+		pending = m.ctx.pendingReruns
+		computing = len(m.ctx.computing)
+		for h := range m.ctx.effects {
+			if h.running {
+				scanRunning++
+			}
+		}
+	}) {
+		t.Fatal("the context loop declined the sample")
+	}
+	if counterRunning != 1 || scanRunning != 0 {
+		t.Fatalf("precondition: a disposed-but-running effect must be counted by runningEffects and INVISIBLE "+
+			"to a scan of ctx.effects; got runningEffects=%d scan=%d (pendingReruns=%d computing=%d)",
+			counterRunning, scanRunning, pending, computing)
+	}
+
+	settled := make(chan struct{})
+	go func() {
+		m.settle()
+		close(settled)
+	}()
+
+	select {
+	case <-settled:
+		t.Fatal("settle reported quiescence while a disposed effect's body was still running. Every assertion " +
+			"after this point is evaluated mid-cascade, and the runs that land late are counted in the NEXT " +
+			"step's window — which is how churn_returns_to_baseline read 127 effect runs where 8 were " +
+			"expected (#lzgoasyncflake)")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	close(release)
+	select {
+	case <-settled:
+	case <-time.After(30 * time.Second):
+		t.Fatal("settle never returned after the body finished")
+	}
+
+	if fault := m.settleFault(); fault != "" {
+		t.Fatalf("settle reported a fault on a graph that did reach quiescence: %s", fault)
+	}
+	if got := m.runLog(); len(got) != 1 || got[0] != "blocked" {
+		t.Fatalf("run log = %v, want exactly one \"blocked\" entry — the body must have completed BEFORE "+
+			"settle returned", got)
+	}
+}
+
+// TestSummarizeRunsNamesTheWindow pins the divergence diagnostic
+// (#lzgoasyncflake). A bare "got 127, want 8" cannot tell work that leaked in
+// from the previous step from a coalescing difference in this one, so the
+// message has to name what ran and how often.
+func TestSummarizeRunsNamesTheWindow(t *testing.T) {
+	got := summarizeRuns([]string{"live#1", "live#0", "live#1", "topic"})
+	for _, want := range []string{"[4 run(s), 3 distinct]", "live#0", "live#1 x2", "topic"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("summary %q does not mention %q", got, want)
+		}
+	}
+	if summarizeRuns(nil) != "[0 run(s), 0 distinct] " {
+		t.Errorf("empty window: %q", summarizeRuns(nil))
+	}
+	// A wide window stays one line: distinct names are capped and the rest are
+	// counted, so a 127-run divergence is still readable.
+	wide := make([]string, 0, 40)
+	for i := 0; i < 40; i++ {
+		wide = append(wide, fmt.Sprintf("n%02d", i))
+	}
+	sum := summarizeRuns(wide)
+	if !strings.Contains(sum, "[40 run(s), 40 distinct]") || !strings.Contains(sum, "... 28 more distinct name(s)") {
+		t.Errorf("wide window not capped: %s", sum)
 	}
 }
 
@@ -996,6 +1151,34 @@ func (e *replayEngine) check(key string, got, want any) {
 	e.rep.divergences = append(e.rep.divergences, entry)
 }
 
+// summarizeRuns renders an effect-run window for a divergence message: the
+// first few entries verbatim, then a tally per distinct name, so a window of 127
+// stays one line and still says WHICH effects ran.
+func summarizeRuns(runs []string) string {
+	counts := map[string]int{}
+	order := make([]string, 0, len(runs))
+	for _, r := range runs {
+		if counts[r] == 0 {
+			order = append(order, r)
+		}
+		counts[r]++
+	}
+	sort.Strings(order)
+	parts := make([]string, 0, len(order)+1)
+	for i, name := range order {
+		if i == 12 {
+			parts = append(parts, fmt.Sprintf("... %d more distinct name(s)", len(order)-i))
+			break
+		}
+		if counts[name] == 1 {
+			parts = append(parts, name)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s x%d", name, counts[name]))
+	}
+	return fmt.Sprintf("[%d run(s), %d distinct] %s", len(runs), len(order), strings.Join(parts, ", "))
+}
+
 func (e *replayEngine) scope(name string) scopeModel {
 	sc, ok := e.scopes[name]
 	if !ok {
@@ -1296,6 +1479,9 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 		opValue, opError := e.runOp(step.Op)
 		e.rep.ops++
 		e.m.settle()
+		if f := e.m.settleFault(); f != "" {
+			e.t.Fatalf("%s#%d: %s", e.fixture, e.step, f)
+		}
 		e.checkReadEach()
 
 		observed := e.m.runLog()[runsBefore:]
@@ -1378,6 +1564,16 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 			case "observed_count":
 				var want int
 				e.unmarshal(key, raw, &want)
+				// A bare count cannot tell a coalescing difference from work
+				// that leaked in from the previous step, and this assertion has
+				// already cost one undiagnosable flake (#lzgoasyncflake). So on
+				// a divergence the RUNS THEMSELVES are named: 127-against-8 read
+				// as inscrutable, while the same failure listing 119 `live#`
+				// entries from the preceding churn names its own mechanism.
+				if len(observed) != want {
+					e.t.Logf("  observed_count context: %d run(s) in this step's window, want %d; runs=%s",
+						len(observed), want, summarizeRuns(observed))
+				}
 				e.check("observed_count", len(observed), want)
 			case "cleanup_order":
 				var want []string
@@ -1522,6 +1718,9 @@ func (e *replayEngine) evaluateTail(fx *reactiveGraphFixture) {
 		before := len(e.m.runLog())
 		e.m.setCell(n, *pub.Op.Value)
 		e.m.settle()
+		if f := e.m.settleFault(); f != "" {
+			e.t.Fatalf("%s: %s", e.fixture, f)
+		}
 		e.rep.obs.AfterPublishRuns = normalizeList(e.m.runLog()[before:])
 		e.check("after_publish.observed_by", e.rep.obs.AfterPublishRuns, normalizeList(pub.ObservedBy))
 		for _, id := range sortedIntKeys(pub.Read) {
