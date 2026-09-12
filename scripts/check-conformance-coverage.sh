@@ -15,6 +15,13 @@
 # A missing manifest is missing EVIDENCE and fails. It does not mean "no fixtures
 # were read"; it means the suite ran without the recorder attached, and passing in
 # that state is the vacuous green this guard exists to prevent.
+#
+# A manifest that exists is not automatically evidence about THIS run either: the
+# file is written by a separate process, `go test` serves a cached package without
+# running its binary, and a file nobody rewrote still parses perfectly. So every
+# evidence file read here must carry this invocation's LAZILY_CONFORMANCE_RUN_ID
+# stamp, and this guard refuses rather than skips when it cannot check that
+# (#lzstalemanifest, and see the block above the check itself).
 set -euo pipefail
 
 SPEC_DIR="${LAZILY_SPEC_CONFORMANCE_DIR:-../lazily-spec/conformance}"
@@ -102,6 +109,110 @@ excuse_scenario() {
 
 SCENARIOS="${LAZILY_CONFORMANCE_SCENARIOS:-build/conformance-scenarios-replayed.txt}"
 MANIFEST="${LAZILY_CONFORMANCE_MANIFEST:-build/conformance-fixtures-loaded.txt}"
+
+# ---------------------------------------------------------------------------
+# Evidence freshness (#lzstalemanifest)
+# ---------------------------------------------------------------------------
+#
+# Every rung below reasons from two files this script did not write. Until now it
+# had no freshness check of any kind — no run identifier, no mtime ordering
+# against the test step — so "these bytes were really read" meant "some run really
+# read them", and the run it described could be any run that ever wrote the file.
+#
+# `go test` makes that reachable. A package whose inputs have not changed is
+# served from the test cache, the binary never executes, neither recorder flushes,
+# and the previous file survives untouched. Measured here: a second `go test .`
+# prints `ok ... (cached)` and appends ZERO lines, with both evidence env vars set
+# and even when their VALUES differ from the cached run's — the cache does not key
+# on them.
+#
+# `make test` truncating both files first is what has kept `make check` honest:
+# a cached run leaves them empty and the reads below fail as missing evidence.
+# That is a fail-closed accident of recipe ORDER inside one make invocation, not a
+# property of this guard, and it covers none of the ways this script actually gets
+# run — by hand after an earlier suite, as an individual CI step, or under
+# `make -j` alongside the test step that is still appending.
+#
+# So the writers stamp `# lazily-run-id <value>` and this reader requires it to be
+# the CURRENT invocation's. `-count=1` in the Makefile and in CI is not a
+# substitute: it prevents stale evidence from being PRODUCED, which keeps the
+# ordinary case from going falsely red, while this requires stale evidence to be
+# REFUSED. One is a flag one edit away from being dropped with nothing downstream
+# noticing; the other is the noticing.
+RUN_ID_PREFIX='# lazily-run-id '
+RUN_ID="${LAZILY_CONFORMANCE_RUN_ID:-}"
+
+# Absent, the guard REFUSES. Skipping instead would accept unstamped evidence
+# whenever the variable happens to be unset, which is the original hole with an
+# extra step in front of it. There is deliberately no opt-out: `make check` and
+# CI both supply an id (the Makefile generates one per invocation and exports it;
+# the workflow derives one from the run and attempt), and a hand-run audit of an
+# earlier suite's files is exactly the thing being refused.
+if [ -z "$RUN_ID" ]; then
+  echo "FAIL: LAZILY_CONFORMANCE_RUN_ID is unset, so this guard cannot tell whether" >&2
+  echo "      $MANIFEST and $SCENARIOS describe THIS run or an" >&2
+  echo "      earlier one (#lzstalemanifest). Run the suite and this guard from one" >&2
+  echo "      \`make check\` — the Makefile generates one id per invocation and" >&2
+  echo "      exports it to both — or set the variable and re-run the suite under it." >&2
+  echo "      Accepting unstamped evidence here would be the stale-manifest hole with" >&2
+  echo "      one more step in front of it." >&2
+  exit 1
+fi
+case "$RUN_ID" in
+*[[:space:]]*)
+  echo "FAIL: LAZILY_CONFORMANCE_RUN_ID='$RUN_ID' contains whitespace. The stamp is one" >&2
+  echo "      line with a fixed prefix, so whitespace either splits it into a data line" >&2
+  echo "      this guard would try to resolve against the corpus, or makes the written" >&2
+  echo "      and compared ids differ invisibly (#lzstalemanifest)." >&2
+  exit 1
+  ;;
+esac
+
+# The stamps an evidence file carries. One per contributing test binary: appending
+# is how several binaries share one file, and none of them knows whether it is
+# first, so the rule is that EVERY stamp must be the current id rather than the
+# first one.
+evidence_stamps() {
+  awk -v n="${#RUN_ID_PREFIX}" 'index($0, "'"$RUN_ID_PREFIX"'") == 1 { print substr($0, n + 1) }' "$1"
+}
+
+# The data lines: everything that is not a comment. Written as a filter so the two
+# readers below cannot drift into stripping different things.
+evidence_data() {
+  grep -v '^#' -- "$1" || true
+}
+
+require_fresh_evidence() {
+  local file="$1" label="$2" stamps stale
+  stamps="$(evidence_stamps "$file")"
+  if [ -z "$stamps" ]; then
+    echo "FAIL: $label at $file carries no '${RUN_ID_PREFIX}' line." >&2
+    echo "      Unstamped evidence is evidence about an unknown run: an older file" >&2
+    echo "      predating #lzstalemanifest has no stamp, and so does one written by a" >&2
+    echo "      suite that was never told which run it was recording. Re-run the suite" >&2
+    echo "      with LAZILY_CONFORMANCE_RUN_ID='$RUN_ID' set." >&2
+    return 1
+  fi
+  stale="$(printf '%s\n' "$stamps" | grep -vxF "$RUN_ID" || true)"
+  if [ -n "$stale" ]; then
+    echo "FAIL: $label at $file was written by a DIFFERENT run." >&2
+    echo "      found:  $(printf '%s' "$stale" | tr '\n' ' ')" >&2
+    echo "      wanted: $RUN_ID" >&2
+    echo "      The test step did not write this file during this invocation — a cached" >&2
+    echo "      \`go test\` (which does not run the binary, so no recorder flushes), a" >&2
+    echo "      guard run by hand after an earlier suite, or a build/ directory left" >&2
+    echo "      over from a previous checkout. The numbers below would describe that" >&2
+    echo "      other run (#lzstalemanifest)." >&2
+    return 1
+  fi
+  if [ -z "$(evidence_data "$file")" ]; then
+    echo "FAIL: $label at $file carries this run's stamp and NO data lines." >&2
+    echo "      The recorder attached and recorded nothing. Reporting coverage from an" >&2
+    echo "      empty evidence file is the vacuous green this guard exists to prevent." >&2
+    return 1
+  fi
+  return 0
+}
 TEST_DIRS=(".")
 EXTS=(".go")
 
@@ -121,7 +232,8 @@ if [ ! -s "$MANIFEST" ]; then
   echo "      absence." >&2
   exit 1
 fi
-OPENED="$(sort -u "$MANIFEST")"
+require_fresh_evidence "$MANIFEST" "the conformance manifest" || exit 1
+OPENED="$(evidence_data "$MANIFEST" | sort -u)"
 
 missing=0
 total=0
@@ -210,7 +322,8 @@ if [ ! -s "$SCENARIOS" ]; then
   echo "      every scenario ran." >&2
   exit 1
 fi
-REPLAYED="$(sort -u "$SCENARIOS")"
+require_fresh_evidence "$SCENARIOS" "the scenario ledger" || exit 1
+REPLAYED="$(evidence_data "$SCENARIOS" | sort -u)"
 
 # scenario_ids prints a fixture's scenario ids in the ONE resolution order every
 # binding uses: `id`, else `name`. There is no third step (#lzspecscenarioids) --
@@ -427,8 +540,8 @@ fi
 
 echo "conformance coverage OK: $covered/$total canonical fixtures OPENED by the suite" \
      "($uniq_known listed as known-uncovered; $expected_opened DERIVED from the corpus" \
-     "listing minus that ledger and asserted EQUAL; runtime manifest — these bytes were" \
-     "really read)"
+     "listing minus that ledger and asserted EQUAL; runtime manifest stamped $RUN_ID —" \
+     "these bytes were really read, by THIS run)"
 
 # The same treatment for rung 4. Its loop walks the scenarios of OPENED fixtures,
 # so zero opened fixtures means zero scenarios, which means zero unreplayed
@@ -528,4 +641,5 @@ fi
 
 echo "scenario coverage OK: $SCENARIO_REPLAYED/$SCENARIO_TOTAL scenarios of those fixtures REPLAYED" \
      "($derived_excused excused; $expected_replayed DERIVED from the corpus listing minus" \
-     "KNOWN_UNCOVERED and asserted EQUAL; runtime ledger — recorded at the point of replay)"
+     "KNOWN_UNCOVERED and asserted EQUAL; runtime ledger stamped $RUN_ID — recorded at the" \
+     "point of replay, during THIS run)"

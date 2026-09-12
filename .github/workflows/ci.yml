@@ -12,6 +12,21 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # One conformance-run id per job invocation (#lzstalemanifest). CI runs the
+    # steps individually rather than through `make check`, so it has to supply
+    # what the Makefile's `export LAZILY_CONFORMANCE_RUN_ID` supplies locally: one
+    # id shared by the step that WRITES the evidence and the step that READS it.
+    #
+    # It matters more here than locally. `setup-go` with `cache: true` restores
+    # GOCACHE, and Go's test-result cache lives there — so a re-run of an
+    # unchanged commit can be served from a cache populated by an earlier run,
+    # with the test binary never executing and neither recorder flushing.
+    # `-count=1` on the test step is what stops that; this is what makes it
+    # impossible for the guard to report coverage from a file that step did not
+    # write. `run_attempt` is in the id so a re-run of the same commit gets a new
+    # one rather than inheriting the previous attempt's.
+    env:
+      LAZILY_CONFORMANCE_RUN_ID: go-ci-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

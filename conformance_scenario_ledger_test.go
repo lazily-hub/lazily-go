@@ -146,6 +146,11 @@ func conformanceFixtureID(name string) string {
 // Append, not truncate, for the same reason the manifest appends: `go test ./...`
 // runs one binary per package and each must contribute. A no-op when the
 // variable is unset, so a plain `go test` is unaffected.
+//
+// Stamped with this invocation's run id, for the same reason and by the same rule
+// as the manifest (#lzstalemanifest). Both files have to carry it: the guard joins
+// them against each other, so trusting one and not the other would let a fresh
+// manifest vouch for a stale ledger.
 func flushConformanceScenarios() {
 	out := os.Getenv("LAZILY_CONFORMANCE_SCENARIOS")
 	if out == "" {
@@ -170,7 +175,7 @@ func flushConformanceScenarios() {
 		return
 	}
 	defer f.Close()
-	_, _ = f.WriteString(strings.Join(lines, "\n") + "\n")
+	_, _ = f.WriteString(evidenceAppendPayload(lines))
 }
 
 // TestScenarioKeyResolutionOrder pins the resolution order the whole corpus is

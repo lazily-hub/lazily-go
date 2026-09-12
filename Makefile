@@ -4,6 +4,33 @@
 
 all: check
 
+# One conformance-run id per `make` invocation (#lzstalemanifest).
+#
+# The two evidence files under build/ are WRITTEN by the `test` target and READ by
+# `conformance-coverage`, a separate process. Nothing in that channel proved the
+# bytes came from this invocation: the guard read whatever was on disk and
+# believed it. `go test` caches per package, and a cached package does not run the
+# binary at all — it writes no evidence and leaves the previous run's file exactly
+# where it was. Measured here: a second `go test .` on an unchanged tree prints
+# `ok ... (cached)` and appends ZERO lines to the manifest, with the evidence env
+# vars set and even when their VALUES change, so the cache does not key on them.
+#
+# So the evidence is STAMPED, and every guard that reads it requires the stamp to
+# be this invocation's. The id is the only thing that makes a stale read
+# impossible; `-count=1` below only keeps the ordinary case from going falsely
+# RED. Distinguishing those two is the point — a flag that avoids producing stale
+# evidence is weaker than a guard that refuses it, because the flag is one edit
+# away from being dropped and nothing downstream would notice.
+#
+# `export` is load-bearing: `conformance-coverage` runs the guard in a child
+# shell, and it has to see the SAME id the `test` recipe stamped.
+#
+# `:=` is load-bearing too. With a recursive `=` the $(shell) re-runs at every
+# reference, so the test step and the guard step would disagree — fail-closed, but
+# for a reason that takes an hour to find.
+LAZILY_CONFORMANCE_RUN_ID := go-$(shell date -u +%s%N)-$(shell echo $$$$)
+export LAZILY_CONFORMANCE_RUN_ID
+
 build:
 	go build ./...
 
@@ -21,6 +48,14 @@ build:
 # conformance manifest" on an otherwise unchanged tree. Fail-closed, but still a
 # false red: whether the evidence exists must not depend on a warm cache. CI does
 # the same thing for the same reason (#lzguardsnotinci).
+#
+# The truncation on the first line is what keeps a cached run from being a false
+# GREEN here — an empty file is missing evidence and the guard says so. It is not
+# a freshness check, though: it only covers the case where `test` and the guard
+# run in the same `make`. LAZILY_CONFORMANCE_RUN_ID (#lzstalemanifest) is the
+# freshness check, and it is passed through the environment by the `export` above,
+# not spelled on this line, so that `test` and `conformance-coverage` cannot drift
+# to two different ids.
 test:
 	@mkdir -p build && : > build/conformance-fixtures-loaded.txt && : > build/conformance-scenarios-replayed.txt
 	LAZILY_CONFORMANCE_MANIFEST=$(CURDIR)/build/conformance-fixtures-loaded.txt \
@@ -91,5 +126,11 @@ ci-reach:
 # Conformance-coverage guard (#portconformancecoverage). Static: fails when the
 # canonical corpus grows a fixture no test in this repo even names. Naming is not
 # replaying — see the script header for what this does and does not prove.
-conformance-coverage:
+#
+# It depends on `test` (#lzstalemanifest). The guard reads evidence stamped with
+# this invocation's LAZILY_CONFORMANCE_RUN_ID, so a bare `make conformance-coverage`
+# would otherwise refuse the previous run's files — correctly, and uselessly. The
+# dependency also removes a real `make -j` hazard: nothing but recipe ORDER used to
+# stop the guard from reading a manifest the test step was still appending to.
+conformance-coverage: test
 	./scripts/check-conformance-coverage.sh
