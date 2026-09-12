@@ -473,6 +473,18 @@ fi
 # Empty today, and that is the honest value: this workflow invokes make zero
 # times. Empty is a CLAIM here, not a missing pin — the day a step becomes
 # `make <target>`, the equality fails and names the target.
+#
+# FALSIFIED the same way the scoped reach was. Revert only the observed-but-not-
+# pinned direction of the equality below, keeping this array, its static checks,
+# the mutual-exclusion rung and the mode-lost rung: the combined edit returns to
+# exit 0, and the verdict line prints its own contradiction —
+#
+#   step-mapped — 8 gate(s) ... 8 mapping entr(ies), set-equal;
+#                 1 reached by make invocation, 0 pinned as such, set-equal
+#
+# 1 against 0, called set-equal, at exit 0. So the array is data and the equality
+# is the check, exactly as for EXPECTED_GATE_STEPS, and a verdict line is never
+# evidence that the thing it names happened.
 EXPECTED_MAKE_INVOKED_TARGETS=()
 
 # A mapping that names nothing maps nothing — the same vacuity rule as the pin
