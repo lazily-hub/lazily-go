@@ -423,6 +423,58 @@ fi
 
 # -------------------------------------------- the gate-to-step mapping, checked
 
+# ------------------------------------------------- the make-invoked mode pin
+
+# WHICH members CI reaches by invoking make, rather than by spelling the gate
+# (#reversereachdirection).
+#
+# `make_invokes` credits a member with reach and asks NOTHING about anchors: CI's
+# instruction is "run the target", so it faithfully runs whatever the recipe says
+# and there is no independent CI-side spelling to cross-examine. That is correct,
+# and it makes which members are in that mode a load-bearing fact — a member in
+# make mode has no gate-step entry and no anchor check.
+#
+# EXPECTED_GATE_STEPS alone does NOT pin it. Found in lazily-cpp and lazily-dart,
+# reproduced here: change ONE member's CI step body to `make <that member>` AND
+# delete its EXPECTED_GATE_STEPS entry, in the same edit. Each half alone exits 1;
+# together they cancel, because the deleted entry was the only evidence that the
+# mode had changed. Measured on the tree at ddeaec6, on byte-verified scratch
+# copies, with `race (cgo)`'s body set to `make race` and `"race|race (cgo)"`
+# removed:
+#
+#   reached  race
+#   check-ci-reach: step-mapped — 8 gate(s) ... 8 mapping entr(ies), set-equal
+#   check-ci-reach: OK — 9 target(s) reached by CI, 0 excused, 1 carrying no gate
+#   exit 0
+#
+# The ONLY trace was 9 dropping to 8 on one line. The CI step that runs this guard
+# checks the exit status and greps for `check-ci-reach: OK`; both are satisfied, so
+# that goes GREEN on the runner. dart put it exactly: a population pinned only as
+# the COMPLEMENT of another pinned population is not pinned against an edit that
+# moves both together. A COUNT IS NOT A PIN.
+#
+# And it is not cosmetic. Loaded up — the interop peer's CI step set to
+# `make test-interop-peer`, its gate-step entry dropped, and its recipe repointed
+# at `go build ./...`, all in one edit — the same measurement gives:
+#
+#   check-ci-reach: OK — 9 target(s) reached by CI, 0 excused, 1 carrying no gate
+#   exit 0, with `check-ci-reach: OK` printed for CI to grep
+#   `make -n check | grep -c lazily-interop-peer` -> 0
+#
+# The cross-binding WIRE-COMPATIBILITY gate running NOWHERE, local or CI, with the
+# guard built for its absence reporting OK. That is a fifth route to retiring
+# #lzinteroppeerci, and it exists only because the mode was unpinned.
+#
+# So the mode is pinned directly, by SET EQUALITY in both directions, and it is
+# MUTUALLY EXCLUSIVE with EXPECTED_GATE_STEPS: every gate-carrying, non-excused
+# member is in exactly one of the two arrays, so the two together are set-equal to
+# that whole population and neither can absorb a member the other drops.
+#
+# Empty today, and that is the honest value: this workflow invokes make zero
+# times. Empty is a CLAIM here, not a missing pin — the day a step becomes
+# `make <target>`, the equality fails and names the target.
+EXPECTED_MAKE_INVOKED_TARGETS=()
+
 # A mapping that names nothing maps nothing — the same vacuity rule as the pin
 # above (#lzvacuousrun).
 if [ "${#EXPECTED_GATE_STEPS[@]}" -eq 0 ]; then
@@ -469,6 +521,42 @@ for entry in "${EXPECTED_GATE_STEPS[@]}"; do
 	map_targets+=("$mt")
 	map_steps+=("$ms")
 done
+
+mki_list="$(printf '%s\n' "${EXPECTED_MAKE_INVOKED_TARGETS[@]:+${EXPECTED_MAKE_INVOKED_TARGETS[@]}}")"
+for t in "${EXPECTED_MAKE_INVOKED_TARGETS[@]:+${EXPECTED_MAKE_INVOKED_TARGETS[@]}}"; do
+	if ! grep -qxF "$t" <<<"$pin_all"; then
+		echo "check-ci-reach: EXPECTED_MAKE_INVOKED_TARGETS names '$t', which is not in EXPECTED_CLOSURE_TARGETS." >&2
+		echo "  Only a target in the closure can be reached by CI at all." >&2
+		exit 1
+	fi
+	if grep -qxF "$t" <<<"$pin_nogate_static"; then
+		echo "check-ci-reach: EXPECTED_MAKE_INVOKED_TARGETS names '$t', which is pinned as carrying NO gate." >&2
+		echo "  A target with no checkable command needs no reach of any kind." >&2
+		exit 1
+	fi
+done
+
+# MUTUAL EXCLUSION is the whole point of having two arrays rather than one array
+# and its complement. A member in both would be checked in one mode and excused
+# from the other, which is the state the combined edit above manufactured.
+for t in "${EXPECTED_MAKE_INVOKED_TARGETS[@]:+${EXPECTED_MAKE_INVOKED_TARGETS[@]}}"; do
+	if grep -qxF "$t" <<<"$(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | sed 's/|.*$//')"; then
+		echo "check-ci-reach: '$t' is in BOTH EXPECTED_MAKE_INVOKED_TARGETS and EXPECTED_GATE_STEPS." >&2
+		echo "  A member is reached either by CI spelling its gate (a step pin) or by CI" >&2
+		echo "  invoking make (no anchor check at all). Not both — pick the one CI does." >&2
+		exit 1
+	fi
+done
+
+mki_dupes="$(printf '%s\n' "${EXPECTED_MAKE_INVOKED_TARGETS[@]:+${EXPECTED_MAKE_INVOKED_TARGETS[@]}}" | grep -v '^$' | sort | uniq -d || true)"
+if [ -n "$mki_dupes" ]; then
+	echo "check-ci-reach: EXPECTED_MAKE_INVOKED_TARGETS repeats a target:" >&2
+	while IFS= read -r d; do
+		[ -n "$d" ] || continue
+		echo "  - $d" >&2
+	done <<<"$mki_dupes"
+	exit 1
+fi
 
 map_dupes="$(printf '%s\n' "${EXPECTED_GATE_STEPS[@]}" | sort | uniq -d)"
 if [ -n "$map_dupes" ]; then
@@ -1297,6 +1385,10 @@ nogate=""
 nogate_count=0
 unpinned=""
 unpinned_count=0
+mode_lost=""
+mode_lost_count=0
+mki_seen=""
+mki_ok=0
 reached=0
 excused_ok=0
 mapped=0
@@ -1329,16 +1421,23 @@ while IFS= read -r target; do
 	# quietly stale around it. Measured: replacing the `race (cgo)` step's body
 	# with `make race` keeps `reached  race` and refuses its mapping entry —
 	# "1 entr(ies) in EXPECTED_GATE_STEPS map a target that does not need a step:
-	# - race". The remedy is to delete the entry, not to point it at whichever
-	# step runs make; that entry would assert nothing. Same calibration as
-	# lazily-cs, which maps 8 of its 10 members and refuses a pin for the one
-	# reached through `make package-check`.
+	# - race". The remedy is to delete the entry AND add the target to
+	# EXPECTED_MAKE_INVOKED_TARGETS; pointing the entry at whichever step runs
+	# make would assert nothing.
+	#
+	# That refusal is NOT on its own what pins the mode. Deleting the entry in the
+	# same edit cancels it — see EXPECTED_MAKE_INVOKED_TARGETS above for the
+	# measured exit-0 verdict and why the mode needs its own set-equality. Same
+	# calibration as lazily-cs, which maps 8 of its 10 members and refuses a pin
+	# for the one reached through `make package-check`.
 	if make_invokes "$target"; then
 		if is_excused "$target"; then
 			stale="$stale$target"$'\n'
 			stale_count=$((stale_count + 1))
 		else
+			mki_seen="$mki_seen$target"$'\n'
 			reached=$((reached + 1))
+			mki_ok=$((mki_ok + 1))
 			printf 'reached  %s\n' "$target"
 		fi
 		continue
@@ -1360,6 +1459,18 @@ while IFS= read -r target; do
 			excused_ok=$((excused_ok + 1))
 			printf 'excused  %-32s %s\n' "$target" "$(excuse_reason "$target")"
 		fi
+		continue
+	fi
+
+	# THE MODE RUNG RUNS FIRST, ahead of the unpinned rung below. A member pinned
+	# as make-invoked that CI no longer invokes through make has had its STEP
+	# deleted or rewritten; telling the reader to add a gate-step pin would send
+	# them to fix the pin instead of the step, which is the wrong repair for a
+	# deleted step. lazily-cpp hit exactly that ordering and had to reverse it.
+	if grep -qxF "$target" <<<"$mki_list"; then
+		mode_lost="$mode_lost$target"$'\n'
+		mode_lost_count=$((mode_lost_count + 1))
+		printf 'MODE     %-32s pinned as make-invoked, but no CI step runs `%s %s`\n' "$target" "$MAKE_BIN" "$target"
 		continue
 	fi
 
@@ -1508,6 +1619,49 @@ while IFS= read -r t; do
 	fi
 done <<<"$map_pin_list"
 
+# The mode pin, SET-EQUAL in both directions (#reversereachdirection). Reported
+# separately from the mapping because the remedies differ, and reported BY NAME
+# because "one fewer" is the diagnosis that failed.
+mode_new=""
+mode_new_count=0
+while IFS= read -r t; do
+	[ -n "$t" ] || continue
+	if ! grep -qxF "$t" <<<"$mki_list"; then
+		mode_new="$mode_new  - $t"$'\n'
+		mode_new_count=$((mode_new_count + 1))
+	fi
+done <<<"$mki_seen"
+
+mode_bad=0
+if [ "$mode_new_count" -gt 0 ]; then
+	mode_bad=1
+	echo >&2
+	echo "check-ci-reach: $mode_new_count member(s) are now reached by CI invoking make, and are not pinned as such:" >&2
+	printf '%s' "$mode_new" >&2
+	echo "A member in make mode gets NO anchor check: CI runs the target, so whatever the" >&2
+	echo "recipe says is what runs, in both places. Switching a step to 'make <target>'" >&2
+	echo "therefore turns off the only thing that cross-examines that recipe." >&2
+	echo "  * Deliberate: add the target to EXPECTED_MAKE_INVOKED_TARGETS and delete its" >&2
+	echo "    EXPECTED_GATE_STEPS entry, in the same commit. Both, so the mode change is a" >&2
+	echo "    reviewable statement rather than a count going down by one." >&2
+	echo "  * Not deliberate: restore the step's own spelling of the gate." >&2
+fi
+if [ "$mode_lost_count" -gt 0 ]; then
+	mode_bad=1
+	echo >&2
+	echo "check-ci-reach: $mode_lost_count member(s) pinned as make-invoked that no CI step invokes through make:" >&2
+	while IFS= read -r t; do
+		[ -n "$t" ] || continue
+		echo "  - $t" >&2
+	done <<<"$mode_lost"
+	echo "The STEP changed, not the pin. Its 'make $ROOT_TARGET'-style invocation was" >&2
+	echo "deleted or rewritten, so nothing in CI reaches this gate at all now." >&2
+	echo "  * Restore the step, or give the gate its own step and move the target from" >&2
+	echo "    EXPECTED_MAKE_INVOKED_TARGETS to EXPECTED_GATE_STEPS with that step's name." >&2
+	echo "  * Do NOT reach for a gate-step pin to clear this: the missing thing is the" >&2
+	echo "    step." >&2
+fi
+
 mapping_bad=0
 if [ "$map_missing_count" -gt 0 ]; then
 	mapping_bad=1
@@ -1542,6 +1696,9 @@ if [ "$classification_bad" -eq 1 ]; then
 	status=1
 fi
 if [ "$mapping_bad" -eq 1 ]; then
+	status=1
+fi
+if [ "$mode_bad" -eq 1 ]; then
 	status=1
 fi
 if [ "$unpinned_count" -gt 0 ]; then
@@ -1580,7 +1737,7 @@ fi
 
 if [ "$status" -eq 0 ]; then
 	echo "check-ci-reach: closure pinned — ${#EXPECTED_CLOSURE_TARGETS[@]} target(s) under root '$EXPECTED_ROOT_TARGET', set-equal, all run by '$MAKE_BIN -n $EXPECTED_ROOT_TARGET'; ${#EXPECTED_NOGATE_TARGETS[@]} pinned exempt"
-	echo "check-ci-reach: step-mapped — $mapped gate(s) matched INSIDE the CI step pinned for each, ${#EXPECTED_GATE_STEPS[@]} mapping entr(ies), set-equal"
+	echo "check-ci-reach: step-mapped — $mapped gate(s) matched INSIDE the CI step pinned for each, ${#EXPECTED_GATE_STEPS[@]} mapping entr(ies), set-equal; $mki_ok reached by make invocation, ${#EXPECTED_MAKE_INVOKED_TARGETS[@]} pinned as such, set-equal"
 	echo "check-ci-reach: OK — $reached target(s) reached by CI, $excused_ok excused, $nogate_count carrying no gate"
 fi
 exit "$status"
