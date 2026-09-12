@@ -539,7 +539,29 @@ if [ "${#KNOWN_UNCOVERED[@]}" -gt 0 ]; then
     echo "       the duplicates." >&2
     exit 1
   fi
-  uniq_known="$(printf '%s\n' "${KNOWN_UNCOVERED[@]}" | grep -v '^$' | sort -u | wc -l)"
+  # `|| true`, for the same reason the duplicate check ten lines up carries it
+  # (#lzgrepcpipefail). `grep -v '^$'` exits 1 when it filters EVERYTHING out, and
+  # under the `set -o pipefail` at the top of this file that status is the whole
+  # pipeline's, so `wc -l` computing the right answer does not save the
+  # assignment: it dies here, before `expected_opened` is derived and before any
+  # of the messages below can name a subject.
+  #
+  # Reachable only through an all-blank KNOWN_UNCOVERED, and only if the
+  # `missing > 0` exit above is ever moved or relaxed. Measured both ways against
+  # a scratch copy carrying `KNOWN_UNCOVERED=("")`: as shipped it fails EARLIER
+  # and correctly — "KNOWN_UNCOVERED lists '', which is not in the canonical
+  # corpus", 10 problems, exit 1 — because the both-directions loop books the
+  # blank entry into `missing`. With that exit neutered so control reaches this
+  # line, the script exits 1 having printed nothing after that error: no
+  # "conformance coverage OK", no new diagnostic. Latent, not live; the guard in
+  # front of it is what makes it latent, and guards move.
+  #
+  # NOT rewritten to `awk 'NF'`. awk's NF==0 also drops a whitespace-ONLY entry,
+  # which `grep -v '^$'` keeps — and the loops above iterate every entry blank or
+  # not, so dropping one here would make this arithmetic disagree with the
+  # composition those loops just asserted. The status is what is wrong with this
+  # line, not the filter.
+  uniq_known="$(printf '%s\n' "${KNOWN_UNCOVERED[@]}" | grep -v '^$' | sort -u | wc -l || true)"
 fi
 
 if [ "$total" -eq 0 ]; then

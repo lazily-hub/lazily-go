@@ -117,7 +117,29 @@ jobs:
             echo "$out" | grep -- "--- SKIP"
             exit 1
           fi
-          ran=$(echo "$out" | grep -c "^=== RUN   ")
+          # awk, NOT `grep -c` (#lzgrepcpipefail). A count is a MEASUREMENT, and
+          # zero is its most important value — it is the whole reason this guard
+          # exists. `grep -c` disagrees: it prints `0` and exits 1, because to
+          # grep "no match" is a STATUS. GitHub Actions runs this body as
+          # `bash -e {0}`, so the assignment inherits the substitution's status
+          # and the step dies AT THIS LINE.
+          #
+          # Measured, on a tree with every Conformance test renamed so
+          # `go test -run Conformance` matches nothing: the step exited 1 having
+          # written ZERO bytes to stderr and no `::error::` annotation at all.
+          # Neither "conformance subtests executed: 0" below nor the
+          # "expected >= 100" diagnostic ever printed, and the last three lines
+          # of the log were `no tests to run` / `PASS` / `ok ... [no tests to
+          # run]` — a red step whose log ends in `ok`. The per-model
+          # reactive-graph loop further down never ran either, so the death here
+          # suppressed a second guard's verdict as well.
+          #
+          # awk exits 0 whether it matched or not, so the count reaches the
+          # comparison and the comparison reaches the operator. The `n+0` is
+          # load-bearing: an unset `n` prints as the empty string, and `[ "" -lt
+          # 100 ]` is a syntax error, which trades a silent death for a noisy
+          # one about the wrong subject.
+          ran=$(echo "$out" | awk '/^=== RUN   /{n++} END{print n+0}')
           echo "conformance subtests executed: $ran"
           if [ "$ran" -lt 100 ]; then
             echo "::error::only $ran conformance subtests ran (expected >= 100) — the corpus is not being replayed"
