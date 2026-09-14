@@ -95,6 +95,12 @@
 #   silent no-op, the same reverse check KNOWN_UNCOVERED already applies.
 set -euo pipefail
 
+# A step that reaches a gate is still inert when its workflow or job does not
+# run. Keep that outer activation proof separate from the mature command/Makefile
+# reach proof below, and exercise its mutation regressions on every invocation.
+python3 scripts/check-ci-activation.py --self-test
+python3 scripts/check-ci-activation.py --config scripts/ci-activation.conf --guard scripts/check-ci-reach.sh
+
 MAKE_BIN="${MAKE:-make}"
 # Stand-in name for a run: step with no `name:`. Deliberately not a string a real
 # step name can be; the same literal is emitted by ci_commands/ci_step_names.
