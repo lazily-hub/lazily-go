@@ -270,18 +270,6 @@ require_fresh_evidence() {
   fi
   return 0
 }
-TEST_DIRS=(".")
-EXTS=(".go")
-
-collect_sources() {
-  for d in "${TEST_DIRS[@]}"; do
-    [ -d "$d" ] || continue
-    for e in "${EXTS[@]}"; do
-      find "$d" -type f -name "*$e" -print0
-    done
-  done
-}
-
 require_fresh_evidence "$MANIFEST" "conformance manifest" "LAZILY_CONFORMANCE_MANIFEST" || exit 1
 OPENED="$(evidence_data "$MANIFEST" | sort -u)"
 
@@ -290,7 +278,6 @@ total=0
 covered=0
 while IFS= read -r fixture; do
   total=$((total + 1))
-  name="$(basename "$fixture")"
   # Here-string, NOT a pipe. With `set -o pipefail`, `printf ... | grep -q` reports
   # FAILURE when grep matches: grep -q exits immediately on the first hit, printf
   # takes SIGPIPE writing the rest, and pipefail surfaces printf's death as the
