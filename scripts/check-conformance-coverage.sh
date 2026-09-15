@@ -30,6 +30,16 @@
 # (#lzstalemanifest, and see the block above the check itself).
 set -euo pipefail
 
+# --probe-run performs the same audit but suppresses the recursive regression
+# attack launched after a successful ordinary run. It is intentionally
+# positional rather than an environment switch that CI could set accidentally.
+probe_run=0
+case "${1:-}" in
+  "") ;;
+  --probe-run) probe_run=1 ;;
+  *) echo "usage: $0 [--probe-run]" >&2; exit 2 ;;
+esac
+
 SPEC_DIR="${LAZILY_SPEC_CONFORMANCE_DIR:-../lazily-spec/conformance}"
 
 # A missing corpus is a legitimate local state (no sibling checkout) and an
@@ -375,6 +385,32 @@ scenario_ids() {
     else empty end' "$SPEC_DIR/$1"
 }
 
+# Parse each fixture once and preserve jq's status before any loop consumes its
+# stdout. Process substitutions do not return their producer's status to the
+# parent shell: the old callers therefore treated malformed JSON as an empty
+# scenario list. Worse, both the observed and derived totals used this same
+# function, so they shrank together and still printed 151/151 (#lazilycheckconformance).
+declare -A SCENARIO_IDS_CACHE SCENARIO_IDS_STATE
+load_scenario_ids() {
+  local fixture="$1" parsed rc
+  if [[ -n "${SCENARIO_IDS_STATE[$fixture]+x}" ]]; then
+    [[ "${SCENARIO_IDS_STATE[$fixture]}" == ok ]]
+    return
+  fi
+  if parsed="$(scenario_ids "$fixture")"; then
+    SCENARIO_IDS_CACHE["$fixture"]="$parsed"
+    SCENARIO_IDS_STATE["$fixture"]=ok
+    return 0
+  else
+    rc=$?
+  fi
+  SCENARIO_IDS_STATE["$fixture"]=error
+  echo "ERROR: cannot parse canonical fixture '$fixture'; jq exited $rc." >&2
+  echo "       A parser failure is unknown evidence, not a fixture with no scenarios." >&2
+  missing=$((missing + 1))
+  return 1
+}
+
 SCENARIO_TOTAL=0
 SCENARIO_REPLAYED=0
 
@@ -383,6 +419,7 @@ while IFS= read -r fixture; do
   # already reported (or excused) by the file-level check above; re-reporting
   # each of its scenarios would bury that one finding under n copies.
   grep -qxF "$fixture" <<< "$OPENED" || continue
+  load_scenario_ids "$fixture" || continue
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     SCENARIO_TOTAL=$((SCENARIO_TOTAL + 1))
@@ -421,7 +458,7 @@ while IFS= read -r fixture; do
       echo "       excuse_scenario '$fixture' '$id' '<why this binding cannot express it>'." >&2
       missing=$((missing + 1))
     fi
-  done < <(scenario_ids "$fixture")
+  done <<< "${SCENARIO_IDS_CACHE[$fixture]}"
 done < <(cd "$SPEC_DIR" && find . -name '*.json' | sed 's|^\./||' | sort)
 
 # The ledger guards itself, same as the manifest does. Every entry must name a
@@ -442,7 +479,8 @@ while IFS=$'\t' read -r fixture id; do
     missing=$((missing + 1))
     continue
   fi
-  if ! grep -qxF "$id" <<< "$(scenario_ids "$fixture")"; then
+  load_scenario_ids "$fixture" || continue
+  if ! grep -qxF "$id" <<< "${SCENARIO_IDS_CACHE[$fixture]}"; then
     echo "ERROR: scenario ledger records '$fixture [$id]', which is not a scenario" >&2
     echo "       that fixture carries. The runner is recording an id it invented." >&2
     missing=$((missing + 1))
@@ -460,7 +498,8 @@ for entry in "${SCENARIO_EXCUSES[@]:-}"; do
     missing=$((missing + 1))
     continue
   fi
-  if ! grep -qxF "$id" <<< "$(scenario_ids "$fixture")"; then
+  load_scenario_ids "$fixture" || continue
+  if ! grep -qxF "$id" <<< "${SCENARIO_IDS_CACHE[$fixture]}"; then
     echo "ERROR: excuse_scenario '$fixture' '$id' names a scenario that fixture does" >&2
     echo "       not carry — the excuse is stale. The corpus renamed or dropped it;" >&2
     echo "       delete the excuse or point it at the id that replaced it." >&2
@@ -624,10 +663,11 @@ while IFS= read -r fixture; do
   done
   [ "$is_known" -eq 0 ] || continue
   DERIVED_OPENED+="$fixture"$'\n'
+  load_scenario_ids "$fixture" || continue
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     derived_scenario_total=$((derived_scenario_total + 1))
-  done < <(scenario_ids "$fixture")
+  done <<< "${SCENARIO_IDS_CACHE[$fixture]}"
 done < <(cd "$SPEC_DIR" && find . -name '*.json' | sed 's|^\./||' | sort)
 
 # An excuse only subtracts when its fixture is one the corpus composition says is
@@ -698,3 +738,7 @@ echo "scenario coverage OK: $SCENARIO_REPLAYED/$SCENARIO_TOTAL scenarios of thos
      "($derived_excused excused; $expected_replayed DERIVED from the corpus listing minus" \
      "KNOWN_UNCOVERED and asserted EQUAL; runtime ledger stamped $RUN_ID — recorded at the" \
      "point of replay, during THIS run)"
+
+if [ "$probe_run" -eq 0 ]; then
+  bash ./scripts/test-conformance-coverage-guard.sh
+fi
