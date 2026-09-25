@@ -23,45 +23,110 @@ const (
 	SimConsumerAdapterInMemory SimConsumerAdapterKind = "in_memory"
 	SimConsumerAdapterPostgres SimConsumerAdapterKind = "postgres"
 	SimConsumerAdapterNATS     SimConsumerAdapterKind = "nats"
+	// SimConsumerAdapterExternalProcess executes the consumer behind an
+	// explicitly selected process port. It proves protocol compatibility and
+	// its own reducer identity; it does not claim to execute the Go reducer.
+	SimConsumerAdapterExternalProcess SimConsumerAdapterKind = "external_process"
 )
 
 func (kind SimConsumerAdapterKind) real() bool {
+	return kind == SimConsumerAdapterPostgres || kind == SimConsumerAdapterNATS || kind == SimConsumerAdapterExternalProcess
+
+}
+
+func (kind SimConsumerAdapterKind) legacyReal() bool {
 	return kind == SimConsumerAdapterPostgres || kind == SimConsumerAdapterNATS
+}
+
+// SimConsumerExternalPortKind identifies how the testkit reaches an external
+// consumer process. These names describe public integration boundaries rather
+// than any consumer-specific implementation.
+type SimConsumerExternalPortKind string
+
+const (
+	SimConsumerExternalPortCLI           SimConsumerExternalPortKind = "cli"
+	SimConsumerExternalPortFilesystem    SimConsumerExternalPortKind = "filesystem"
+	SimConsumerExternalPortLocalSocket   SimConsumerExternalPortKind = "local_socket"
+	SimConsumerExternalPortEditorReplica SimConsumerExternalPortKind = "editor_replica"
+)
+
+func (kind SimConsumerExternalPortKind) valid() bool {
+	switch kind {
+	case SimConsumerExternalPortCLI, SimConsumerExternalPortFilesystem, SimConsumerExternalPortLocalSocket, SimConsumerExternalPortEditorReplica:
+		return true
+	default:
+		return false
+	}
+}
+
+// SimConsumerPortDeterminism makes every external-process port's determinism
+// contract explicit. Nondeterministic ports may be stubbed by the in-memory
+// adapter; real adapters may never stub a port.
+type SimConsumerPortDeterminism string
+
+const (
+	SimConsumerPortDeterministic    SimConsumerPortDeterminism = "deterministic"
+	SimConsumerPortNondeterministic SimConsumerPortDeterminism = "nondeterministic"
+)
+
+func (determinism SimConsumerPortDeterminism) valid() bool {
+	return determinism == SimConsumerPortDeterministic || determinism == SimConsumerPortNondeterministic
 }
 
 // SimConsumerPort declares one narrow external boundary used by every adapter.
 // Stubbed ports are permitted only at nondeterministic boundaries, and never on
 // a real-service adapter.
 type SimConsumerPort struct {
-	ID                       string
-	Kind                     string
+	ID          string
+	Kind        string
+	Determinism SimConsumerPortDeterminism
+	// NondeterministicBoundary is retained for the Postgres/NATS API. New
+	// external-process adapters must set Determinism explicitly.
 	NondeterministicBoundary bool
 	Stubbed                  bool
+}
+
+// SimConsumerExternalProcessSelection makes external execution opt-in by both
+// adapter identity and port kind. A configured external adapter that is not
+// selected is rejected before any callback is invoked.
+type SimConsumerExternalProcessSelection struct {
+	AdapterID string
+	Port      SimConsumerExternalPortKind
 }
 
 // SimConsumerAdapter makes an in-memory implementation and selected real
 // services interchangeable under one materialized generated history.
 //
-// ProductionReducerID is evidence that every adapter invokes the same production
-// decision/reducer path. Real-service adapters must provide a stable ServiceID
-// and Probe that verifies the service is reachable before a scenario starts.
+// ProductionReducerID is evidence that in-memory, Postgres, and NATS adapters
+// invoke the same Go production decision/reducer path. An external-process
+// adapter must leave it empty and instead declare a shared ProtocolID plus its
+// own stable ReducerID, avoiding a false cross-language same-reducer claim.
+//
+// Every real adapter must provide a stable ServiceID, Probe, and
+// MaterializedHistory. The latter returns the exact accepted action history so
+// Run can compare it with the materialized generated scenario after every step.
 type SimConsumerAdapter struct {
 	ID                  string
 	Kind                SimConsumerAdapterKind
 	ProductionReducerID string
+	ProtocolID          string
+	ReducerID           string
 	ServiceID           string
+	ExternalPort        SimConsumerExternalPortKind
 	Ports               []SimConsumerPort
 	Probe               func() error
 	SimulationWorld     func() *SimWorld
 	Reset               func() error
 	Apply               func(SimAction) error
 	Observe             func() (map[string]any, error)
+	MaterializedHistory func() ([]SimAction, error)
 }
 
 type SimConsumerTestkitSpec struct {
-	SimulationAdapterID  string
-	RequiredRealAdapters []SimConsumerAdapterKind
-	Adapters             []SimConsumerAdapter
+	SimulationAdapterID       string
+	RequiredRealAdapters      []SimConsumerAdapterKind
+	RequiredExternalProcesses []SimConsumerExternalProcessSelection
+	Adapters                  []SimConsumerAdapter
 }
 
 type SimConsumerTestkit struct {
@@ -76,9 +141,22 @@ type SimConsumerCheckpoint struct {
 }
 
 type SimConsumerRunResult struct {
-	ScenarioDigest string
-	AdapterIDs     []string
-	Checkpoints    []SimConsumerCheckpoint
+	ScenarioDigest  string
+	AdapterIDs      []string
+	AdapterEvidence []SimConsumerAdapterEvidence
+	Checkpoints     []SimConsumerCheckpoint
+}
+
+// SimConsumerAdapterEvidence records the identities that were validated for a
+// run. External reducers may differ while their protocol identity must match.
+type SimConsumerAdapterEvidence struct {
+	AdapterID           string
+	Kind                SimConsumerAdapterKind
+	ServiceID           string
+	ExternalPort        SimConsumerExternalPortKind
+	ProtocolID          string
+	ReducerID           string
+	ProductionReducerID string
 }
 
 // SimConsumerDivergenceError localizes the first adapter observation that
@@ -105,14 +183,14 @@ func (e *SimConsumerDivergenceError) Error() string {
 func (e *SimConsumerDivergenceError) Unwrap() error { return ErrSimConsumerConformance }
 
 // NewSimConsumerTestkit validates the conformance topology before a service is
-// touched. At least one real Postgres or NATS kind must be selected explicitly;
-// every selected kind must have a matching adapter.
+// touched. At least one real Postgres/NATS kind or external process must be
+// selected explicitly; every selection must have a matching adapter.
 func NewSimConsumerTestkit(spec SimConsumerTestkitSpec) (*SimConsumerTestkit, error) {
 	if !validSimID(spec.SimulationAdapterID) {
 		return nil, simConsumerErrorf("simulation adapter needs a stable id")
 	}
-	if len(spec.RequiredRealAdapters) == 0 {
-		return nil, simConsumerErrorf("select at least one real Postgres or NATS adapter")
+	if len(spec.RequiredRealAdapters) == 0 && len(spec.RequiredExternalProcesses) == 0 {
+		return nil, simConsumerErrorf("select at least one real Postgres/NATS adapter or external process")
 	}
 	if len(spec.Adapters) < 2 {
 		return nil, simConsumerErrorf("testkit needs an in-memory adapter and at least one real adapter")
@@ -120,7 +198,7 @@ func NewSimConsumerTestkit(spec SimConsumerTestkitSpec) (*SimConsumerTestkit, er
 
 	required := map[SimConsumerAdapterKind]struct{}{}
 	for _, kind := range spec.RequiredRealAdapters {
-		if !kind.real() {
+		if !kind.legacyReal() {
 			return nil, simConsumerErrorf("required adapter kind %q is not a real Postgres or NATS service", kind)
 		}
 		if _, duplicate := required[kind]; duplicate {
@@ -128,15 +206,29 @@ func NewSimConsumerTestkit(spec SimConsumerTestkitSpec) (*SimConsumerTestkit, er
 		}
 		required[kind] = struct{}{}
 	}
+	requiredExternal := map[string]SimConsumerExternalPortKind{}
+	for _, selection := range spec.RequiredExternalProcesses {
+		if !validSimID(selection.AdapterID) || !selection.Port.valid() {
+			return nil, simConsumerErrorf("external-process selection needs a stable adapter id and supported port")
+		}
+		if _, duplicate := requiredExternal[selection.AdapterID]; duplicate {
+			return nil, simConsumerErrorf("duplicate required external-process adapter %q", selection.AdapterID)
+		}
+		requiredExternal[selection.AdapterID] = selection.Port
+	}
 
 	adapters := append([]SimConsumerAdapter(nil), spec.Adapters...)
 	seenIDs := map[string]struct{}{}
 	presentKinds := map[SimConsumerAdapterKind]struct{}{}
 	productionReducerID := ""
+	protocolID := ""
 	portContract := []string(nil)
 	for i := range adapters {
 		adapter := &adapters[i]
 		adapter.Ports = append([]SimConsumerPort(nil), adapter.Ports...)
+		if err := normalizeSimConsumerAdapter(adapter); err != nil {
+			return nil, err
+		}
 		if err := validateSimConsumerAdapter(*adapter); err != nil {
 			return nil, err
 		}
@@ -145,15 +237,33 @@ func NewSimConsumerTestkit(spec SimConsumerTestkitSpec) (*SimConsumerTestkit, er
 		}
 		seenIDs[adapter.ID] = struct{}{}
 		presentKinds[adapter.Kind] = struct{}{}
-		if adapter.Kind.real() {
+		if _, selectedAsExternal := requiredExternal[adapter.ID]; selectedAsExternal && adapter.Kind != SimConsumerAdapterExternalProcess {
+			return nil, simConsumerErrorf("external-process selection %q refers to adapter kind %q", adapter.ID, adapter.Kind)
+		}
+		if adapter.Kind.legacyReal() {
 			if _, selected := required[adapter.Kind]; !selected {
 				return nil, simConsumerErrorf("real adapter %q kind %q was not explicitly selected", adapter.ID, adapter.Kind)
 			}
+		} else if adapter.Kind == SimConsumerAdapterExternalProcess {
+			selectedPort, selected := requiredExternal[adapter.ID]
+			if !selected {
+				return nil, simConsumerErrorf("external-process adapter %q was not explicitly selected", adapter.ID)
+			}
+			if adapter.ExternalPort != selectedPort {
+				return nil, simConsumerErrorf("external-process adapter %q uses port %q, selected %q", adapter.ID, adapter.ExternalPort, selectedPort)
+			}
 		}
-		if productionReducerID == "" {
-			productionReducerID = adapter.ProductionReducerID
-		} else if adapter.ProductionReducerID != productionReducerID {
-			return nil, simConsumerErrorf("adapter %q uses reducer %q, want shared production reducer %q", adapter.ID, adapter.ProductionReducerID, productionReducerID)
+		if adapter.Kind != SimConsumerAdapterExternalProcess {
+			if productionReducerID == "" {
+				productionReducerID = adapter.ProductionReducerID
+			} else if adapter.ProductionReducerID != productionReducerID {
+				return nil, simConsumerErrorf("adapter %q uses reducer %q, want shared production reducer %q", adapter.ID, adapter.ProductionReducerID, productionReducerID)
+			}
+		}
+		if protocolID == "" {
+			protocolID = adapter.ProtocolID
+		} else if adapter.ProtocolID != protocolID {
+			return nil, simConsumerErrorf("adapter %q uses protocol %q, want shared protocol %q", adapter.ID, adapter.ProtocolID, protocolID)
 		}
 		contract := simConsumerPortContract(adapter.Ports)
 		if portContract == nil {
@@ -168,6 +278,11 @@ func NewSimConsumerTestkit(spec SimConsumerTestkitSpec) (*SimConsumerTestkit, er
 	for kind := range required {
 		if _, present := presentKinds[kind]; !present {
 			return nil, simConsumerErrorf("required real adapter kind %q is missing", kind)
+		}
+	}
+	for adapterID := range requiredExternal {
+		if _, present := seenIDs[adapterID]; !present {
+			return nil, simConsumerErrorf("required external-process adapter %q is missing", adapterID)
 		}
 	}
 
@@ -186,30 +301,85 @@ func NewSimConsumerTestkit(spec SimConsumerTestkitSpec) (*SimConsumerTestkit, er
 	}
 	spec.Adapters = adapters
 	spec.RequiredRealAdapters = append([]SimConsumerAdapterKind(nil), spec.RequiredRealAdapters...)
+	spec.RequiredExternalProcesses = append([]SimConsumerExternalProcessSelection(nil), spec.RequiredExternalProcesses...)
 	return &SimConsumerTestkit{spec: spec, baselineIndex: baselineIndex}, nil
 }
 
+func normalizeSimConsumerAdapter(adapter *SimConsumerAdapter) error {
+	if adapter.Kind != SimConsumerAdapterExternalProcess {
+		if adapter.ProtocolID == "" {
+			adapter.ProtocolID = adapter.ProductionReducerID
+		}
+		if adapter.ReducerID == "" {
+			adapter.ReducerID = adapter.ProductionReducerID
+		}
+	}
+	for i := range adapter.Ports {
+		port := &adapter.Ports[i]
+		if adapter.Kind == SimConsumerAdapterExternalProcess && port.Determinism == "" {
+			return simConsumerErrorf("external-process adapter %q port %q must declare determinism", adapter.ID, port.ID)
+		}
+		if port.Determinism == "" {
+			if port.NondeterministicBoundary {
+				port.Determinism = SimConsumerPortNondeterministic
+			} else {
+				port.Determinism = SimConsumerPortDeterministic
+			}
+		}
+		if !port.Determinism.valid() {
+			return simConsumerErrorf("adapter %q port %q has unknown determinism %q", adapter.ID, port.ID, port.Determinism)
+		}
+		if port.NondeterministicBoundary && port.Determinism != SimConsumerPortNondeterministic {
+			return simConsumerErrorf("adapter %q port %q has conflicting determinism declarations", adapter.ID, port.ID)
+		}
+		port.NondeterministicBoundary = port.Determinism == SimConsumerPortNondeterministic
+	}
+	return nil
+}
+
 func validateSimConsumerAdapter(adapter SimConsumerAdapter) error {
-	if !validSimID(adapter.ID) || !validSimID(adapter.ProductionReducerID) {
-		return simConsumerErrorf("adapter needs stable adapter and production-reducer ids")
+	if !validSimID(adapter.ID) || !validSimID(adapter.ProtocolID) || !validSimID(adapter.ReducerID) {
+		return simConsumerErrorf("adapter needs stable adapter, protocol, and reducer ids")
 	}
 	if adapter.Reset == nil || adapter.Apply == nil || adapter.Observe == nil {
 		return simConsumerErrorf("adapter %q needs Reset, Apply, and Observe callbacks", adapter.ID)
 	}
 	switch adapter.Kind {
 	case SimConsumerAdapterInMemory:
-		if adapter.ServiceID != "" || adapter.Probe != nil {
+		if !validSimID(adapter.ProductionReducerID) {
+			return simConsumerErrorf("in-memory adapter %q needs a stable production-reducer id", adapter.ID)
+		}
+		if adapter.ServiceID != "" || adapter.Probe != nil || adapter.ExternalPort != "" || adapter.MaterializedHistory != nil {
 			return simConsumerErrorf("in-memory adapter %q cannot claim a real service", adapter.ID)
 		}
 		if adapter.SimulationWorld == nil {
 			return simConsumerErrorf("in-memory adapter %q must expose its SimWorld", adapter.ID)
 		}
 	case SimConsumerAdapterPostgres, SimConsumerAdapterNATS:
-		if !validSimID(adapter.ServiceID) || adapter.Probe == nil {
-			return simConsumerErrorf("real adapter %q needs a stable service id and Probe", adapter.ID)
+		if !validSimID(adapter.ProductionReducerID) {
+			return simConsumerErrorf("real adapter %q needs a stable production-reducer id", adapter.ID)
+		}
+		if adapter.ReducerID != adapter.ProductionReducerID {
+			return simConsumerErrorf("real %s adapter %q reducer evidence must match its production reducer", adapter.Kind, adapter.ID)
+		}
+		if adapter.ExternalPort != "" {
+			return simConsumerErrorf("real %s adapter %q cannot claim external-process port %q", adapter.Kind, adapter.ID, adapter.ExternalPort)
+		}
+		fallthrough
+	case SimConsumerAdapterExternalProcess:
+		if !validSimID(adapter.ServiceID) || adapter.Probe == nil || adapter.MaterializedHistory == nil {
+			return simConsumerErrorf("real adapter %q needs a stable service id, Probe, and MaterializedHistory", adapter.ID)
 		}
 		if adapter.SimulationWorld != nil {
 			return simConsumerErrorf("real adapter %q cannot expose a simulation world", adapter.ID)
+		}
+		if adapter.Kind == SimConsumerAdapterExternalProcess {
+			if !adapter.ExternalPort.valid() {
+				return simConsumerErrorf("external-process adapter %q needs a supported port", adapter.ID)
+			}
+			if adapter.ProductionReducerID != "" {
+				return simConsumerErrorf("external-process adapter %q must identify its reducer without claiming the in-memory production reducer", adapter.ID)
+			}
 		}
 	default:
 		return simConsumerErrorf("adapter %q has unknown kind %q", adapter.ID, adapter.Kind)
@@ -237,7 +407,7 @@ func validateSimConsumerAdapter(adapter SimConsumerAdapter) error {
 func simConsumerPortContract(ports []SimConsumerPort) []string {
 	contract := make([]string, len(ports))
 	for i, port := range ports {
-		contract[i] = fmt.Sprintf("%s\x00%s\x00%t", port.ID, port.Kind, port.NondeterministicBoundary)
+		contract[i] = fmt.Sprintf("%s\x00%s\x00%s", port.ID, port.Kind, port.Determinism)
 	}
 	sort.Strings(contract)
 	return contract
@@ -280,12 +450,23 @@ func (kit *SimConsumerTestkit) Run(scenario SimGeneratedScenario) (SimConsumerRu
 		if adapter.Kind == SimConsumerAdapterInMemory && adapter.SimulationWorld() == nil {
 			return SimConsumerRunResult{}, simConsumerErrorf("reset adapter %q did not create its SimWorld", adapter.ID)
 		}
+		if adapter.Kind.real() {
+			if err := validateSimConsumerMaterializedHistory(adapter, nil); err != nil {
+				return SimConsumerRunResult{}, simConsumerErrorf("reset adapter %q: %v", adapter.ID, err)
+			}
+		}
 	}
 
 	result := SimConsumerRunResult{ScenarioDigest: scenarioDigest}
 	result.AdapterIDs = make([]string, len(kit.spec.Adapters))
+	result.AdapterEvidence = make([]SimConsumerAdapterEvidence, len(kit.spec.Adapters))
 	for i, adapter := range kit.spec.Adapters {
 		result.AdapterIDs[i] = adapter.ID
+		result.AdapterEvidence[i] = SimConsumerAdapterEvidence{
+			AdapterID: adapter.ID, Kind: adapter.Kind, ServiceID: adapter.ServiceID,
+			ExternalPort: adapter.ExternalPort, ProtocolID: adapter.ProtocolID,
+			ReducerID: adapter.ReducerID, ProductionReducerID: adapter.ProductionReducerID,
+		}
 	}
 	result.Checkpoints = make([]SimConsumerCheckpoint, 0, len(scenario.Actions))
 	for actionIndex, generated := range scenario.Actions {
@@ -322,6 +503,11 @@ func (kit *SimConsumerTestkit) Run(scenario SimGeneratedScenario) (SimConsumerRu
 					return SimConsumerRunResult{}, simConsumerErrorf("step %d action %q adapter %q advanced SimWorld without executing that action", checkpoint.Step, checkpoint.ActionID, adapter.ID)
 				}
 			}
+			if adapter.Kind.real() {
+				if err := validateSimConsumerMaterializedHistory(adapter, scenario.Actions[:actionIndex+1]); err != nil {
+					return SimConsumerRunResult{}, simConsumerErrorf("step %d action %q adapter %q materialized history: %v", checkpoint.Step, checkpoint.ActionID, adapter.ID, err)
+				}
+			}
 			values, err := adapter.Observe()
 			if err != nil {
 				return SimConsumerRunResult{}, simConsumerErrorf("step %d action %q observe adapter %q: %v", checkpoint.Step, checkpoint.ActionID, adapter.ID, err)
@@ -349,6 +535,30 @@ func (kit *SimConsumerTestkit) Run(scenario SimGeneratedScenario) (SimConsumerRu
 		result.Checkpoints = append(result.Checkpoints, checkpoint)
 	}
 	return result, nil
+}
+
+func validateSimConsumerMaterializedHistory(adapter SimConsumerAdapter, expected []SimGeneratedAction) error {
+	history, err := adapter.MaterializedHistory()
+	if err != nil {
+		return err
+	}
+	if len(history) != len(expected) {
+		return fmt.Errorf("contains %d actions, want exact prefix of %d", len(history), len(expected))
+	}
+	for i := range expected {
+		expectedBytes, err := ReplayCanonicalBytes(expected[i].Action)
+		if err != nil {
+			return fmt.Errorf("encode expected action %d: %w", i, err)
+		}
+		actualBytes, err := ReplayCanonicalBytes(history[i])
+		if err != nil {
+			return fmt.Errorf("encode materialized action %d: %w", i, err)
+		}
+		if !bytes.Equal(expectedBytes, actualBytes) {
+			return fmt.Errorf("action %d differs from the materialized scenario", i)
+		}
+	}
+	return nil
 }
 
 func validateSimConsumerScenario(scenario SimGeneratedScenario) error {

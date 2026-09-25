@@ -6,7 +6,10 @@ import (
 	lazily "github.com/lazily-hub/lazily-go"
 )
 
-type exampleConsumerState struct{ value int }
+type exampleConsumerState struct {
+	value   int
+	history []lazily.SimAction
+}
 
 func exampleConsumerAdapter(id string, kind lazily.SimConsumerAdapterKind) lazily.SimConsumerAdapter {
 	state := &exampleConsumerState{}
@@ -19,12 +22,15 @@ func exampleConsumerAdapter(id string, kind lazily.SimConsumerAdapterKind) lazil
 		ID:                  id,
 		Kind:                kind,
 		ProductionReducerID: "example.reducer.v1",
+		ProtocolID:          "example.protocol.v1",
+		ReducerID:           "example.reducer.v1",
 		Ports: []lazily.SimConsumerPort{
-			{ID: "state.store", Kind: "storage"},
-			{ID: "logical.clock", Kind: "clock", NondeterministicBoundary: true, Stubbed: kind == lazily.SimConsumerAdapterInMemory},
+			{ID: "state.store", Kind: "storage", Determinism: lazily.SimConsumerPortDeterministic},
+			{ID: "logical.clock", Kind: "clock", Determinism: lazily.SimConsumerPortNondeterministic, Stubbed: kind == lazily.SimConsumerAdapterInMemory},
 		},
 		Reset: func() error {
 			state.value = 0
+			state.history = nil
 			if kind == lazily.SimConsumerAdapterInMemory {
 				seed, _ := lazily.ParseSimSeed("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
 				world = lazily.NewSimWorld(seed)
@@ -39,7 +45,11 @@ func exampleConsumerAdapter(id string, kind lazily.SimConsumerAdapterKind) lazil
 		},
 		Apply: func(action lazily.SimAction) error {
 			if kind != lazily.SimConsumerAdapterInMemory {
-				return applyReducer(action)
+				if err := applyReducer(action); err != nil {
+					return err
+				}
+				state.history = append(state.history, action)
+				return nil
 			}
 			if _, err := world.Schedule(world.Now(), action); err != nil {
 				return err
@@ -62,6 +72,9 @@ func exampleConsumerAdapter(id string, kind lazily.SimConsumerAdapterKind) lazil
 		// test service here. This compact example keeps only the testkit wiring.
 		adapter.ServiceID = "postgres.test.service"
 		adapter.Probe = func() error { return nil }
+		adapter.MaterializedHistory = func() ([]lazily.SimAction, error) {
+			return append([]lazily.SimAction(nil), state.history...), nil
+		}
 	}
 	return adapter
 }

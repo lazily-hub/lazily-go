@@ -12,13 +12,14 @@ type simConsumerTestState struct {
 	probes       int
 	resets       int
 	applications int
+	history      []SimAction
 }
 
 func simConsumerTestPorts(stubClock bool) []SimConsumerPort {
 	return []SimConsumerPort{
-		{ID: "state.store", Kind: "storage"},
-		{ID: "event.stream", Kind: "messaging", NondeterministicBoundary: true},
-		{ID: "logical.clock", Kind: "clock", NondeterministicBoundary: true, Stubbed: stubClock},
+		{ID: "state.store", Kind: "storage", Determinism: SimConsumerPortDeterministic},
+		{ID: "event.stream", Kind: "messaging", Determinism: SimConsumerPortNondeterministic},
+		{ID: "logical.clock", Kind: "clock", Determinism: SimConsumerPortNondeterministic, Stubbed: stubClock},
 	}
 }
 
@@ -38,9 +39,12 @@ func newSimConsumerTestAdapter(id string, kind SimConsumerAdapterKind, mutation 
 		ID:                  id,
 		Kind:                kind,
 		ProductionReducerID: "counter.reducer.v1",
+		ProtocolID:          "counter.protocol.v1",
+		ReducerID:           "counter.reducer.v1",
 		Ports:               simConsumerTestPorts(kind == SimConsumerAdapterInMemory),
 		Reset: func() error {
 			state.value = 0
+			state.history = nil
 			state.resets++
 			if kind == SimConsumerAdapterInMemory {
 				world = NewSimWorld(mustParseSimConsumerSeed())
@@ -55,7 +59,11 @@ func newSimConsumerTestAdapter(id string, kind SimConsumerAdapterKind, mutation 
 		},
 		Apply: func(action SimAction) error {
 			if kind != SimConsumerAdapterInMemory {
-				return applyReducer(action)
+				if err := applyReducer(action); err != nil {
+					return err
+				}
+				state.history = append(state.history, cloneSimAction(action))
+				return nil
 			}
 			if _, err := world.Schedule(world.Now(), action); err != nil {
 				return err
@@ -79,7 +87,22 @@ func newSimConsumerTestAdapter(id string, kind SimConsumerAdapterKind, mutation 
 			state.probes++
 			return nil
 		}
+		adapter.MaterializedHistory = func() ([]SimAction, error) {
+			history := make([]SimAction, len(state.history))
+			for i := range state.history {
+				history[i] = cloneSimAction(state.history[i])
+			}
+			return history, nil
+		}
 	}
+	return adapter, state
+}
+
+func newSimConsumerExternalProcessAdapter(id string, port SimConsumerExternalPortKind, mutation int) (SimConsumerAdapter, *simConsumerTestState) {
+	adapter, state := newSimConsumerTestAdapter(id, SimConsumerAdapterExternalProcess, mutation)
+	adapter.ProductionReducerID = ""
+	adapter.ReducerID = id + ".reducer.v1"
+	adapter.ExternalPort = port
 	return adapter, state
 }
 
@@ -160,6 +183,74 @@ func TestSimConsumerTestkitRunsGeneratedHistoryAcrossMemoryPostgresAndNATS(t *te
 	}
 }
 
+func TestSimConsumerTestkitRunsExactHistoryAcrossExternalProcessPorts(t *testing.T) {
+	ports := []SimConsumerExternalPortKind{
+		SimConsumerExternalPortCLI,
+		SimConsumerExternalPortFilesystem,
+		SimConsumerExternalPortLocalSocket,
+		SimConsumerExternalPortEditorReplica,
+	}
+	for _, port := range ports {
+		t.Run(string(port), func(t *testing.T) {
+			memory, _ := newSimConsumerTestAdapter("memory", SimConsumerAdapterInMemory, 0)
+			external, externalState := newSimConsumerExternalProcessAdapter("sample."+string(port), port, 0)
+			kit, err := NewSimConsumerTestkit(SimConsumerTestkitSpec{
+				SimulationAdapterID: "memory",
+				RequiredExternalProcesses: []SimConsumerExternalProcessSelection{{
+					AdapterID: external.ID,
+					Port:      port,
+				}},
+				Adapters: []SimConsumerAdapter{external, memory},
+			})
+			if err != nil {
+				t.Fatalf("NewSimConsumerTestkit: %v", err)
+			}
+			scenario := simConsumerGeneratedScenario(t)
+			result, err := kit.Run(scenario)
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(externalState.history) != len(scenario.Actions) {
+				t.Fatalf("external history length = %d, want %d", len(externalState.history), len(scenario.Actions))
+			}
+			if len(result.AdapterEvidence) != 2 {
+				t.Fatalf("adapter evidence = %+v", result.AdapterEvidence)
+			}
+			var found bool
+			for _, evidence := range result.AdapterEvidence {
+				if evidence.AdapterID != external.ID {
+					continue
+				}
+				found = evidence.ExternalPort == port && evidence.ProtocolID == "counter.protocol.v1" && evidence.ReducerID == external.ReducerID && evidence.ProductionReducerID == ""
+			}
+			if !found {
+				t.Fatalf("external identity evidence = %+v", result.AdapterEvidence)
+			}
+		})
+	}
+}
+
+func TestSimConsumerTestkitRejectsExternalMaterializedHistoryDrift(t *testing.T) {
+	memory, _ := newSimConsumerTestAdapter("memory", SimConsumerAdapterInMemory, 0)
+	external, _ := newSimConsumerExternalProcessAdapter("sample.cli", SimConsumerExternalPortCLI, 0)
+	external.MaterializedHistory = func() ([]SimAction, error) { return nil, nil }
+	kit, err := NewSimConsumerTestkit(SimConsumerTestkitSpec{
+		SimulationAdapterID: "memory",
+		RequiredExternalProcesses: []SimConsumerExternalProcessSelection{{
+			AdapterID: external.ID,
+			Port:      SimConsumerExternalPortCLI,
+		}},
+		Adapters: []SimConsumerAdapter{memory, external},
+	})
+	if err != nil {
+		t.Fatalf("NewSimConsumerTestkit: %v", err)
+	}
+	_, err = kit.Run(simConsumerGeneratedScenario(t))
+	if err == nil || !errors.Is(err, ErrSimConsumerConformance) || !strings.Contains(err.Error(), "want exact prefix") {
+		t.Fatalf("Run error = %v, want exact materialized-history rejection", err)
+	}
+}
+
 func TestSimConsumerTestkitCatchesStepwiseRealAdapterMutation(t *testing.T) {
 	memory, _ := newSimConsumerTestAdapter("memory", SimConsumerAdapterInMemory, 0)
 	postgres, _ := newSimConsumerTestAdapter("postgres.mutant", SimConsumerAdapterPostgres, 1)
@@ -223,6 +314,7 @@ func TestSimConsumerTestkitRejectsMissingRealServicesReducerDriftAndBroadStubs(t
 			name: "production reducer drift",
 			mutate: func(spec *SimConsumerTestkitSpec) {
 				spec.Adapters[1].ProductionReducerID = "test.only.reducer"
+				spec.Adapters[1].ReducerID = "test.only.reducer"
 			},
 			contains: "shared production reducer",
 		},
@@ -234,11 +326,25 @@ func TestSimConsumerTestkitRejectsMissingRealServicesReducerDriftAndBroadStubs(t
 			contains: "stubs deterministic port",
 		},
 		{
+			name: "real deterministic port stub",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].Ports[0].Stubbed = true
+			},
+			contains: "stubs deterministic port",
+		},
+		{
 			name: "real adapter stub",
 			mutate: func(spec *SimConsumerTestkitSpec) {
 				spec.Adapters[1].Ports[1].Stubbed = true
 			},
 			contains: "real adapter",
+		},
+		{
+			name: "real adapter exposes SimWorld",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].SimulationWorld = func() *SimWorld { return NewSimWorld(mustParseSimConsumerSeed()) }
+			},
+			contains: "cannot expose a simulation world",
 		},
 		{
 			name: "port contract drift",
@@ -257,6 +363,128 @@ func TestSimConsumerTestkitRejectsMissingRealServicesReducerDriftAndBroadStubs(t
 			}
 			spec.Adapters[0].Ports = append([]SimConsumerPort(nil), memory.Ports...)
 			spec.Adapters[1].Ports = append([]SimConsumerPort(nil), postgres.Ports...)
+			test.mutate(&spec)
+			_, err := NewSimConsumerTestkit(spec)
+			if err == nil || !errors.Is(err, ErrSimConsumerConformance) || !strings.Contains(err.Error(), test.contains) {
+				t.Fatalf("NewSimConsumerTestkit error = %v, want ErrSimConsumerConformance containing %q", err, test.contains)
+			}
+		})
+	}
+}
+
+func TestSimConsumerTestkitRejectsInvalidExternalProcessContracts(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(*SimConsumerTestkitSpec)
+		contains string
+	}{
+		{
+			name: "not explicitly selected",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.RequiredExternalProcesses = nil
+				spec.RequiredRealAdapters = []SimConsumerAdapterKind{SimConsumerAdapterPostgres}
+				postgres, _ := newSimConsumerTestAdapter("postgres.integration", SimConsumerAdapterPostgres, 0)
+				spec.Adapters = append(spec.Adapters, postgres)
+			},
+			contains: "was not explicitly selected",
+		},
+		{
+			name: "selection port mismatch",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.RequiredExternalProcesses[0].Port = SimConsumerExternalPortFilesystem
+			},
+			contains: "selected \"filesystem\"",
+		},
+		{
+			name: "selection names non-external adapter",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.RequiredExternalProcesses[0].AdapterID = "memory"
+			},
+			contains: "refers to adapter kind \"in_memory\"",
+		},
+		{
+			name: "implicit port determinism",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].Ports[0].Determinism = ""
+			},
+			contains: "must declare determinism",
+		},
+		{
+			name: "claims in-memory reducer",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].ProductionReducerID = "counter.reducer.v1"
+			},
+			contains: "without claiming the in-memory production reducer",
+		},
+		{
+			name: "protocol drift",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].ProtocolID = "other.protocol.v1"
+			},
+			contains: "shared protocol",
+		},
+		{
+			name: "missing service identity",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].ServiceID = ""
+			},
+			contains: "stable service id",
+		},
+		{
+			name: "missing reducer identity",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].ReducerID = ""
+			},
+			contains: "stable adapter, protocol, and reducer ids",
+		},
+		{
+			name: "missing probe callback",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].Probe = nil
+			},
+			contains: "Probe, and MaterializedHistory",
+		},
+		{
+			name: "missing reset callback",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].Reset = nil
+			},
+			contains: "Reset, Apply, and Observe",
+		},
+		{
+			name: "missing apply callback",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].Apply = nil
+			},
+			contains: "Reset, Apply, and Observe",
+		},
+		{
+			name: "missing observe callback",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].Observe = nil
+			},
+			contains: "Reset, Apply, and Observe",
+		},
+		{
+			name: "missing materialized history",
+			mutate: func(spec *SimConsumerTestkitSpec) {
+				spec.Adapters[1].MaterializedHistory = nil
+			},
+			contains: "MaterializedHistory",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			memory, _ := newSimConsumerTestAdapter("memory", SimConsumerAdapterInMemory, 0)
+			external, _ := newSimConsumerExternalProcessAdapter("sample.cli", SimConsumerExternalPortCLI, 0)
+			spec := SimConsumerTestkitSpec{
+				SimulationAdapterID: "memory",
+				RequiredExternalProcesses: []SimConsumerExternalProcessSelection{{
+					AdapterID: external.ID,
+					Port:      SimConsumerExternalPortCLI,
+				}},
+				Adapters: []SimConsumerAdapter{memory, external},
+			}
 			test.mutate(&spec)
 			_, err := NewSimConsumerTestkit(spec)
 			if err == nil || !errors.Is(err, ErrSimConsumerConformance) || !strings.Contains(err.Error(), test.contains) {

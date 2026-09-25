@@ -104,17 +104,24 @@ ctx.Batch(func() {
 ## Consumer simulation conformance
 
 `SimConsumerTestkit` runs one materialized `SimGeneratedScenario` through an
-in-memory adapter and explicitly selected real Postgres and/or NATS adapters. It
-compares canonical observations after every action, so a real adapter divergence
-is localized to the first action that produced it rather than only the final
-state.
+in-memory adapter and explicitly selected real adapters. Postgres and NATS keep
+their strict built-in selection path; generic external-process adapters can be
+selected by stable adapter identity plus a `cli`, `filesystem`, `local_socket`,
+or `editor_replica` port. It compares canonical observations and each real
+adapter's exact materialized action-history prefix after every action, so a
+divergence is localized to the first action that produced it rather than only
+the final state.
 
-All adapters must declare the same `ProductionReducerID` and the same narrow-port
-contract. This makes reuse of the production reducer explicit and prevents the
-test implementation from quietly becoming a second business-logic path. A real
-adapter must name and probe its service. In-memory stubs are accepted only for
-ports declared as nondeterministic external boundaries; a real adapter may not
-stub any port.
+All adapters must declare the same `ProtocolID` and the same narrow-port
+contract, with every port explicitly deterministic or nondeterministic. The
+in-memory, Postgres, and NATS adapters also retain the stricter shared
+`ProductionReducerID` proof. An external process instead declares its own stable
+`ReducerID` and must leave `ProductionReducerID` empty, so a cross-language
+consumer proves protocol compatibility without pretending to execute the Go
+reducer. Every real adapter must name and probe its service, reset it, apply and
+observe actions, and expose its exact materialized history. In-memory stubs are
+accepted only for nondeterministic boundaries; a real adapter may not expose a
+`SimWorld` or stub any port.
 
 See `ExampleSimConsumerTestkit_Run` for executable wiring. In a consumer repo,
 the Postgres/NATS callbacks connect to actual integration services and the
