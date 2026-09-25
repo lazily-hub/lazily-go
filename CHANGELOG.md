@@ -8,6 +8,15 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Added
 
+- Deterministic simulation oracles (`#lzsimoracle`, `sim_oracle.go`) with a
+  checked boundary after every action: safety invariants, independent reference
+  models, differential subjects, bounded-liveness obligations, stepwise history
+  assertions, and capability-gated linearizability checks. Comparative sources
+  declare provenance, and construction rejects a simulation-only implementation
+  as the sole authority for the behavior it simulates. Oracle fingerprints bind
+  canonical per-step observations to the exact `SimTrace`, projected replay log,
+  and `ReplayHarness` fingerprint. Seeded mutation tests prove every oracle class
+  and identity layer detects its intended defect.
 - Replay-equivalence proof harness (`#lzreplaygo`, `replay.go`) — `ReplayHarness`
   / `ReplayLog` / `ReplayFingerprint` per `lazily-spec/docs/replay-equivalence.md`.
   Given the same event log, a rebuilt graph observes the same values at every
