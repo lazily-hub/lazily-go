@@ -8,6 +8,15 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Added
 
+- Generic consumer simulation conformance testkit (`#lzsimconformance`,
+  `sim_consumer_testkit.go`) that runs one materialized generated history across
+  an in-memory adapter and explicitly selected real Postgres/NATS adapters,
+  comparing canonical observations after every action. Adapters must identify
+  the same production reducer and narrow-port contract; real services must be
+  named and probed, real adapters may not contain stubs, and in-memory stubs are
+  limited to declared nondeterministic boundaries. An executable example and
+  policy tests document simulation as a complement to unit, contract, and
+  real-infrastructure testing rather than a blanket mock replacement.
 - Deterministic simulation oracles (`#lzsimoracle`, `sim_oracle.go`) with a
   checked boundary after every action: safety invariants, independent reference
   models, differential subjects, bounded-liveness obligations, stepwise history

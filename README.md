@@ -101,6 +101,33 @@ ctx.Batch(func() {
 }) // a single coalesced cascade
 ```
 
+## Consumer simulation conformance
+
+`SimConsumerTestkit` runs one materialized `SimGeneratedScenario` through an
+in-memory adapter and explicitly selected real Postgres and/or NATS adapters. It
+compares canonical observations after every action, so a real adapter divergence
+is localized to the first action that produced it rather than only the final
+state.
+
+All adapters must declare the same `ProductionReducerID` and the same narrow-port
+contract. This makes reuse of the production reducer explicit and prevents the
+test implementation from quietly becoming a second business-logic path. A real
+adapter must name and probe its service. In-memory stubs are accepted only for
+ports declared as nondeterministic external boundaries; a real adapter may not
+stub any port.
+
+See `ExampleSimConsumerTestkit_Run` for executable wiring. In a consumer repo,
+the Postgres/NATS callbacks connect to actual integration services and the
+in-memory callbacks adapt the same production reducer to `SimWorld`. Consumer
+schemas, event names, and service setup stay in that consumer repo rather than in
+Lazily.
+
+The testkit complements rather than replaces the rest of the test pyramid:
+ordinary unit tests cover local branches, contract tests pin port envelopes,
+deterministic simulation preserves generated counterexamples, and selected
+real-service runs cover database/broker semantics and crash windows. It is not a
+blanket-mock facility.
+
 ## Competing-consumer work queue
 
 `WorkQueueCell[T]` provides exclusive FIFO claims, visibility deadlines,
