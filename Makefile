@@ -1,6 +1,6 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test test-interop-peer vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach
+.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach
 
 all: check
 
@@ -116,13 +116,16 @@ tidy:
 test-interop-peer:
 	CGO_ENABLED=1 go run -race ./cmd/lazily-interop-peer --self-check
 
+test-postgres-projection-barrier:
+	./scripts/test-postgres-projection-barrier.sh
+
 # `race` runs after `test` on purpose: `test` truncates the conformance manifest
 # and the scenario ledger, and `race` writes neither, so the recorded fixture
 # union and scenario ledger stay the ones the coverage guard is meant to audit.
 assertion-ordering-check:
 	python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .
 
-check: fmt-check vet build test race test-interop-peer conformance-coverage assertion-ordering-check ci-reach
+check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier conformance-coverage assertion-ordering-check ci-reach
 	@echo "lazily-go: check OK"
 
 # CI-reachability guard (#lzcheckcireachguard). Fails when a target above runs a

@@ -27,6 +27,19 @@ jobs:
     # one rather than inheriting the previous attempt's.
     env:
       LAZILY_CONFORMANCE_RUN_ID: go-ci-${{ github.run_id }}-${{ github.run_attempt }}
+      LAZILY_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -189,6 +202,9 @@ jobs:
       # rots into a silent cross-language incompatibility.
       - name: Interop peer self-check (#lzinteroppeerci)
         run: CGO_ENABLED=1 go run -race ./cmd/lazily-interop-peer --self-check
+
+      - name: PostgreSQL projection-maintenance barrier
+        run: ./scripts/test-postgres-projection-barrier.sh
 
       - name: Assertion observation ordering (#lzassertordering)
         run: python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .

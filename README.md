@@ -176,6 +176,14 @@ attempt := projection.Claim("document", 1)
 projection.AckApplied("document", attempt.Envelope.Generation, attempt.Envelope.Epoch)
 ```
 
+Cross-process full rebuilds require the database-owned
+`PostgresProjectionBarrier`; the in-process projection types above are not a
+database atomicity or cross-replica exclusion mechanism. The barrier orders
+transaction-scoped advisory keys, bounds waiting with `lock_timeout`, retries
+complete `SERIALIZABLE` transactions, and keeps source scan plus projection
+replacement in one transaction. See
+[`docs/postgres-projection-barrier.md`](docs/postgres-projection-barrier.md).
+
 ## Context
 
 All reactives that react to each other must share a `Context`. It holds an

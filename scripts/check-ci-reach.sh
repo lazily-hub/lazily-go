@@ -245,6 +245,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"race"                     # CRDT reads are graph WRITES (v0.23.2 data race)
 	"test"                     # go test -count=1 ./... + the evidence recorders
 	"test-interop-peer"        # cross-binding wire compatibility (#lzinteroppeerci)
+	"test-postgres-projection-barrier" # cross-process rebuild/write exclusion (#lzprojectionbarrier)
 	"vet"                      # go vet ./...
 )
 
@@ -381,6 +382,7 @@ EXPECTED_GATE_STEPS=(
 	"race|race (cgo)"
 	"test|test"
 	"test-interop-peer|Interop peer self-check (#lzinteroppeerci)"
+	"test-postgres-projection-barrier|PostgreSQL projection-maintenance barrier"
 	"vet|vet"
 )
 
