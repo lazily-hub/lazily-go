@@ -129,6 +129,15 @@ in-memory callbacks adapt the same production reducer to `SimWorld`. Consumer
 schemas, event names, and service setup stay in that consumer repo rather than in
 Lazily.
 
+For projection writers, `RunProjectionMaintenance` adds an independently
+authored generic history family to the same testkit. It interleaves synthetic
+append/amend/retract events with full and concurrent rebuilds, bounded lock
+timeouts, whole-transaction retries, cancellation, and both sides of a commit
+crash window. One production reducer runs behind the in-memory reference and an
+explicitly selected PostgreSQL adapter; every step compares exact accepted
+history and a complete-history replay. See
+[`docs/sim-projection-maintenance.md`](docs/sim-projection-maintenance.md).
+
 The testkit complements rather than replaces the rest of the test pyramid:
 ordinary unit tests cover local branches, contract tests pin port envelopes,
 deterministic simulation preserves generated counterexamples, and selected

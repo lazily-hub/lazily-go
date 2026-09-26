@@ -8,6 +8,12 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Added
 
+- Projection-maintenance race corpus (`#lzprojectionracecorpus`) for
+  `SimConsumerTestkit`, with generic append/amend/retract histories, full and
+  concurrent rebuilds, timeout/retry/cancellation and commit crash windows,
+  dependency-closed causal shrinking, and exact accepted-history plus
+  complete-replay assertions across the in-memory reference and real
+  PostgreSQL adapters.
 - Generic consumer simulation conformance testkit (`#lzsimconformance`,
   `sim_consumer_testkit.go`) that runs one materialized generated history across
   an in-memory adapter and explicitly selected real Postgres/NATS adapters,

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ -n "${LAZILY_POSTGRES_URL:-}" ]]; then
-	go test -count=1 -run '^TestPostgresProjectionBarrier' .
+	go test -count=1 -run '^(TestPostgresProjectionBarrier|TestSimProjectionMaintenancePostgres)' .
 	exit
 fi
 
@@ -39,4 +39,4 @@ initdb -D "$data_dir" -A trust -U postgres --no-locale >/dev/null
 pg_ctl -D "$data_dir" -l "$log_file" -o "-F -h 127.0.0.1 -k $test_root -p $port" start >/dev/null
 export LAZILY_POSTGRES_URL="postgresql://postgres@127.0.0.1:$port/postgres"
 
-go test -count=1 -run '^TestPostgresProjectionBarrier' .
+go test -count=1 -run '^(TestPostgresProjectionBarrier|TestSimProjectionMaintenancePostgres)' .

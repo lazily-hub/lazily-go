@@ -106,20 +106,21 @@ type SimConsumerExternalProcessSelection struct {
 // MaterializedHistory. The latter returns the exact accepted action history so
 // Run can compare it with the materialized generated scenario after every step.
 type SimConsumerAdapter struct {
-	ID                  string
-	Kind                SimConsumerAdapterKind
-	ProductionReducerID string
-	ProtocolID          string
-	ReducerID           string
-	ServiceID           string
-	ExternalPort        SimConsumerExternalPortKind
-	Ports               []SimConsumerPort
-	Probe               func() error
-	SimulationWorld     func() *SimWorld
-	Reset               func() error
-	Apply               func(SimAction) error
-	Observe             func() (map[string]any, error)
-	MaterializedHistory func() ([]SimAction, error)
+	ID                    string
+	Kind                  SimConsumerAdapterKind
+	ProductionReducerID   string
+	ProtocolID            string
+	ReducerID             string
+	ServiceID             string
+	ExternalPort          SimConsumerExternalPortKind
+	Ports                 []SimConsumerPort
+	Probe                 func() error
+	SimulationWorld       func() *SimWorld
+	Reset                 func() error
+	Apply                 func(SimAction) error
+	Observe               func() (map[string]any, error)
+	MaterializedHistory   func() ([]SimAction, error)
+	ProjectionMaintenance *SimProjectionMaintenanceAdapter
 }
 
 type SimConsumerTestkitSpec struct {
