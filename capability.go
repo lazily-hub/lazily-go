@@ -109,6 +109,11 @@ type BindingCapabilities struct {
 	Permissions           bool
 	CapabilityNegotiation bool
 	Async                 bool
+	CoreTier              bool
+	ClientTier            bool
+	DurableHostTier       bool
+	DistributedHostTier   bool
+	AcceleratedHostTier   bool
 }
 
 // NewBindingCapabilities returns the canonical lazily-go conformance
@@ -126,6 +131,11 @@ func NewBindingCapabilities() BindingCapabilities {
 		Permissions:           true,
 		CapabilityNegotiation: true,
 		Async:                 true,
+		CoreTier:              true,
+		ClientTier:            true,
+		DurableHostTier:       false,
+		DistributedHostTier:   false,
+		AcceleratedHostTier:   false,
 	}
 }
 
@@ -141,6 +151,11 @@ type bindingCapabilitiesWire struct {
 	Permissions           bool   `json:"permissions"`
 	CapabilityNegotiation bool   `json:"capability_negotiation"`
 	Async                 bool   `json:"async"`
+	CoreTier              bool   `json:"core"`
+	ClientTier            bool   `json:"client"`
+	DurableHostTier       bool   `json:"durable_host"`
+	DistributedHostTier   bool   `json:"distributed_host"`
+	AcceleratedHostTier   bool   `json:"accelerated_host"`
 }
 
 func (b BindingCapabilities) wire() bindingCapabilitiesWire {
@@ -156,6 +171,11 @@ func (b BindingCapabilities) wire() bindingCapabilitiesWire {
 		Permissions:           b.Permissions,
 		CapabilityNegotiation: b.CapabilityNegotiation,
 		Async:                 b.Async,
+		CoreTier:              b.CoreTier,
+		ClientTier:            b.ClientTier,
+		DurableHostTier:       b.DurableHostTier,
+		DistributedHostTier:   b.DistributedHostTier,
+		AcceleratedHostTier:   b.AcceleratedHostTier,
 	}
 }
 

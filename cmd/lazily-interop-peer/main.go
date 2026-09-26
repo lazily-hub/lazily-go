@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,6 +35,16 @@ type peer struct {
 	logical int64
 	runtime *lazily.CrdtPlaneRuntime
 	stdlib  map[string]*stdlibFeature
+}
+
+type durablePeerTransport struct{}
+
+func (durablePeerTransport) Publish(context.Context, string, []byte) (lazily.DurableBrokerPubAck, error) {
+	return lazily.DurableBrokerPubAck{Stream: "INTEROP", Sequence: 1}, nil
+}
+
+func (durablePeerTransport) Subscribe(context.Context, string) (lazily.DurableSubscription, error) {
+	return nil, errors.New("interop durable transport has no live subscription")
 }
 
 func (p *peer) close() {
@@ -94,6 +105,7 @@ func (p *peer) hello(req request) any {
 			"stdlib_timer_v1",
 			"stdlib_timeout_v1",
 			"stdlib_revision_barrier_v1",
+			"durable_client_v1",
 		},
 		// Both MUST-level frame codecs are implemented and replayed through the
 		// canonical corpus: `json` by ipc.go and `msgpack` — the externally
@@ -125,18 +137,24 @@ func (value *wireUint64) UnmarshalJSON(data []byte) error {
 }
 
 type featureStep struct {
-	Op               string      `json:"op"`
-	Now              wireUint64  `json:"now"`
-	Duration         wireUint64  `json:"duration"`
-	Operation        string      `json:"operation"`
-	Value            string      `json:"value"`
-	Cancellation     string      `json:"cancellation"`
-	Revision         wireUint64  `json:"revision"`
-	RequiredRevision wireUint64  `json:"required_revision"`
-	ObservedRevision wireUint64  `json:"observed_revision"`
-	Deadline         *wireUint64 `json:"deadline"`
-	Predicate        bool        `json:"predicate"`
-	Key              string      `json:"key"`
+	Op                      string                              `json:"op"`
+	Now                     wireUint64                          `json:"now"`
+	Duration                wireUint64                          `json:"duration"`
+	Operation               string                              `json:"operation"`
+	Value                   string                              `json:"value"`
+	Cancellation            string                              `json:"cancellation"`
+	Revision                wireUint64                          `json:"revision"`
+	RequiredRevision        wireUint64                          `json:"required_revision"`
+	ObservedRevision        wireUint64                          `json:"observed_revision"`
+	Deadline                *wireUint64                         `json:"deadline"`
+	Predicate               bool                                `json:"predicate"`
+	Key                     string                              `json:"key"`
+	Envelope                json.RawMessage                     `json:"envelope"`
+	ObservedSourcePositions []uint64                            `json:"observed_source_positions"`
+	Deliveries              []json.RawMessage                   `json:"deliveries"`
+	Receipt                 lazily.DurableHostReceipt           `json:"receipt"`
+	Left                    lazily.DurableProjectionFingerprint `json:"left"`
+	Right                   lazily.DurableProjectionFingerprint `json:"right"`
 }
 
 func (step featureStep) deadlineValue() *uint64 {
@@ -154,11 +172,12 @@ type stdlibFeature struct {
 	barrier  *lazily.RevisionBarrier
 	deadline uint64
 	last     map[string]any
+	durable  *lazily.DurableClient[[]uint64]
 }
 
 func supportedFeature(feature string) bool {
 	switch feature {
-	case "stdlib_timer_v1", "stdlib_timeout_v1", "stdlib_revision_barrier_v1":
+	case "stdlib_timer_v1", "stdlib_timeout_v1", "stdlib_revision_barrier_v1", "durable_client_v1":
 		return true
 	default:
 		return false
@@ -174,7 +193,15 @@ func (p *peer) featureReset(req request) (any, error) {
 	if p.stdlib == nil {
 		p.stdlib = make(map[string]*stdlibFeature)
 	}
-	p.stdlib[req.Feature] = &stdlibFeature{name: req.Feature}
+	feature := &stdlibFeature{name: req.Feature}
+	if req.Feature == "durable_client_v1" {
+		client, err := lazily.NewDurableClient[[]uint64](durablePeerTransport{})
+		if err != nil {
+			return nil, err
+		}
+		feature.durable = client
+	}
+	p.stdlib[req.Feature] = feature
 	return map[string]any{"ok": true, "feature": req.Feature}, nil
 }
 
@@ -221,6 +248,8 @@ func (f *stdlibFeature) step(step featureStep) (map[string]any, error) {
 		observation, err = f.timeoutStep(step)
 	case "stdlib_revision_barrier_v1":
 		observation, err = f.barrierStep(step)
+	case "durable_client_v1":
+		observation, err = f.durableStep(step)
 	default:
 		err = fmt.Errorf("unsupported feature %s", f.name)
 	}
@@ -228,6 +257,68 @@ func (f *stdlibFeature) step(step featureStep) (map[string]any, error) {
 		f.last = observation
 	}
 	return observation, err
+}
+
+func (f *stdlibFeature) durableStep(step featureStep) (map[string]any, error) {
+	if f.durable == nil {
+		return nil, errors.New("durable client feature is not initialized")
+	}
+	switch step.Operation {
+	case "validate_envelope":
+		var envelope lazily.DurableIngressEnvelope
+		err := json.Unmarshal(step.Envelope, &envelope)
+		accepted, reason := err == nil, "accepted"
+		if err != nil {
+			var envelopeError *lazily.DurableEnvelopeError
+			if !errors.As(err, &envelopeError) {
+				return nil, err
+			}
+			reason = envelopeError.Reason
+		}
+		return map[string]any{"accepted": accepted, "reason": reason, "payload_decoded": accepted, "owner_authority": false}, nil
+	case "order_projection":
+		classifications := make([]string, 0, len(step.ObservedSourcePositions))
+		for _, position := range step.ObservedSourcePositions {
+			event := lazily.DurableProjectionEvent[[]uint64]{ProtocolVersion: 1, OwnerID: "interop-owner", Generation: 1, SourcePosition: position, ProjectionVersion: position, SchemaVersion: 1, CodecVersion: 1, Completeness: lazily.DurableProjectionCompleteHistory, Entries: []uint64{position}, SourceFingerprint: fmt.Sprintf("source-%d", position), ProjectionFingerprint: fmt.Sprintf("projection-%d", position), Health: lazily.DurableProjectionHealthy}
+			admission, err := f.durable.ObserveProjection(event)
+			if err != nil {
+				return nil, err
+			}
+			switch admission.Kind {
+			case lazily.IngressAdmissionBuffered:
+				classifications = append(classifications, "buffered")
+			case lazily.IngressAdmissionDropped:
+				classifications = append(classifications, "duplicate")
+			default:
+				classifications = append(classifications, "applied")
+			}
+		}
+		return map[string]any{"applied_source_positions": f.durable.AppliedSourcePositions("interop-owner"), "delivery_classification": classifications, "broker_order_authoritative": false, "may_authorize_transition": false}, nil
+	case "classify_dedup":
+		classification := make([]lazily.DurableIngressClassification, 0, len(step.Deliveries))
+		for _, raw := range step.Deliveries {
+			var envelope lazily.DurableIngressEnvelope
+			if err := json.Unmarshal(raw, &envelope); err != nil {
+				return nil, err
+			}
+			value, err := f.durable.ObserveIngress(envelope)
+			if err != nil {
+				return nil, err
+			}
+			classification = append(classification, value)
+		}
+		return map[string]any{"classification": classification, "owner_authority": false}, nil
+	case "observe_receipt":
+		if err := f.durable.ObserveHostReceipt(step.Receipt); err != nil {
+			return nil, err
+		}
+		return map[string]any{"receipt": step.Receipt, "terminal_owner_receipt": true, "transport_ack_equivalent": false, "owner_authority": false}, nil
+	case "compare_projection_fingerprints":
+		comparison := lazily.CompareDurableProjectionFingerprints(step.Left, step.Right)
+		return map[string]any{"same_source": comparison.SameSource, "same_fingerprint": comparison.SameFingerprint, "same_completeness": comparison.SameCompleteness, "equivalent": comparison.Equivalent, "may_authorize_transition": false}, nil
+	default:
+		return nil, fmt.Errorf("unknown durable client operation %s", step.Operation)
+	}
 }
 
 func (f *stdlibFeature) timerStep(step featureStep) (map[string]any, error) {
@@ -546,6 +637,29 @@ func selfCheck() error {
 		if err := json.Unmarshal(raw, &response); err != nil || response.Observation.Outcome != test.outcome {
 			return fmt.Errorf("%s observation self-check failed: %s", test.feature, raw)
 		}
+	}
+	durableSteps := []json.RawMessage{
+		json.RawMessage(`{"operation":"validate_envelope","envelope":{"protocol_version":1,"message_id":"sample-owner/message-1","schema_version":7,"codec_version":11,"payload":[0,255]}}`),
+		json.RawMessage(`{"operation":"order_projection","observed_source_positions":[2,1,2]}`),
+		json.RawMessage(`{"operation":"classify_dedup","deliveries":[{"protocol_version":1,"message_id":"sample-owner/message-1","schema_version":7,"codec_version":11,"payload":[65]},{"protocol_version":1,"message_id":"sample-owner/message-1","schema_version":7,"codec_version":11,"payload":[65]}]}`),
+		json.RawMessage(`{"operation":"observe_receipt","receipt":{"protocol_version":1,"receipt_id":"sample-owner/receipt-1","message_id":"sample-owner/message-1","outcome":"committed","owner_position":1}}`),
+		json.RawMessage(`{"operation":"compare_projection_fingerprints","left":{"projection_id":"orders","source_position":1,"fingerprint":"aa","completeness":"complete_history","may_authorize_transition":false},"right":{"projection_id":"orders","source_position":1,"fingerprint":"aa","completeness":"latest_state_only","may_authorize_transition":false}}`),
+	}
+	if _, err := p.handle(request{Cmd: "feature_reset", Feature: "durable_client_v1"}); err != nil {
+		return err
+	}
+	for _, step := range durableSteps {
+		if _, err := p.handle(request{Cmd: "feature_step", Feature: "durable_client_v1", Step: step}); err != nil {
+			return err
+		}
+	}
+	observed, err := p.handle(request{Cmd: "feature_observe", Feature: "durable_client_v1"})
+	if err != nil {
+		return err
+	}
+	encoded, _ := json.Marshal(observed)
+	if !json.Valid(encoded) {
+		return errors.New("durable client observation is not JSON")
 	}
 	return nil
 }
