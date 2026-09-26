@@ -30,6 +30,7 @@ const (
 // the durable database. In-process Context, ThreadSafeContext, AsyncContext,
 // and LatestDurableProjection values intentionally do not implement it.
 type DatabaseProjectionMaintenanceBarrier interface {
+	ConcurrencyScopedCapability
 	DatabaseProjectionMaintenanceBarrier()
 }
 
@@ -85,6 +86,10 @@ func NewPostgresProjectionBarrier(db *sql.DB, options PostgresProjectionBarrierO
 }
 
 func (*PostgresProjectionBarrier) DatabaseProjectionMaintenanceBarrier() {}
+
+func (*PostgresProjectionBarrier) ConcurrencyScope() ConcurrencyScope {
+	return ConcurrencyScopeDurableCrossProcess
+}
 
 // ApplySourceWrite runs one accepted source mutation and its incremental
 // projection update behind the same database-owned barrier used by rebuilds.

@@ -8,6 +8,10 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Added
 
+- Machine-checkable `ConcurrencyScope` markers across contexts, queue families,
+  latest-durable projections, and the PostgreSQL projection barrier, with
+  negative conformance tests preventing process-local capabilities from
+  advertising database projection-maintenance authority (`#lzconcurrencyscope`).
 - Projection-maintenance race corpus (`#lzprojectionracecorpus`) for
   `SimConsumerTestkit`, with generic append/amend/retract histories, full and
   concurrent rebuilds, timeout/retry/cancellation and commit crash windows,

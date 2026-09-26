@@ -193,6 +193,14 @@ complete `SERIALIZABLE` transactions, and keeps source scan plus projection
 replacement in one transaction. See
 [`docs/postgres-projection-barrier.md`](docs/postgres-projection-barrier.md).
 
+Every concurrency-bearing surface exposes `ConcurrencyScope()`. The four stable
+values are `single_goroutine`, `single_process_serialized`,
+`durable_cross_process`, and `distributed_fenced`. Thread-safe/async contexts,
+queues, and projections are process-local; only the PostgreSQL barrier currently
+implements `DatabaseProjectionMaintenanceBarrier`. The machine-readable source
+of truth is
+[`lazily-spec/concurrency-scopes.json`](../lazily-spec/concurrency-scopes.json).
+
 ## Context
 
 All reactives that react to each other must share a `Context`. It holds an
