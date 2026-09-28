@@ -42,7 +42,7 @@ func newMemoryProjectionPort() (*SimProjectionMaintenanceAdapter, *memoryProject
 			return nil
 		},
 		Apply: func(_ context.Context, action SimProjectionMaintenanceAction) (SimProjectionMaintenanceOutcome, error) {
-			outcome, err := expectedSimProjectionOutcome(action)
+			outcome, err := ExpectedSimProjectionMaintenanceOutcome(action)
 			if err != nil {
 				return outcome, err
 			}

@@ -178,7 +178,7 @@ func (kit *SimConsumerTestkit) RunProjectionMaintenance(
 		if generated.Command != string(action.Kind) {
 			return SimProjectionMaintenanceRunResult{}, simConsumerErrorf("step %d action %q command %q does not match projection-maintenance kind %q", actionIndex+1, generated.Action.ID, generated.Command, action.Kind)
 		}
-		expectedOutcome, err := expectedSimProjectionOutcome(action)
+		expectedOutcome, err := ExpectedSimProjectionMaintenanceOutcome(action)
 		if err != nil {
 			return SimProjectionMaintenanceRunResult{}, err
 		}
@@ -232,7 +232,15 @@ func (kit *SimConsumerTestkit) RunProjectionMaintenance(
 	return result, nil
 }
 
-func expectedSimProjectionOutcome(action SimProjectionMaintenanceAction) (SimProjectionMaintenanceOutcome, error) {
+// ExpectedSimProjectionMaintenanceOutcome reports the outcome a projection-maintenance
+// action is required to produce, and the error a malformed one must be
+// rejected with.
+//
+// Exported because (*SimConsumerTestkit).RunProjectionMaintenance compares each
+// adapter's applied outcome against this oracle, so an out-of-tree adapter
+// cannot be written correctly without it. Callers must not reimplement the
+// switch below: a copy is free to drift from the behaviour it is meant to pin.
+func ExpectedSimProjectionMaintenanceOutcome(action SimProjectionMaintenanceAction) (SimProjectionMaintenanceOutcome, error) {
 	outcome := SimProjectionMaintenanceOutcome{Kind: action.Kind}
 	switch action.Kind {
 	case SimProjectionMaintenanceFullRebuild:
@@ -324,7 +332,7 @@ func simProjectionShrinkPrecondition(model simProjectionShrinkModel, _ []SimGene
 	if !ok {
 		return false
 	}
-	outcome, err := expectedSimProjectionOutcome(step)
+	outcome, err := ExpectedSimProjectionMaintenanceOutcome(step)
 	if err != nil || step.Kind == SimProjectionMaintenanceFullRebuild {
 		return err == nil
 	}
@@ -350,7 +358,7 @@ func simProjectionShrinkApply(model simProjectionShrinkModel, action SimAction) 
 		acceptedIDs: maps.Clone(model.acceptedIDs),
 	}
 	step := action.Payload.(SimProjectionMaintenanceAction)
-	outcome, err := expectedSimProjectionOutcome(step)
+	outcome, err := ExpectedSimProjectionMaintenanceOutcome(step)
 	if err != nil || !outcome.Accepted {
 		return next, err
 	}

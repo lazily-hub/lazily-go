@@ -1,6 +1,6 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach
+.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach module-dependency-check
 
 all: check
 
@@ -125,8 +125,24 @@ test-postgres-projection-barrier:
 assertion-ordering-check:
 	python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .
 
-check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier conformance-coverage assertion-ordering-check ci-reach
+check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier module-dependency-check conformance-coverage assertion-ordering-check ci-reach
 	@echo "lazily-go: check OK"
+
+# Published-module dependency floor (#lzgooptionalpgx). Static: fails when the
+# root module's `require` block is non-empty, or when the relocated PostgreSQL
+# suite under integration/postgres stops existing or building.
+#
+# Both halves are needed. Go has no optional dependencies, so a test-only import
+# in the root module is a dependency every consumer resolves — that is how pgx
+# and six indirects came to be required by a reactive-signals library. But an
+# emptiness check ALONE is satisfied by deleting the suite, which is the worse
+# regression, so the guard also pins which tests each module must declare.
+#
+# It does not run them. `test-postgres-projection-barrier` above boots a real
+# PostgreSQL and runs BOTH modules; a deleted test cannot fail there, which is
+# exactly the gap this target closes.
+module-dependency-check:
+	./scripts/check-module-dependencies.sh
 
 # CI-reachability guard (#lzcheckcireachguard). Fails when a target above runs a
 # gate no CI workflow step reaches — the drift that hid #lzinteroppeerci in every

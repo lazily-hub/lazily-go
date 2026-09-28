@@ -1,4 +1,4 @@
-package lazily
+package postgres_test
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
+	lazily "github.com/lazily-hub/lazily-go"
 )
 
 type projectionRow struct {
@@ -19,7 +19,7 @@ type projectionRow struct {
 	Value string
 }
 
-var projectionLocks = []PostgresProjectionLock{
+var projectionLocks = []lazily.PostgresProjectionLock{
 	{Namespace: 1701, Key: 2},
 	{Namespace: 1701, Key: 1},
 }
@@ -63,9 +63,9 @@ func resetProjectionDatabase(t *testing.T, db *sql.DB) {
 	}
 }
 
-func projectionBarrier(t *testing.T, db *sql.DB, timeout time.Duration) *PostgresProjectionBarrier {
+func projectionBarrier(t *testing.T, db *sql.DB, timeout time.Duration) *lazily.PostgresProjectionBarrier {
 	t.Helper()
-	barrier, err := NewPostgresProjectionBarrier(db, PostgresProjectionBarrierOptions{
+	barrier, err := lazily.NewPostgresProjectionBarrier(db, lazily.PostgresProjectionBarrierOptions{
 		LockTimeout: timeout,
 		MaxAttempts: 4,
 	})
@@ -75,7 +75,7 @@ func projectionBarrier(t *testing.T, db *sql.DB, timeout time.Duration) *Postgre
 	return barrier
 }
 
-func applyProjectionRow(ctx context.Context, barrier *PostgresProjectionBarrier, row projectionRow) error {
+func applyProjectionRow(ctx context.Context, barrier *lazily.PostgresProjectionBarrier, row projectionRow) error {
 	return barrier.ApplySourceWrite(ctx, projectionLocks, func(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx,
 			"INSERT INTO lazily_projection_source (item_id, item_value) VALUES ($1, $2)",
@@ -162,7 +162,7 @@ func TestPostgresProjectionBarrierTwoConnectionMultiHostNoAcceptedWriteLost(t *t
 	releaseRebuild := make(chan struct{})
 	rebuildDone := make(chan error, 1)
 	go func() {
-		rebuildDone <- MaintainPostgresProjection(
+		rebuildDone <- lazily.MaintainPostgresProjection(
 			context.Background(),
 			rebuilder,
 			projectionLocks,
@@ -233,7 +233,7 @@ func TestPostgresProjectionBarrierBoundsWaitAndHonorsCancellation(t *testing.T) 
 
 	timed := projectionBarrier(t, waiterDB, 40*time.Millisecond)
 	err := timed.ApplySourceWrite(t.Context(), projectionLocks, func(context.Context, *sql.Tx) error { return nil })
-	if !errors.Is(err, ErrPostgresProjectionBarrierTimeout) {
+	if !errors.Is(err, lazily.ErrPostgresProjectionBarrierTimeout) {
 		t.Fatalf("bounded lock wait error = %v", err)
 	}
 

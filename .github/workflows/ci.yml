@@ -206,6 +206,9 @@ jobs:
       - name: PostgreSQL projection-maintenance barrier
         run: ./scripts/test-postgres-projection-barrier.sh
 
+      - name: Published module dependency floor (#lzgooptionalpgx)
+        run: ./scripts/check-module-dependencies.sh
+
       - name: Assertion observation ordering (#lzassertordering)
         run: python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .
 

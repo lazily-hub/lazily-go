@@ -6,7 +6,28 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+### Removed
+
+- The published module graph no longer requires anything. `github.com/jackc/pgx/v5`
+  and its six indirect requirements (`pgpassfile`, `pgservicefile`, `puddle`,
+  `golang.org/x/crypto`, `x/sync`, `x/text`) were in the root `require` block for
+  one integration suite: pgx was imported by a single test file and by zero
+  non-test files, and Go has no optional dependencies, so every consumer of this
+  reactive-signals library resolved a PostgreSQL driver. That suite now lives in
+  its own module under `integration/postgres`, which no consumer reads
+  (`#lzgooptionalpgx`).
+
+  `make module-dependency-check` holds the line, and holds both halves of it: the
+  root `require` block must stay empty AND the relocated suite must still exist
+  and build, because deleting the suite would satisfy the first check perfectly.
+
 ### Added
+
+- `ExpectedSimProjectionMaintenanceOutcome` reports the outcome a
+  projection-maintenance action must produce. It was unexported, which left
+  `(*SimConsumerTestkit).RunProjectionMaintenance` — exported — impossible to
+  implement an adapter for from outside the package, since the testkit compares
+  every adapter's applied outcome against this oracle (`#lzgooptionalpgx`).
 
 - Machine-checkable `ConcurrencyScope` markers across contexts, queue families,
   latest-durable projections, and the PostgreSQL projection barrier, with

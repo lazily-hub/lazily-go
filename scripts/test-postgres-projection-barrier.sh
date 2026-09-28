@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# PostgreSQL projection-maintenance barrier suite (#lzprojectionbarrier).
+#
+# Two modules, on purpose (#lzgooptionalpgx). The integration tests need a real
+# driver, and Go has no optional dependencies, so they live in their own module
+# under integration/postgres and the root module's `require` block stays empty.
+# `go test ./...` does NOT descend into a nested module, so running the root
+# alone would silently stop exercising every test that needs a database — which
+# is exactly the regression scripts/check-module-dependencies.sh refuses.
+#
+# The root leg still runs: two tests matching this name pattern are pure unit
+# tests that never open a connection, and they stay in the root package.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+run_suites() {
+	go test -count=1 -run '^(TestPostgresProjectionBarrier|TestSimProjectionMaintenancePostgres)' "$repo_root"
+	(cd "$repo_root/integration/postgres" && go test -count=1 ./...)
+}
+
 if [[ -n "${LAZILY_POSTGRES_URL:-}" ]]; then
-	go test -count=1 -run '^(TestPostgresProjectionBarrier|TestSimProjectionMaintenancePostgres)' .
+	run_suites
 	exit
 fi
 
@@ -39,4 +57,4 @@ initdb -D "$data_dir" -A trust -U postgres --no-locale >/dev/null
 pg_ctl -D "$data_dir" -l "$log_file" -o "-F -h 127.0.0.1 -k $test_root -p $port" start >/dev/null
 export LAZILY_POSTGRES_URL="postgresql://postgres@127.0.0.1:$port/postgres"
 
-go test -count=1 -run '^(TestPostgresProjectionBarrier|TestSimProjectionMaintenancePostgres)' .
+run_suites

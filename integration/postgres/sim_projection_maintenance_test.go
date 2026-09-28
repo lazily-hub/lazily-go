@@ -1,4 +1,4 @@
-package lazily
+package postgres_test
 
 import (
 	"context"
@@ -10,9 +10,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	lazily "github.com/lazily-hub/lazily-go"
 )
 
-var simProjectionLocks = []PostgresProjectionLock{{Namespace: 1733, Key: 2}, {Namespace: 1733, Key: 1}}
+var simProjectionLocks = []lazily.PostgresProjectionLock{{Namespace: 1733, Key: 2}, {Namespace: 1733, Key: 1}}
 
 var errSimProjectionCrashBeforeCommit = errors.New("synthetic crash before commit")
 
@@ -20,8 +22,8 @@ type postgresProjectionCorpus struct {
 	url           string
 	db            *sql.DB
 	peer          *sql.DB
-	barrier       *PostgresProjectionBarrier
-	peerBarrier   *PostgresProjectionBarrier
+	barrier       *lazily.PostgresProjectionBarrier
+	peerBarrier   *lazily.PostgresProjectionBarrier
 	retryAttempts atomic.Int32
 }
 
@@ -59,11 +61,11 @@ func newPostgresProjectionCorpus(t *testing.T) *postgresProjectionCorpus {
 func (corpus *postgresProjectionCorpus) rebuildBarriers(t *testing.T) {
 	t.Helper()
 	var err error
-	corpus.barrier, err = NewPostgresProjectionBarrier(corpus.db, PostgresProjectionBarrierOptions{LockTimeout: 2 * time.Second, MaxAttempts: 4})
+	corpus.barrier, err = lazily.NewPostgresProjectionBarrier(corpus.db, lazily.PostgresProjectionBarrierOptions{LockTimeout: 2 * time.Second, MaxAttempts: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
-	corpus.peerBarrier, err = NewPostgresProjectionBarrier(corpus.peer, PostgresProjectionBarrierOptions{LockTimeout: 2 * time.Second, MaxAttempts: 4})
+	corpus.peerBarrier, err = lazily.NewPostgresProjectionBarrier(corpus.peer, lazily.PostgresProjectionBarrierOptions{LockTimeout: 2 * time.Second, MaxAttempts: 4})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +95,7 @@ func (corpus *postgresProjectionCorpus) reset(ctx context.Context) error {
 
 func scanMaterializedProjectionHistory(ctx context.Context, queryer interface {
 	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}) ([]MaterializedProjectionEvent, error) {
+}) ([]lazily.MaterializedProjectionEvent, error) {
 	rows, err := queryer.QueryContext(ctx, `
 		SELECT event_id, event_kind, item_key, item_value
 		FROM lazily_sim_projection_event ORDER BY ordinal
@@ -102,14 +104,14 @@ func scanMaterializedProjectionHistory(ctx context.Context, queryer interface {
 		return nil, err
 	}
 	defer rows.Close()
-	var history []MaterializedProjectionEvent
+	var history []lazily.MaterializedProjectionEvent
 	for rows.Next() {
-		var event MaterializedProjectionEvent
+		var event lazily.MaterializedProjectionEvent
 		var kind string
 		if err := rows.Scan(&event.ID, &kind, &event.Key, &event.Value); err != nil {
 			return nil, err
 		}
-		event.Kind = MaterializedProjectionEventKind(kind)
+		event.Kind = lazily.MaterializedProjectionEventKind(kind)
 		history = append(history, event)
 	}
 	return history, rows.Err()
@@ -140,10 +142,10 @@ func scanAndReduceMaterializedProjection(ctx context.Context, tx *sql.Tx) (map[s
 	if err != nil {
 		return nil, err
 	}
-	return ReduceMaterializedProjectionHistory(history)
+	return lazily.ReduceMaterializedProjectionHistory(history)
 }
 
-func appendMaterializedProjectionEvent(ctx context.Context, tx *sql.Tx, event MaterializedProjectionEvent) error {
+func appendMaterializedProjectionEvent(ctx context.Context, tx *sql.Tx, event lazily.MaterializedProjectionEvent) error {
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO lazily_sim_projection_event (event_id, event_kind, item_key, item_value)
 		VALUES ($1, $2, $3, $4)
@@ -157,7 +159,7 @@ func appendMaterializedProjectionEvent(ctx context.Context, tx *sql.Tx, event Ma
 	return replaceMaterializedProjection(ctx, tx, projection)
 }
 
-func (corpus *postgresProjectionCorpus) applyEvent(ctx context.Context, barrier *PostgresProjectionBarrier, event MaterializedProjectionEvent, attempts *atomic.Int32) error {
+func (corpus *postgresProjectionCorpus) applyEvent(ctx context.Context, barrier *lazily.PostgresProjectionBarrier, event lazily.MaterializedProjectionEvent, attempts *atomic.Int32) error {
 	return barrier.ApplySourceWrite(ctx, simProjectionLocks, func(ctx context.Context, tx *sql.Tx) error {
 		if attempts != nil {
 			attempts.Add(1)
@@ -166,8 +168,8 @@ func (corpus *postgresProjectionCorpus) applyEvent(ctx context.Context, barrier 
 	})
 }
 
-func (corpus *postgresProjectionCorpus) rebuild(ctx context.Context, barrier *PostgresProjectionBarrier) error {
-	return MaintainPostgresProjection(ctx, barrier, simProjectionLocks, scanAndReduceMaterializedProjection, replaceMaterializedProjection)
+func (corpus *postgresProjectionCorpus) rebuild(ctx context.Context, barrier *lazily.PostgresProjectionBarrier) error {
+	return lazily.MaintainPostgresProjection(ctx, barrier, simProjectionLocks, scanAndReduceMaterializedProjection, replaceMaterializedProjection)
 }
 
 func (corpus *postgresProjectionCorpus) holdBarrier(ctx context.Context) (<-chan struct{}, chan<- struct{}, <-chan error) {
@@ -188,12 +190,12 @@ func (corpus *postgresProjectionCorpus) holdBarrier(ctx context.Context) (<-chan
 	return locked, release, done
 }
 
-func (corpus *postgresProjectionCorpus) applyConcurrentRebuild(ctx context.Context, event MaterializedProjectionEvent) error {
+func (corpus *postgresProjectionCorpus) applyConcurrentRebuild(ctx context.Context, event lazily.MaterializedProjectionEvent) error {
 	scanned := make(chan struct{})
 	release := make(chan struct{})
 	rebuildDone := make(chan error, 1)
 	go func() {
-		rebuildDone <- MaintainPostgresProjection(ctx, corpus.barrier, simProjectionLocks,
+		rebuildDone <- lazily.MaintainPostgresProjection(ctx, corpus.barrier, simProjectionLocks,
 			func(ctx context.Context, tx *sql.Tx) (map[string]string, error) {
 				projection, err := scanAndReduceMaterializedProjection(ctx, tx)
 				if err != nil {
@@ -234,7 +236,7 @@ func (corpus *postgresProjectionCorpus) applyConcurrentRebuild(ctx context.Conte
 	return <-writeDone
 }
 
-func (corpus *postgresProjectionCorpus) applyRejectedWait(ctx context.Context, action SimProjectionMaintenanceAction) error {
+func (corpus *postgresProjectionCorpus) applyRejectedWait(ctx context.Context, action lazily.SimProjectionMaintenanceAction) error {
 	locked, release, holderDone := corpus.holdBarrier(ctx)
 	select {
 	case <-locked:
@@ -247,13 +249,13 @@ func (corpus *postgresProjectionCorpus) applyRejectedWait(ctx context.Context, a
 		close(release)
 		<-holderDone
 	}()
-	if action.Kind == SimProjectionMaintenanceLockTimeout {
-		barrier, err := NewPostgresProjectionBarrier(corpus.db, PostgresProjectionBarrierOptions{LockTimeout: 35 * time.Millisecond, MaxAttempts: 1})
+	if action.Kind == lazily.SimProjectionMaintenanceLockTimeout {
+		barrier, err := lazily.NewPostgresProjectionBarrier(corpus.db, lazily.PostgresProjectionBarrierOptions{LockTimeout: 35 * time.Millisecond, MaxAttempts: 1})
 		if err != nil {
 			return err
 		}
 		err = corpus.applyEvent(ctx, barrier, action.Event, nil)
-		if !errors.Is(err, ErrPostgresProjectionBarrierTimeout) {
+		if !errors.Is(err, lazily.ErrPostgresProjectionBarrierTimeout) {
 			return errors.New("bounded lock wait did not return the timeout sentinel")
 		}
 		return nil
@@ -306,7 +308,7 @@ func (corpus *postgresProjectionCorpus) reconnect(t *testing.T) error {
 		return err
 	}
 	corpus.db = db
-	barrier, err := NewPostgresProjectionBarrier(db, PostgresProjectionBarrierOptions{LockTimeout: 2 * time.Second, MaxAttempts: 4})
+	barrier, err := lazily.NewPostgresProjectionBarrier(db, lazily.PostgresProjectionBarrierOptions{LockTimeout: 2 * time.Second, MaxAttempts: 4})
 	if err != nil {
 		return err
 	}
@@ -314,21 +316,21 @@ func (corpus *postgresProjectionCorpus) reconnect(t *testing.T) error {
 	return nil
 }
 
-func (corpus *postgresProjectionCorpus) apply(t *testing.T, ctx context.Context, action SimProjectionMaintenanceAction) (SimProjectionMaintenanceOutcome, error) {
-	outcome, err := expectedSimProjectionOutcome(action)
+func (corpus *postgresProjectionCorpus) apply(t *testing.T, ctx context.Context, action lazily.SimProjectionMaintenanceAction) (lazily.SimProjectionMaintenanceOutcome, error) {
+	outcome, err := lazily.ExpectedSimProjectionMaintenanceOutcome(action)
 	if err != nil {
 		return outcome, err
 	}
 	switch action.Kind {
-	case SimProjectionMaintenanceEvent:
+	case lazily.SimProjectionMaintenanceEvent:
 		err = corpus.applyEvent(ctx, corpus.barrier, action.Event, nil)
-	case SimProjectionMaintenanceFullRebuild:
+	case lazily.SimProjectionMaintenanceFullRebuild:
 		err = corpus.rebuild(ctx, corpus.barrier)
-	case SimProjectionMaintenanceConcurrentRebuild:
+	case lazily.SimProjectionMaintenanceConcurrentRebuild:
 		err = corpus.applyConcurrentRebuild(ctx, action.Event)
-	case SimProjectionMaintenanceLockTimeout, SimProjectionMaintenanceCancellation:
+	case lazily.SimProjectionMaintenanceLockTimeout, lazily.SimProjectionMaintenanceCancellation:
 		err = corpus.applyRejectedWait(ctx, action)
-	case SimProjectionMaintenanceRetry:
+	case lazily.SimProjectionMaintenanceRetry:
 		if err = corpus.installRetryTrigger(ctx); err == nil {
 			err = corpus.applyEvent(ctx, corpus.barrier, action.Event, &corpus.retryAttempts)
 		}
@@ -336,7 +338,7 @@ func (corpus *postgresProjectionCorpus) apply(t *testing.T, ctx context.Context,
 		if err == nil {
 			err = removeErr
 		}
-	case SimProjectionMaintenanceCrashBeforeCommit:
+	case lazily.SimProjectionMaintenanceCrashBeforeCommit:
 		err = corpus.barrier.ApplySourceWrite(ctx, simProjectionLocks, func(ctx context.Context, tx *sql.Tx) error {
 			if err := appendMaterializedProjectionEvent(ctx, tx, action.Event); err != nil {
 				return err
@@ -346,7 +348,7 @@ func (corpus *postgresProjectionCorpus) apply(t *testing.T, ctx context.Context,
 		if errors.Is(err, errSimProjectionCrashBeforeCommit) {
 			err = nil
 		}
-	case SimProjectionMaintenanceCrashAfterCommit:
+	case lazily.SimProjectionMaintenanceCrashAfterCommit:
 		if err = corpus.applyEvent(ctx, corpus.barrier, action.Event, nil); err == nil {
 			err = corpus.reconnect(t)
 		}
@@ -354,60 +356,60 @@ func (corpus *postgresProjectionCorpus) apply(t *testing.T, ctx context.Context,
 	return outcome, err
 }
 
-func (corpus *postgresProjectionCorpus) observe(ctx context.Context) (SimProjectionMaintenanceObservation, error) {
+func (corpus *postgresProjectionCorpus) observe(ctx context.Context) (lazily.SimProjectionMaintenanceObservation, error) {
 	history, err := scanMaterializedProjectionHistory(ctx, corpus.db)
 	if err != nil {
-		return SimProjectionMaintenanceObservation{}, err
+		return lazily.SimProjectionMaintenanceObservation{}, err
 	}
 	rows, err := corpus.db.QueryContext(ctx, "SELECT item_key, item_value FROM lazily_sim_projection_view ORDER BY item_key")
 	if err != nil {
-		return SimProjectionMaintenanceObservation{}, err
+		return lazily.SimProjectionMaintenanceObservation{}, err
 	}
 	defer rows.Close()
 	projection := map[string]string{}
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
-			return SimProjectionMaintenanceObservation{}, err
+			return lazily.SimProjectionMaintenanceObservation{}, err
 		}
 		projection[key] = value
 	}
-	return SimProjectionMaintenanceObservation{History: history, Projection: projection}, rows.Err()
+	return lazily.SimProjectionMaintenanceObservation{History: history, Projection: projection}, rows.Err()
 }
 
 func TestSimProjectionMaintenancePostgresRaceCorpus(t *testing.T) {
 	corpus := newPostgresProjectionCorpus(t)
-	memory, _ := newSimConsumerTestAdapter("memory", SimConsumerAdapterInMemory, 0)
-	postgres, _ := newSimConsumerTestAdapter("postgres.race", SimConsumerAdapterPostgres, 0)
+	memory := newProjectionAdapter("memory", lazily.SimConsumerAdapterInMemory)
+	postgres := newProjectionAdapter("postgres.race", lazily.SimConsumerAdapterPostgres)
 	memory.ProductionReducerID, memory.ReducerID = "materialized.projection.reducer.v1", "materialized.projection.reducer.v1"
 	postgres.ProductionReducerID, postgres.ReducerID = memory.ProductionReducerID, memory.ReducerID
-	memory.ProjectionMaintenance, _ = newMemoryProjectionPort()
+	memory.ProjectionMaintenance = newMemoryProjectionPort()
 	postgres.Probe = func() error { return corpus.db.PingContext(t.Context()) }
-	postgres.ProjectionMaintenance = &SimProjectionMaintenanceAdapter{
+	postgres.ProjectionMaintenance = &lazily.SimProjectionMaintenanceAdapter{
 		Reset: corpus.reset,
-		Apply: func(ctx context.Context, action SimProjectionMaintenanceAction) (SimProjectionMaintenanceOutcome, error) {
+		Apply: func(ctx context.Context, action lazily.SimProjectionMaintenanceAction) (lazily.SimProjectionMaintenanceOutcome, error) {
 			return corpus.apply(t, ctx, action)
 		},
 		Observe: corpus.observe,
 	}
-	kit, err := NewSimConsumerTestkit(SimConsumerTestkitSpec{
-		SimulationAdapterID: "memory", RequiredRealAdapters: []SimConsumerAdapterKind{SimConsumerAdapterPostgres},
-		Adapters: []SimConsumerAdapter{postgres, memory},
+	kit, err := lazily.NewSimConsumerTestkit(lazily.SimConsumerTestkitSpec{
+		SimulationAdapterID: "memory", RequiredRealAdapters: []lazily.SimConsumerAdapterKind{lazily.SimConsumerAdapterPostgres},
+		Adapters: []lazily.SimConsumerAdapter{postgres, memory},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	scenario := projectionScenario(
-		projectionGeneratedAction("action.append.alpha", SimProjectionMaintenanceEvent, MaterializedProjectionEvent{ID: "event.append.alpha", Kind: MaterializedProjectionAppend, Key: "item.alpha", Value: "one"}, ""),
-		projectionGeneratedAction("action.rebuild.first", SimProjectionMaintenanceFullRebuild, MaterializedProjectionEvent{}, ""),
-		projectionGeneratedAction("action.amend.alpha", SimProjectionMaintenanceEvent, MaterializedProjectionEvent{ID: "event.amend.alpha", Kind: MaterializedProjectionAmend, Key: "item.alpha", Value: "two"}, "action.append.alpha"),
-		projectionGeneratedAction("action.concurrent.beta", SimProjectionMaintenanceConcurrentRebuild, MaterializedProjectionEvent{ID: "event.append.beta", Kind: MaterializedProjectionAppend, Key: "item.beta", Value: "other"}, ""),
-		projectionGeneratedAction("action.timeout.gamma", SimProjectionMaintenanceLockTimeout, MaterializedProjectionEvent{ID: "event.timeout.gamma", Kind: MaterializedProjectionAppend, Key: "item.gamma", Value: "lost"}, ""),
-		projectionGeneratedAction("action.retry.gamma", SimProjectionMaintenanceRetry, MaterializedProjectionEvent{ID: "event.append.gamma", Kind: MaterializedProjectionAppend, Key: "item.gamma", Value: "three"}, ""),
-		projectionGeneratedAction("action.cancel.gamma", SimProjectionMaintenanceCancellation, MaterializedProjectionEvent{ID: "event.cancel.gamma", Kind: MaterializedProjectionAmend, Key: "item.gamma", Value: "lost"}, "action.retry.gamma"),
-		projectionGeneratedAction("action.crash.before", SimProjectionMaintenanceCrashBeforeCommit, MaterializedProjectionEvent{ID: "event.crash.before", Kind: MaterializedProjectionRetract, Key: "item.beta"}, "action.concurrent.beta"),
-		projectionGeneratedAction("action.crash.after", SimProjectionMaintenanceCrashAfterCommit, MaterializedProjectionEvent{ID: "event.retract.beta", Kind: MaterializedProjectionRetract, Key: "item.beta"}, "action.concurrent.beta"),
-		projectionGeneratedAction("action.rebuild.final", SimProjectionMaintenanceFullRebuild, MaterializedProjectionEvent{}, ""),
+		projectionGeneratedAction("action.append.alpha", lazily.SimProjectionMaintenanceEvent, lazily.MaterializedProjectionEvent{ID: "event.append.alpha", Kind: lazily.MaterializedProjectionAppend, Key: "item.alpha", Value: "one"}, ""),
+		projectionGeneratedAction("action.rebuild.first", lazily.SimProjectionMaintenanceFullRebuild, lazily.MaterializedProjectionEvent{}, ""),
+		projectionGeneratedAction("action.amend.alpha", lazily.SimProjectionMaintenanceEvent, lazily.MaterializedProjectionEvent{ID: "event.amend.alpha", Kind: lazily.MaterializedProjectionAmend, Key: "item.alpha", Value: "two"}, "action.append.alpha"),
+		projectionGeneratedAction("action.concurrent.beta", lazily.SimProjectionMaintenanceConcurrentRebuild, lazily.MaterializedProjectionEvent{ID: "event.append.beta", Kind: lazily.MaterializedProjectionAppend, Key: "item.beta", Value: "other"}, ""),
+		projectionGeneratedAction("action.timeout.gamma", lazily.SimProjectionMaintenanceLockTimeout, lazily.MaterializedProjectionEvent{ID: "event.timeout.gamma", Kind: lazily.MaterializedProjectionAppend, Key: "item.gamma", Value: "lost"}, ""),
+		projectionGeneratedAction("action.retry.gamma", lazily.SimProjectionMaintenanceRetry, lazily.MaterializedProjectionEvent{ID: "event.append.gamma", Kind: lazily.MaterializedProjectionAppend, Key: "item.gamma", Value: "three"}, ""),
+		projectionGeneratedAction("action.cancel.gamma", lazily.SimProjectionMaintenanceCancellation, lazily.MaterializedProjectionEvent{ID: "event.cancel.gamma", Kind: lazily.MaterializedProjectionAmend, Key: "item.gamma", Value: "lost"}, "action.retry.gamma"),
+		projectionGeneratedAction("action.crash.before", lazily.SimProjectionMaintenanceCrashBeforeCommit, lazily.MaterializedProjectionEvent{ID: "event.crash.before", Kind: lazily.MaterializedProjectionRetract, Key: "item.beta"}, "action.concurrent.beta"),
+		projectionGeneratedAction("action.crash.after", lazily.SimProjectionMaintenanceCrashAfterCommit, lazily.MaterializedProjectionEvent{ID: "event.retract.beta", Kind: lazily.MaterializedProjectionRetract, Key: "item.beta"}, "action.concurrent.beta"),
+		projectionGeneratedAction("action.rebuild.final", lazily.SimProjectionMaintenanceFullRebuild, lazily.MaterializedProjectionEvent{}, ""),
 	)
 	result, err := kit.RunProjectionMaintenance(t.Context(), scenario)
 	if err != nil {

@@ -242,6 +242,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"ci-reach"                 # this guard, so CI has to reach it too
 	"conformance-coverage"     # rungs 1+4 (#lzguardsnotinci); pulls in `test`
 	"fmt-check"                # gofmt
+	"module-dependency-check"  # published graph requires nothing (#lzgooptionalpgx)
 	"race"                     # CRDT reads are graph WRITES (v0.23.2 data race)
 	"test"                     # go test -count=1 ./... + the evidence recorders
 	"test-interop-peer"        # cross-binding wire compatibility (#lzinteroppeerci)
@@ -379,6 +380,7 @@ EXPECTED_GATE_STEPS=(
 	"ci-reach|CI-reachability guard (#lzcheckcireachguard)"
 	"conformance-coverage|Conformance coverage + scenario ledger guard (#lzguardsnotinci)"
 	"fmt-check|gofmt"
+	"module-dependency-check|Published module dependency floor (#lzgooptionalpgx)"
 	"race|race (cgo)"
 	"test|test"
 	"test-interop-peer|Interop peer self-check (#lzinteroppeerci)"
