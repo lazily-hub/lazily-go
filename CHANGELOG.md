@@ -6,6 +6,16 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+### Changed
+
+- Receipt wire decoding is strict, as `schemas/receipts.json` requires
+  (`#lzwiremodel2`). `CausalReceiptFromWire`, `CausalReceiptsFromWire` and
+  `json.Unmarshal` into either type now reject an unknown key (including a
+  case variant such as `Reason`, which `encoding/json` used to match) and a
+  missing `reason` or `payload_hash`, which used to decode as nil. Every
+  conforming producer emits both keys, as `null` when absent. The check is
+  generated from the shared wire model.
+
 ### Removed
 
 - The published module graph no longer requires anything. `github.com/jackc/pgx/v5`

@@ -87,3 +87,38 @@ func TestReceiptGenerationMatchesDoesNotWrap(t *testing.T) {
 		t.Fatalf("saturating conversion wrapped to %d", got)
 	}
 }
+
+// TestGeneratedReceiptDecodeIsStrict: the schema closes every record and keeps
+// `reason` / `payload_hash` on the wire even when null (#lzwiremodel2), so a
+// missing key, an unknown key, or a case-variant key is rejected instead of
+// defaulting to the zero value or being matched case-insensitively.
+func TestGeneratedReceiptDecodeIsStrict(t *testing.T) {
+	const full = `"receipt_id":"r","causation_id":"c","observer":"o","generation":1,"outcome":"applied"`
+	if _, err := CausalReceiptFromWire([]byte(`{` + full + `,"reason":null,"payload_hash":null}`)); err != nil {
+		t.Fatalf("canonical receipt: %v", err)
+	}
+	cases := map[string]string{
+		`{` + full + `,"payload_hash":null}`:                             `missing field "reason"`,
+		`{` + full + `,"reason":null}`:                                   `missing field "payload_hash"`,
+		`{` + full + `,"reason":null,"payload_hash":null,"extra":1}`:     `unknown field "extra"`,
+		`{` + full + `,"reason":null,"payload_hash":null,"Reason":null}`: `unknown field "Reason"`,
+		`null`: `expected an object, got null`,
+	}
+	for wire, want := range cases {
+		_, err := CausalReceiptFromWire([]byte(wire))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("CausalReceiptFromWire(%s) error = %v, want %q", wire, err, want)
+		}
+	}
+	batches := map[string]string{
+		`{}`:                     `missing field "receipts"`,
+		`{"receipts":[],"x":0}`:  `unknown field "x"`,
+		`{"receipts":[{"a":1}]}`: `CausalReceipt: missing field "receipt_id"`,
+	}
+	for wire, want := range batches {
+		_, err := CausalReceiptsFromWire([]byte(wire))
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("CausalReceiptsFromWire(%s) error = %v, want %q", wire, err, want)
+		}
+	}
+}

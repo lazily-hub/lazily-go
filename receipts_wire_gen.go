@@ -8,7 +8,36 @@ package lazily
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 )
+
+// receiptsCheckWireFields rejects a record whose wire keys are not exactly its
+// declared fields: a closed record has no unknown keys, and a required field
+// is present even when its value is null.
+func receiptsCheckWireFields(name string, data []byte, fields []string) error {
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(data, &keys); err != nil {
+		return err
+	}
+	if keys == nil {
+		return fmt.Errorf("%s: expected an object, got null", name)
+	}
+	for _, field := range fields {
+		if _, ok := keys[field]; !ok {
+			return fmt.Errorf("%s: missing field %q", name, field)
+		}
+		delete(keys, field)
+	}
+	if len(keys) > 0 {
+		unknown := make([]string, 0, len(keys))
+		for key := range keys {
+			unknown = append(unknown, key)
+		}
+		sort.Strings(unknown)
+		return fmt.Errorf("%s: unknown field %q", name, unknown[0])
+	}
+	return nil
+}
 
 // ReceiptOutcome: Outcome vocabulary. observed/accepted are non-terminal;
 // applied/rejected are terminal.
@@ -73,6 +102,20 @@ type CausalReceipt struct {
 	PayloadHash *string `json:"payload_hash"`
 }
 
+// UnmarshalJSON decodes CausalReceipt, rejecting unknown and missing fields.
+func (r *CausalReceipt) UnmarshalJSON(data []byte) error {
+	if err := receiptsCheckWireFields("CausalReceipt", data, []string{"receipt_id", "causation_id", "observer", "generation", "outcome", "reason", "payload_hash"}); err != nil {
+		return err
+	}
+	type wire CausalReceipt
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*r = CausalReceipt(w)
+	return nil
+}
+
 // CausalReceiptFromWire decodes a CausalReceipt from its JSON wire form.
 func CausalReceiptFromWire(data []byte) (CausalReceipt, error) {
 	var r CausalReceipt
@@ -97,6 +140,20 @@ func (r CausalReceipts) MarshalJSON() ([]byte, error) {
 		w.Receipts = []CausalReceipt{}
 	}
 	return json.Marshal(w)
+}
+
+// UnmarshalJSON decodes CausalReceipts, rejecting unknown and missing fields.
+func (r *CausalReceipts) UnmarshalJSON(data []byte) error {
+	if err := receiptsCheckWireFields("CausalReceipts", data, []string{"receipts"}); err != nil {
+		return err
+	}
+	type wire CausalReceipts
+	var w wire
+	if err := json.Unmarshal(data, &w); err != nil {
+		return err
+	}
+	*r = CausalReceipts(w)
+	return nil
 }
 
 // CausalReceiptsFromWire decodes a CausalReceipts from its JSON wire form.
