@@ -41,6 +41,7 @@ package lazily
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 )
 
@@ -743,6 +744,22 @@ func (p *CommandProjection) Cancel(c CommandCancel) CommandApplyStatus {
 	return CommandStatusRecorded{}
 }
 
+// receiptGenerationMatches compares a command entry's generation with a
+// receipt's unsigned wire generation (receipts.json pins it non-negative)
+// without wrapping either side.
+func receiptGenerationMatches(entry int64, receipt uint64) bool {
+	return entry >= 0 && uint64(entry) == receipt
+}
+
+// receiptGenerationInt64 reports a receipt generation in the command plane's
+// int64 status vocabulary, saturating instead of wrapping above MaxInt64.
+func receiptGenerationInt64(g uint64) int64 {
+	if g > math.MaxInt64 {
+		return math.MaxInt64
+	}
+	return int64(g)
+}
+
 // ObserveReceipt folds a causal receipt. This is the sole terminal authority:
 // a terminal receipt (applied/rejected) flips the command to terminal. A
 // differing terminal outcome at the same generation is a conflict (fail-closed).
@@ -754,8 +771,8 @@ func (p *CommandProjection) ObserveReceipt(r CausalReceipt) CommandApplyStatus {
 	if !ok {
 		return CommandStatusUnknown{}
 	}
-	if r.Generation != entry.Generation {
-		return CommandStatusStaleGeneration{Expected: entry.Generation, Actual: r.Generation}
+	if !receiptGenerationMatches(entry.Generation, r.Generation) {
+		return CommandStatusStaleGeneration{Expected: entry.Generation, Actual: receiptGenerationInt64(r.Generation)}
 	}
 	if !r.IsTerminal() {
 		p.seenReceiptIds[r.ReceiptId] = struct{}{}

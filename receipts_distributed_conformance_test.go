@@ -58,7 +58,7 @@ func TestReceiptsConformance(t *testing.T) {
 		ProtocolVersion int `json:"protocol_version"`
 		Assertions      struct {
 			ReceiptCount        int      `json:"receipt_count"`
-			CurrentGeneration   int64    `json:"current_generation"`
+			CurrentGeneration   uint64   `json:"current_generation"`
 			CausationId         string   `json:"causation_id"`
 			TerminalOutcome     string   `json:"terminal_outcome"`
 			StaleReceiptIds     []string `json:"stale_receipt_ids"`
