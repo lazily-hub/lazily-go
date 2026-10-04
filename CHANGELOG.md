@@ -18,6 +18,17 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ### Changed
 
+- `DeltaOp` (all ten variants), `IpcValue`, `NodeState` and `Delta` are
+  generated from lazily-spec `schemas/delta.json` into `delta_wire_gen.go`
+  (`#lzwiremodel6`). Type names, fields and `unmarshalDeltaOp` /
+  `unmarshalIpcValue` / `unmarshalNodeState` are unchanged; `TargetReadable`,
+  `IpcValueOf`, `DeltaNext`, `ApplyStatus` and `FilterReadable` stay
+  hand-written in `ipc.go`, and `NodeId` / `Epoch` stay `int64`.
+- Delta decoding is strict. An unknown key, a missing field (a missing `node`
+  used to decode as 0), a missing or `null` `ops` list, and a negative id or
+  epoch are refused; each used to decode. Encoding a negative id or epoch is
+  now an error. An explicit `key: null` and `backend: null` still read as
+  absent.
 - Receipt wire decoding is strict, as `schemas/receipts.json` requires
   (`#lzwiremodel2`). `CausalReceiptFromWire`, `CausalReceiptsFromWire` and
   `json.Unmarshal` into either type now reject an unknown key (including a

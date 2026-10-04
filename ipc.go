@@ -345,118 +345,9 @@ func (r ShmBlobRef) String() string {
 // NodeState (protocol.md § NodeState, defs.json#/$defs/NodeState)
 // ---------------------------------------------------------------------------
 
-// NodeState is the body of a NodeSnapshot / NodeAdd. Externally tagged: a
-// single-key object keyed by the PascalCase variant name, except Opaque which
-// is the bare unit string "Opaque".
-type NodeState interface {
-	MarshalJSON() ([]byte, error)
-	isNodeState()
-}
-
-// NodeStatePayload holds concrete serialized value bytes ({"Payload": [u8]}).
-type NodeStatePayload struct {
-	Bytes []byte
-}
-
-func (NodeStatePayload) isNodeState() {}
-
-// MarshalJSON emits {"Payload": [u8]} with bytes as a JSON u8 array (not base64).
-func (p NodeStatePayload) MarshalJSON() ([]byte, error) {
-	return taggedJSON("Payload", bytesWire(p.Bytes))
-}
-
-// NodeStateSharedBlob is a concrete value stored in shared memory
-// ({"SharedBlob": ShmBlobRef}).
-type NodeStateSharedBlob struct {
-	Blob ShmBlobRef
-}
-
-func (NodeStateSharedBlob) isNodeState() {}
-
-func (s NodeStateSharedBlob) MarshalJSON() ([]byte, error) {
-	return taggedJSON("SharedBlob", s.Blob)
-}
-
-// NodeStateOpaque is a visible node whose value cannot be serialized (the bare
-// unit string "Opaque").
-type NodeStateOpaque struct{}
-
-func (NodeStateOpaque) isNodeState() {}
-
-func (NodeStateOpaque) MarshalJSON() ([]byte, error) { return json.Marshal("Opaque") }
-
-func unmarshalNodeState(raw json.RawMessage) (NodeState, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return nil, fmt.Errorf("NodeState must not be empty")
-	}
-	if trimmed[0] == '"' {
-		var s string
-		if err := json.Unmarshal(trimmed, &s); err != nil {
-			return nil, err
-		}
-		if s == "Opaque" {
-			return NodeStateOpaque{}, nil
-		}
-		return nil, fmt.Errorf("unknown NodeState unit variant: %s", s)
-	}
-	tag, body, err := splitTagged(trimmed, "NodeState")
-	if err != nil {
-		return nil, err
-	}
-	switch tag {
-	case "Payload":
-		b, err := parseByteArray(body)
-		if err != nil {
-			return nil, err
-		}
-		return NodeStatePayload{Bytes: b}, nil
-	case "SharedBlob":
-		var blob ShmBlobRef
-		if err := json.Unmarshal(body, &blob); err != nil {
-			return nil, err
-		}
-		return NodeStateSharedBlob{Blob: blob}, nil
-	case "Opaque":
-		return NodeStateOpaque{}, nil
-	default:
-		return nil, fmt.Errorf("unknown NodeState variant: %s", tag)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // IpcValue (protocol.md § IpcValue, defs.json#/$defs/IpcValue)
 // ---------------------------------------------------------------------------
-
-// IpcValue is a DeltaOp / CrdtOp cell payload. Externally tagged:
-// {"Inline": [u8]} or {"SharedBlob": ShmBlobRef}.
-type IpcValue interface {
-	MarshalJSON() ([]byte, error)
-	isIpcValue()
-}
-
-// IpcValueInline is an inline byte-array payload ({"Inline": [u8]}).
-type IpcValueInline struct {
-	Bytes []byte
-}
-
-func (IpcValueInline) isIpcValue() {}
-
-func (v IpcValueInline) MarshalJSON() ([]byte, error) {
-	return taggedJSON("Inline", bytesWire(v.Bytes))
-}
-
-// IpcValueSharedBlob is a payload descriptor into shared memory
-// ({"SharedBlob": ShmBlobRef}).
-type IpcValueSharedBlob struct {
-	Blob ShmBlobRef
-}
-
-func (IpcValueSharedBlob) isIpcValue() {}
-
-func (v IpcValueSharedBlob) MarshalJSON() ([]byte, error) {
-	return taggedJSON("SharedBlob", v.Blob)
-}
 
 // IpcValueOf normalizes an IpcValue, ShmBlobRef, []byte, or []int into an
 // IpcValue (mirrors `IpcValue.of` in the sibling bindings).
@@ -479,29 +370,6 @@ func IpcValueOf(value any) (IpcValue, error) {
 		return IpcValueInline{Bytes: b}, nil
 	default:
 		return nil, fmt.Errorf("cannot coerce %T into an IpcValue", value)
-	}
-}
-
-func unmarshalIpcValue(raw json.RawMessage) (IpcValue, error) {
-	tag, body, err := splitTagged(raw, "IpcValue")
-	if err != nil {
-		return nil, err
-	}
-	switch tag {
-	case "Inline":
-		b, err := parseByteArray(body)
-		if err != nil {
-			return nil, err
-		}
-		return IpcValueInline{Bytes: b}, nil
-	case "SharedBlob":
-		var blob ShmBlobRef
-		if err := json.Unmarshal(body, &blob); err != nil {
-			return nil, err
-		}
-		return IpcValueSharedBlob{Blob: blob}, nil
-	default:
-		return nil, fmt.Errorf("unknown IpcValue variant: %s", tag)
 	}
 }
 
@@ -624,278 +492,44 @@ func (s Snapshot) FilterReadable(permissions *PeerPermissions, peer PeerId) Snap
 // DeltaOp variants (delta.json#/$defs/DeltaOp)
 // ---------------------------------------------------------------------------
 
-// DeltaOp is one incremental operation in a Delta. All variants are externally
-// tagged; DeltaOpNodeAdd carries the optional wire-stable NodeKey.
-type DeltaOp interface {
-	MarshalJSON() ([]byte, error)
-	// TargetReadable reports whether peer may read every node this op names. Ops
-	// targeting an unreadable node are omitted from a permission-filtered delta.
-	TargetReadable(permissions *PeerPermissions, peer PeerId) bool
-	isDeltaOp()
-}
-
-// DeltaOpCellSet is a changed-value cell write, PartialEq-guarded at the source.
-type DeltaOpCellSet struct {
-	Node    NodeId
-	Payload IpcValue
-}
-
-func (DeltaOpCellSet) isDeltaOp() {}
-func (o DeltaOpCellSet) MarshalJSON() ([]byte, error) {
-	return taggedJSON("CellSet", struct {
-		Node    NodeId   `json:"node"`
-		Payload IpcValue `json:"payload"`
-	}{o.Node, o.Payload})
-}
 func (o DeltaOpCellSet) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
 }
 
-// DeltaOpSlotValue signals that a recompute published a new value.
-type DeltaOpSlotValue struct {
-	Node    NodeId
-	Payload IpcValue
-}
-
-func (DeltaOpSlotValue) isDeltaOp() {}
-func (o DeltaOpSlotValue) MarshalJSON() ([]byte, error) {
-	return taggedJSON("SlotValue", struct {
-		Node    NodeId   `json:"node"`
-		Payload IpcValue `json:"payload"`
-	}{o.Node, o.Payload})
-}
 func (o DeltaOpSlotValue) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
 }
 
-// DeltaOpInvalidate marks a node dirtied but not yet recomputed (lazy).
-type DeltaOpInvalidate struct {
-	Node NodeId
-}
-
-func (DeltaOpInvalidate) isDeltaOp() {}
-func (o DeltaOpInvalidate) MarshalJSON() ([]byte, error) {
-	return taggedJSON("Invalidate", nodeBody{o.Node})
-}
 func (o DeltaOpInvalidate) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
 }
 
-// DeltaOpNodeAdd adds a new node (optional wire-stable Key, omitted when nil).
-type DeltaOpNodeAdd struct {
-	Node    NodeId
-	TypeTag string
-	State   NodeState
-	Key     *NodeKey
-}
-
-func (DeltaOpNodeAdd) isDeltaOp() {}
-func (o DeltaOpNodeAdd) MarshalJSON() ([]byte, error) {
-	return taggedJSON("NodeAdd", struct {
-		Node    NodeId    `json:"node"`
-		TypeTag string    `json:"type_tag"`
-		State   NodeState `json:"state"`
-		Key     *NodeKey  `json:"key,omitempty"`
-	}{o.Node, o.TypeTag, o.State, o.Key})
-}
 func (o DeltaOpNodeAdd) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
 }
 
-// DeltaOpNodeRemove removes a node (free-list reuse: Remove then Add).
-type DeltaOpNodeRemove struct {
-	Node NodeId
-}
-
-func (DeltaOpNodeRemove) isDeltaOp() {}
-func (o DeltaOpNodeRemove) MarshalJSON() ([]byte, error) {
-	return taggedJSON("NodeRemove", nodeBody{o.Node})
-}
 func (o DeltaOpNodeRemove) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
 }
 
-// DeltaOpEdgeAdd adds a new dependency edge.
-type DeltaOpEdgeAdd struct {
-	Dependent  NodeId
-	Dependency NodeId
-}
-
-func (DeltaOpEdgeAdd) isDeltaOp() {}
-func (o DeltaOpEdgeAdd) MarshalJSON() ([]byte, error) {
-	return taggedJSON("EdgeAdd", edgeBody{o.Dependent, o.Dependency})
-}
 func (o DeltaOpEdgeAdd) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Dependent) && p.CanRead(peer, o.Dependency)
 }
 
-// DeltaOpEdgeRemove removes a dependency edge.
-type DeltaOpEdgeRemove struct {
-	Dependent  NodeId
-	Dependency NodeId
-}
-
-func (DeltaOpEdgeRemove) isDeltaOp() {}
-func (o DeltaOpEdgeRemove) MarshalJSON() ([]byte, error) {
-	return taggedJSON("EdgeRemove", edgeBody{o.Dependent, o.Dependency})
-}
 func (o DeltaOpEdgeRemove) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Dependent) && p.CanRead(peer, o.Dependency)
 }
 
-// DeltaOpQueuePush appends Payload to the tail of QueueCell Node's op log
-// (protocol.md § QueueCell op-log delta form, #lzdeltaqueueops). Same body
-// shape as CellSet; its payload is spilled/resolved exactly like CellSet's.
-type DeltaOpQueuePush struct {
-	Node    NodeId
-	Payload IpcValue
-}
-
-func (DeltaOpQueuePush) isDeltaOp() {}
-func (o DeltaOpQueuePush) MarshalJSON() ([]byte, error) {
-	return taggedJSON("QueuePush", struct {
-		Node    NodeId   `json:"node"`
-		Payload IpcValue `json:"payload"`
-	}{o.Node, o.Payload})
-}
 func (o DeltaOpQueuePush) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
 }
 
-// DeltaOpQueuePop removes the head of QueueCell Node's op log. Carries no bytes.
-type DeltaOpQueuePop struct {
-	Node NodeId
-}
-
-func (DeltaOpQueuePop) isDeltaOp() {}
-func (o DeltaOpQueuePop) MarshalJSON() ([]byte, error) {
-	return taggedJSON("QueuePop", nodeBody{o.Node})
-}
 func (o DeltaOpQueuePop) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
 }
 
-// DeltaOpQueueClose closes QueueCell Node (idempotent). Carries no bytes.
-type DeltaOpQueueClose struct {
-	Node NodeId
-}
-
-func (DeltaOpQueueClose) isDeltaOp() {}
-func (o DeltaOpQueueClose) MarshalJSON() ([]byte, error) {
-	return taggedJSON("QueueClose", nodeBody{o.Node})
-}
 func (o DeltaOpQueueClose) TargetReadable(p *PeerPermissions, peer PeerId) bool {
 	return p.CanRead(peer, o.Node)
-}
-
-type nodeBody struct {
-	Node NodeId `json:"node"`
-}
-
-type edgeBody struct {
-	Dependent  NodeId `json:"dependent"`
-	Dependency NodeId `json:"dependency"`
-}
-
-func unmarshalDeltaOp(raw json.RawMessage) (DeltaOp, error) {
-	tag, body, err := splitTagged(raw, "DeltaOp")
-	if err != nil {
-		return nil, err
-	}
-	switch tag {
-	case "CellSet":
-		var b struct {
-			Node    NodeId          `json:"node"`
-			Payload json.RawMessage `json:"payload"`
-		}
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		payload, err := unmarshalIpcValue(b.Payload)
-		if err != nil {
-			return nil, err
-		}
-		return DeltaOpCellSet{Node: b.Node, Payload: payload}, nil
-	case "SlotValue":
-		var b struct {
-			Node    NodeId          `json:"node"`
-			Payload json.RawMessage `json:"payload"`
-		}
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		payload, err := unmarshalIpcValue(b.Payload)
-		if err != nil {
-			return nil, err
-		}
-		return DeltaOpSlotValue{Node: b.Node, Payload: payload}, nil
-	case "Invalidate":
-		var b nodeBody
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		return DeltaOpInvalidate{Node: b.Node}, nil
-	case "NodeAdd":
-		var b struct {
-			Node    NodeId          `json:"node"`
-			TypeTag string          `json:"type_tag"`
-			State   json.RawMessage `json:"state"`
-			Key     *NodeKey        `json:"key"`
-		}
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		state, err := unmarshalNodeState(b.State)
-		if err != nil {
-			return nil, err
-		}
-		return DeltaOpNodeAdd{Node: b.Node, TypeTag: b.TypeTag, State: state, Key: b.Key}, nil
-	case "NodeRemove":
-		var b nodeBody
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		return DeltaOpNodeRemove{Node: b.Node}, nil
-	case "EdgeAdd":
-		var b edgeBody
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		return DeltaOpEdgeAdd{Dependent: b.Dependent, Dependency: b.Dependency}, nil
-	case "EdgeRemove":
-		var b edgeBody
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		return DeltaOpEdgeRemove{Dependent: b.Dependent, Dependency: b.Dependency}, nil
-	case "QueuePush":
-		var b struct {
-			Node    NodeId          `json:"node"`
-			Payload json.RawMessage `json:"payload"`
-		}
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		payload, err := unmarshalIpcValue(b.Payload)
-		if err != nil {
-			return nil, err
-		}
-		return DeltaOpQueuePush{Node: b.Node, Payload: payload}, nil
-	case "QueuePop":
-		var b nodeBody
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		return DeltaOpQueuePop{Node: b.Node}, nil
-	case "QueueClose":
-		var b nodeBody
-		if err := json.Unmarshal(body, &b); err != nil {
-			return nil, err
-		}
-		return DeltaOpQueueClose{Node: b.Node}, nil
-	default:
-		return nil, fmt.Errorf("unknown DeltaOp variant: %s", tag)
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -935,13 +569,6 @@ func (DeltaApplyStatusResyncRequired) IsResyncRequired() bool { return true }
 // Delta (delta.json)
 // ---------------------------------------------------------------------------
 
-// Delta is an incremental change set.
-type Delta struct {
-	BaseEpoch Epoch
-	Epoch     Epoch
-	Ops       []DeltaOp
-}
-
 // DeltaNext builds the next sequential delta after baseEpoch carrying ops.
 //
 // lean theorem `nextDelta_epoch`: the returned Epoch is always baseEpoch + 1.
@@ -974,41 +601,6 @@ func (d Delta) FilterReadable(permissions *PeerPermissions, peer PeerId) Delta {
 		}
 	}
 	return Delta{BaseEpoch: d.BaseEpoch, Epoch: d.Epoch, Ops: ops}
-}
-
-type deltaWire struct {
-	BaseEpoch Epoch     `json:"base_epoch"`
-	Epoch     Epoch     `json:"epoch"`
-	Ops       []DeltaOp `json:"ops"`
-}
-
-func (d Delta) MarshalJSON() ([]byte, error) {
-	return json.Marshal(deltaWire{
-		BaseEpoch: d.BaseEpoch,
-		Epoch:     d.Epoch,
-		Ops:       nonNilSlice(d.Ops),
-	})
-}
-
-func (d *Delta) UnmarshalJSON(b []byte) error {
-	var w struct {
-		BaseEpoch Epoch             `json:"base_epoch"`
-		Epoch     Epoch             `json:"epoch"`
-		Ops       []json.RawMessage `json:"ops"`
-	}
-	if err := json.Unmarshal(b, &w); err != nil {
-		return err
-	}
-	ops := make([]DeltaOp, len(w.Ops))
-	for i, raw := range w.Ops {
-		op, err := unmarshalDeltaOp(raw)
-		if err != nil {
-			return err
-		}
-		ops[i] = op
-	}
-	d.BaseEpoch, d.Epoch, d.Ops = w.BaseEpoch, w.Epoch, ops
-	return nil
 }
 
 // ---------------------------------------------------------------------------
