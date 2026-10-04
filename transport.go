@@ -192,7 +192,7 @@ func spillState(state NodeState, backend BlobBackend, threshold int) (NodeState,
 }
 
 // SpillMessage spills large payloads across an IpcMessage's value/state sites —
-// Snapshot node states, Delta CellSet/SlotValue payloads + NodeAdd states, and
+// Snapshot node states, Delta CellSet/SlotValue/QueuePush payloads + NodeAdd states, and
 // CrdtSync op states — returning a message whose oversized payloads are replaced
 // by SharedBlob descriptors, plus the total bytes spilled. The message stays
 // small on the wire. Sites already carrying a descriptor are left untouched. The
@@ -232,6 +232,18 @@ func SpillMessage(message IpcMessage, backend BlobBackend, threshold int) (IpcMe
 				op.State = st
 				ops[i] = op
 				total += n
+			case DeltaOpQueuePush:
+				// A QueuePush payload is an IpcValue, spilled exactly like
+				// CellSet's (#lzdeltaqueueops).
+				p, n := SpillValue(op.Payload, backend, threshold)
+				op.Payload = p
+				ops[i] = op
+				total += n
+			case DeltaOpInvalidate, DeltaOpNodeRemove, DeltaOpEdgeAdd, DeltaOpEdgeRemove,
+				DeltaOpQueuePop, DeltaOpQueueClose:
+				// No bytes to spill.
+			default:
+				panic(fmt.Sprintf("SpillMessage: unhandled DeltaOp %T", op))
 			}
 		}
 		d.Ops = ops

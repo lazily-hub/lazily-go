@@ -6,6 +6,16 @@ All notable changes to lazily-go are documented here. This project adheres to
 
 ## Unreleased
 
+### Added
+
+- `DeltaOpQueuePush`, `DeltaOpQueuePop` and `DeltaOpQueueClose` — the QueueCell
+  op-log ops as ordinary `DeltaOp` variants of the `Delta` frame (protocol.md §
+  QueueCell op-log delta form, `#lzdeltaqueueops`). They decode and encode in
+  both the `json` and `msgpack` codecs, are permission-filtered by a node-scoped
+  read check like `Invalidate`/`CellSet`, and `SpillMessage` spills a
+  `QueuePush` payload exactly like a `CellSet` payload. A schema-valid Delta
+  carrying one used to be rejected as an unknown variant.
+
 ### Changed
 
 - Receipt wire decoding is strict, as `schemas/receipts.json` requires

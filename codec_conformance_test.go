@@ -123,6 +123,12 @@ func codecOpVariant(t *testing.T, op DeltaOp) string {
 		return "EdgeAdd"
 	case DeltaOpEdgeRemove:
 		return "EdgeRemove"
+	case DeltaOpQueuePush:
+		return "QueuePush"
+	case DeltaOpQueuePop:
+		return "QueuePop"
+	case DeltaOpQueueClose:
+		return "QueueClose"
 	default:
 		t.Fatalf("unknown DeltaOp %T", op)
 		return ""

@@ -743,6 +743,51 @@ func (o DeltaOpEdgeRemove) TargetReadable(p *PeerPermissions, peer PeerId) bool 
 	return p.CanRead(peer, o.Dependent) && p.CanRead(peer, o.Dependency)
 }
 
+// DeltaOpQueuePush appends Payload to the tail of QueueCell Node's op log
+// (protocol.md § QueueCell op-log delta form, #lzdeltaqueueops). Same body
+// shape as CellSet; its payload is spilled/resolved exactly like CellSet's.
+type DeltaOpQueuePush struct {
+	Node    NodeId
+	Payload IpcValue
+}
+
+func (DeltaOpQueuePush) isDeltaOp() {}
+func (o DeltaOpQueuePush) MarshalJSON() ([]byte, error) {
+	return taggedJSON("QueuePush", struct {
+		Node    NodeId   `json:"node"`
+		Payload IpcValue `json:"payload"`
+	}{o.Node, o.Payload})
+}
+func (o DeltaOpQueuePush) TargetReadable(p *PeerPermissions, peer PeerId) bool {
+	return p.CanRead(peer, o.Node)
+}
+
+// DeltaOpQueuePop removes the head of QueueCell Node's op log. Carries no bytes.
+type DeltaOpQueuePop struct {
+	Node NodeId
+}
+
+func (DeltaOpQueuePop) isDeltaOp() {}
+func (o DeltaOpQueuePop) MarshalJSON() ([]byte, error) {
+	return taggedJSON("QueuePop", nodeBody{o.Node})
+}
+func (o DeltaOpQueuePop) TargetReadable(p *PeerPermissions, peer PeerId) bool {
+	return p.CanRead(peer, o.Node)
+}
+
+// DeltaOpQueueClose closes QueueCell Node (idempotent). Carries no bytes.
+type DeltaOpQueueClose struct {
+	Node NodeId
+}
+
+func (DeltaOpQueueClose) isDeltaOp() {}
+func (o DeltaOpQueueClose) MarshalJSON() ([]byte, error) {
+	return taggedJSON("QueueClose", nodeBody{o.Node})
+}
+func (o DeltaOpQueueClose) TargetReadable(p *PeerPermissions, peer PeerId) bool {
+	return p.CanRead(peer, o.Node)
+}
+
 type nodeBody struct {
 	Node NodeId `json:"node"`
 }
@@ -823,6 +868,31 @@ func unmarshalDeltaOp(raw json.RawMessage) (DeltaOp, error) {
 			return nil, err
 		}
 		return DeltaOpEdgeRemove{Dependent: b.Dependent, Dependency: b.Dependency}, nil
+	case "QueuePush":
+		var b struct {
+			Node    NodeId          `json:"node"`
+			Payload json.RawMessage `json:"payload"`
+		}
+		if err := json.Unmarshal(body, &b); err != nil {
+			return nil, err
+		}
+		payload, err := unmarshalIpcValue(b.Payload)
+		if err != nil {
+			return nil, err
+		}
+		return DeltaOpQueuePush{Node: b.Node, Payload: payload}, nil
+	case "QueuePop":
+		var b nodeBody
+		if err := json.Unmarshal(body, &b); err != nil {
+			return nil, err
+		}
+		return DeltaOpQueuePop{Node: b.Node}, nil
+	case "QueueClose":
+		var b nodeBody
+		if err := json.Unmarshal(body, &b); err != nil {
+			return nil, err
+		}
+		return DeltaOpQueueClose{Node: b.Node}, nil
 	default:
 		return nil, fmt.Errorf("unknown DeltaOp variant: %s", tag)
 	}
