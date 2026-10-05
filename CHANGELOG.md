@@ -4,7 +4,7 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
-## Unreleased
+## v0.29.0 — 2026-10-04
 
 ### Added
 
@@ -36,6 +36,20 @@ All notable changes to lazily-go are documented here. This project adheres to
   missing `reason` or `payload_hash`, which used to decode as nil. Every
   conforming producer emits both keys, as `null` when absent. The check is
   generated from the shared wire model.
+- BREAKING: `CausalReceipt.Generation` and the `generation` parameter of
+  `NewCausalReceipt` / `ObservedReceipt` are now `uint64` (were `int64`),
+  because `schemas/receipts.json` pins `generation` non-negative and the type is
+  generated from that schema. Callers passing an `int64` need a conversion.
+
+### Tests
+
+- The shared consumer-simulation fixture is replayed against the Go testkit
+  (`sim_consumer_conformance_test.go`).
+
+## v0.26.0 – v0.28.0
+
+These entries shipped across v0.26.0, v0.27.0 and v0.28.0, whose release
+commits did not split the changelog.
 
 ### Removed
 
