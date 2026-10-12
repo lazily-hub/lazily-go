@@ -250,3 +250,17 @@ jobs:
             echo "::error::the CI-reachability guard exited 0 without reaching its verdict"
             exit 1
           }
+
+  core-artifact-consumer:
+    name: Core artifact consumer / Go ${{ matrix.go }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.24", "1.25"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: make core-artifact-consumer-check

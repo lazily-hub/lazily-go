@@ -1,8 +1,11 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach module-dependency-check
+.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach module-dependency-check core-artifact-consumer-check
 
 all: check
+
+core-artifact-consumer-check:
+	./scripts/core-artifact-consumer-check.sh
 
 # One conformance-run id per `make` invocation (#lzstalemanifest).
 #
