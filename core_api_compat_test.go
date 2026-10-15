@@ -167,7 +167,7 @@ func readCoreSnapshot(t *testing.T) string {
 	return string(contents)
 }
 
-func TestCommittedCoreAPISnapshotMatchesNativeSurface(t *testing.T) {
+func TestCoreAPISnapshotMatchesNativeSurface(t *testing.T) {
 	if err := validateCoreSnapshot(readCoreSnapshot(t)); err != nil {
 		t.Fatal(err)
 	}
