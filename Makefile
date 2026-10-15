@@ -1,11 +1,14 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach module-dependency-check core-artifact-consumer-check
+.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach module-dependency-check core-api-check core-artifact-consumer-check
 
 all: check
 
 core-artifact-consumer-check:
 	./scripts/core-artifact-consumer-check.sh
+
+core-api-check:
+	go test -count=1 -run TestCoreAPI .
 
 # One conformance-run id per `make` invocation (#lzstalemanifest).
 #
@@ -128,7 +131,7 @@ test-postgres-projection-barrier:
 assertion-ordering-check:
 	python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .
 
-check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier module-dependency-check conformance-coverage assertion-ordering-check core-artifact-consumer-check ci-reach
+check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier module-dependency-check core-api-check core-artifact-consumer-check conformance-coverage assertion-ordering-check ci-reach
 	@echo "lazily-go: check OK"
 
 # Published-module dependency floor (#lzgooptionalpgx). Static: fails when the

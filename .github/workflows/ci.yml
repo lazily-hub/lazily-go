@@ -237,6 +237,9 @@ jobs:
             }
           done
 
+      - name: Core API compatibility gate
+        run: go test -count=1 -run TestCoreAPI .
+
       # The gate that keeps every step above honest (#lzcheckcireachguard). It
       # compares `make check`'s prerequisite closure against the run: bodies in
       # this file and fails on any target CI does not reach. Comments inside run:
@@ -264,4 +267,4 @@ jobs:
         with:
           go-version: ${{ matrix.go }}
       - name: Core artifact consumer (minimum/current)
-        run: make core-artifact-consumer-check
+        run: ./scripts/core-artifact-consumer-check.sh

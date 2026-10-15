@@ -241,6 +241,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"check"                    # the root itself — @echo only, carries no gate
 	"ci-reach"                 # this guard, so CI has to reach it too
 	"conformance-coverage"     # rungs 1+4 (#lzguardsnotinci); pulls in `test`
+	"core-api-check"           # Phase 4 Core API compatibility surface
 	"core-artifact-consumer-check" # clean built-artifact consumer at both supported toolchains
 	"fmt-check"                # gofmt
 	"module-dependency-check"  # published graph requires nothing (#lzgooptionalpgx)
@@ -380,6 +381,7 @@ EXPECTED_GATE_STEPS=(
 	"build|build"
 	"ci-reach|CI-reachability guard (#lzcheckcireachguard)"
 	"conformance-coverage|Conformance coverage + scenario ledger guard (#lzguardsnotinci)"
+	"core-api-check|Core API compatibility gate"
 	"core-artifact-consumer-check|Core artifact consumer (minimum/current)"
 	"fmt-check|gofmt"
 	"module-dependency-check|Published module dependency floor (#lzgooptionalpgx)"
@@ -685,6 +687,7 @@ EXPECTED_DEFAULT_BRANCH="main"
 # named — including moved into a job with its own never-true `if:`, which is the
 # same defect one level down and was exit 0, byte-identical, before this.
 EXPECTED_GATE_JOBS=(
+	".github/workflows/ci.yml|core-artifact-consumer"
 	".github/workflows/ci.yml|test"
 )
 
@@ -695,6 +698,9 @@ EXPECTED_GATE_JOBS=(
 # FIRST — every cell of this partition terminates in a pin, not in a set the
 # audited file gets to choose.
 EXPECTED_GATE_JOB_ACTIVATION=(
+	".github/workflows/ci.yml|core-artifact-consumer|continue-on-error=<absent>"
+	".github/workflows/ci.yml|core-artifact-consumer|if=<absent>"
+	".github/workflows/ci.yml|core-artifact-consumer|strategy=<present>"
 	".github/workflows/ci.yml|test|continue-on-error=<absent>"
 	".github/workflows/ci.yml|test|if=<absent>"
 	".github/workflows/ci.yml|test|strategy=<absent>"
