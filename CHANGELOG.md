@@ -4,6 +4,24 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.30.0 — 2026-10-15
+
+### Added
+
+- Core qualification evidence: `scripts/core-conformance.json`,
+  `scripts/generate-core-report.py` and a C-ABI proof
+  (`scripts/prove-core-c-abi.py`), plus a ThreadSafeContext replay with
+  negative controls in the reactive-graph conformance test.
+- A committed Core API snapshot (`api/core-v1.tsv`) and `make core-api-check`.
+- Every Core gate is a named, reach-pinned CI step.
+
+### Fixed
+
+- `core-api-check` never compared the snapshot with the code: its
+  `-run TestCoreAPI` pattern did not match the snapshot test. It does now.
+- The CI-reachability guard was red on `main` because the artifact-consumer
+  step was unnamed.
+
 ## v0.29.0 — 2026-10-04
 
 ### Added
