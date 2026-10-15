@@ -241,6 +241,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"check"                    # the root itself — @echo only, carries no gate
 	"ci-reach"                 # this guard, so CI has to reach it too
 	"conformance-coverage"     # rungs 1+4 (#lzguardsnotinci); pulls in `test`
+	"core-artifact-consumer-check" # clean built-artifact consumer at both supported toolchains
 	"fmt-check"                # gofmt
 	"module-dependency-check"  # published graph requires nothing (#lzgooptionalpgx)
 	"race"                     # CRDT reads are graph WRITES (v0.23.2 data race)
@@ -379,6 +380,7 @@ EXPECTED_GATE_STEPS=(
 	"build|build"
 	"ci-reach|CI-reachability guard (#lzcheckcireachguard)"
 	"conformance-coverage|Conformance coverage + scenario ledger guard (#lzguardsnotinci)"
+	"core-artifact-consumer-check|Core artifact consumer (minimum/current)"
 	"fmt-check|gofmt"
 	"module-dependency-check|Published module dependency floor (#lzgooptionalpgx)"
 	"race|race (cgo)"

@@ -128,7 +128,7 @@ test-postgres-projection-barrier:
 assertion-ordering-check:
 	python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .
 
-check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier module-dependency-check conformance-coverage assertion-ordering-check ci-reach
+check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier module-dependency-check conformance-coverage assertion-ordering-check core-artifact-consumer-check ci-reach
 	@echo "lazily-go: check OK"
 
 # Published-module dependency floor (#lzgooptionalpgx). Static: fails when the

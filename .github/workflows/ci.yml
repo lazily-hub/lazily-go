@@ -263,5 +263,5 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
-      - name: Core artifact consumer
+      - name: Core artifact consumer (minimum/current)
         run: make core-artifact-consumer-check
