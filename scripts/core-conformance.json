@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "profile_id": "core-v1",
+  "binding_id": "go",
+  "report_command": ["python3", "scripts/generate-core-report.py"],
+  "runtime_skips": [
+    {
+      "fixture": "reactive-graph/dispose_signal_reverts_to_lazy.json",
+      "scenario": "*",
+      "execution_flavor": "async",
+      "reason": "AsyncContext has no eager signal constructor; Context and ThreadSafeContext execute this fixture"
+    },
+    {
+      "fixture": "reactive-graph/signal_materializes_once_per_batch.json",
+      "scenario": "*",
+      "execution_flavor": "async",
+      "reason": "AsyncContext has no eager signal constructor; Context and ThreadSafeContext execute this fixture"
+    },
+    {
+      "fixture": "reactive-graph/signal_materializes_without_a_read.json",
+      "scenario": "*",
+      "execution_flavor": "async",
+      "reason": "AsyncContext has no eager signal constructor; Context and ThreadSafeContext execute this fixture"
+    }
+  ],
+  "fixtureless_claims": [
+    {
+      "id": "c_abi_ffi_boundary",
+      "proof_classes": ["native_artifact_consumer"],
+      "command": ["python3", "scripts/prove-core-c-abi.py"]
+    }
+  ]
+}

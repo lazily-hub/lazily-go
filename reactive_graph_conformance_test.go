@@ -551,6 +551,137 @@ func (sc *syncScope) owned() int  { return sc.s.Len() }
 func (sc *syncScope) disarm()     { sc.s.Disarm() }
 func (sc *syncScope) closeScope() { sc.s.Close() }
 
+// threadSafeModel replays the same graph contract through ThreadSafeContext's
+// public lock/batch boundary. The wrapped sync model owns the underlying graph;
+// every operation re-enters the context lock, including operations issued from
+// inside a batch. The lock is deliberately reentrant, so this also exercises
+// the nesting contract rather than bypassing it in the conformance runner.
+type threadSafeModel struct {
+	ctx   *ThreadSafeContext
+	inner *syncModel
+}
+
+func newThreadSafeModel() graphModel {
+	ctx := NewThreadSafeContext()
+	return &threadSafeModel{ctx: ctx, inner: &syncModel{ctx: ctx.Context()}}
+}
+
+func (m *threadSafeModel) name() string        { return "ThreadSafeContext" }
+func (m *threadSafeModel) close()              {}
+func (m *threadSafeModel) settle()             {}
+func (m *threadSafeModel) settleFault() string { return "" }
+func (m *threadSafeModel) runLog() []string {
+	return Read(m.ctx, func(*Context) []string { return m.inner.runLog() })
+}
+func (m *threadSafeModel) cleanupLog() []string {
+	return Read(m.ctx, func(*Context) []string { return m.inner.cleanupLog() })
+}
+func (m *threadSafeModel) cell(id string, value int) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.cell(id, value) })
+	return
+}
+func (m *threadSafeModel) computed(id string, reads []nodeRef, offset int) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.computed(id, reads, offset) })
+	return
+}
+func (m *threadSafeModel) effect(id string, reads []nodeRef) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.effect(id, reads) })
+	return
+}
+func (m *threadSafeModel) read(n nodeRef) (value int, err error) {
+	m.ctx.WithLock(func(*Context) { value, err = m.inner.read(n) })
+	return
+}
+func (m *threadSafeModel) setCell(n nodeRef, value int) {
+	m.ctx.WithLock(func(*Context) { m.inner.setCell(n, value) })
+}
+func (m *threadSafeModel) dispose(n nodeRef) {
+	m.ctx.WithLock(func(*Context) { m.inner.dispose(n) })
+}
+func (m *threadSafeModel) dependentCount(n nodeRef) (out int) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.dependentCount(n) })
+	return
+}
+func (m *threadSafeModel) dependencyCount(n nodeRef) (out int) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.dependencyCount(n) })
+	return
+}
+func (m *threadSafeModel) isEffectActive(n nodeRef) (out bool) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.isEffectActive(n) })
+	return
+}
+func (m *threadSafeModel) signal(id string, reads []nodeRef, offset int) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.signal(id, reads, offset) })
+	return
+}
+func (m *threadSafeModel) disposeSignal(n nodeRef) {
+	m.ctx.WithLock(func(*Context) { m.inner.disposeSignal(n) })
+}
+func (m *threadSafeModel) batch(run func()) { m.ctx.Batch(run) }
+func (m *threadSafeModel) failNext(id string, count int) {
+	m.ctx.WithLock(func(*Context) { m.inner.failNext(id, count) })
+}
+func (m *threadSafeModel) computesOf(id string) (out int) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.computesOf(id) })
+	return
+}
+func (m *threadSafeModel) mergeCell(id string, value int) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.mergeCell(id, value) })
+	return
+}
+func (m *threadSafeModel) merge(n nodeRef, op int) {
+	m.ctx.WithLock(func(*Context) { m.inner.merge(n, op) })
+}
+func (m *threadSafeModel) feedEffect(
+	id string, reads []nodeRef, target nodeRef, onMerge func(),
+) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.feedEffect(id, reads, target, onMerge) })
+	return
+}
+func (m *threadSafeModel) divergeEffect(id string, own nodeRef) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.divergeEffect(id, own) })
+	return
+}
+func (m *threadSafeModel) drainExhausted() (out bool) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.drainExhausted() })
+	return
+}
+func (m *threadSafeModel) clearDrain() {
+	m.ctx.WithLock(func(*Context) { m.inner.clearDrain() })
+}
+func (m *threadSafeModel) scope() (out scopeModel) {
+	m.ctx.WithLock(func(*Context) { out = &threadSafeScope{model: m, inner: m.inner.scope()} })
+	return
+}
+
+type threadSafeScope struct {
+	model *threadSafeModel
+	inner scopeModel
+}
+
+func (sc *threadSafeScope) cell(id string, value int) (out nodeRef) {
+	sc.model.ctx.WithLock(func(*Context) { out = sc.inner.cell(id, value) })
+	return
+}
+func (sc *threadSafeScope) computed(id string, reads []nodeRef, offset int) (out nodeRef) {
+	sc.model.ctx.WithLock(func(*Context) { out = sc.inner.computed(id, reads, offset) })
+	return
+}
+func (sc *threadSafeScope) effect(id string, reads []nodeRef) (out nodeRef) {
+	sc.model.ctx.WithLock(func(*Context) { out = sc.inner.effect(id, reads) })
+	return
+}
+func (sc *threadSafeScope) owned() (out int) {
+	sc.model.ctx.WithLock(func(*Context) { out = sc.inner.owned() })
+	return
+}
+func (sc *threadSafeScope) disarm() {
+	sc.model.ctx.WithLock(func(*Context) { sc.inner.disarm() })
+}
+func (sc *threadSafeScope) closeScope() {
+	sc.model.ctx.WithLock(func(*Context) { sc.inner.closeScope() })
+}
+
 // --- async model ------------------------------------------------------------
 
 // asyncModel replays against *AsyncContext — the context whose cascade defect
@@ -1139,7 +1270,7 @@ func (e *replayEngine) readID(id string) (int, error) {
 
 func (e *replayEngine) check(key string, got, want any) {
 	e.rep.checks++
-	if fmt.Sprint(got) == fmt.Sprint(want) {
+	if assertionValuesEqual(got, want) {
 		return
 	}
 	step := fmt.Sprint(e.step)
@@ -1149,6 +1280,32 @@ func (e *replayEngine) check(key string, got, want any) {
 	entry := fmt.Sprintf("%s/%s%s#%s:%s", e.m.name(), e.fixture, e.label, step, key)
 	e.t.Logf("  DIVERGENCE %s — got %v, want %v", entry, got, want)
 	e.rep.divergences = append(e.rep.divergences, entry)
+}
+
+// assertionValuesEqual is shared by fixture replay and the active family
+// negative controls below, so the controls prove the comparator the runner
+// actually uses rather than a test-only substitute.
+func assertionValuesEqual(got, want any) bool {
+	return fmt.Sprint(got) == fmt.Sprint(want)
+}
+
+func TestReactiveGraphAssertionFamilyNegativeControls(t *testing.T) {
+	controls := []struct {
+		name      string
+		got, want any
+	}{
+		{"integer", 1, 2},
+		{"boolean", true, false},
+		{"ordered-list", []string{"first"}, []string{"second"}},
+		{"error-presence", "error", "value"},
+	}
+	for _, control := range controls {
+		t.Run(control.name, func(t *testing.T) {
+			if assertionValuesEqual(control.got, control.want) {
+				t.Fatalf("negative control was accepted: got=%v want=%v", control.got, control.want)
+			}
+		})
+	}
 }
 
 // summarizeRuns renders an effect-run window for a divergence message: the
@@ -1854,6 +2011,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 		make func() graphModel
 	}{
 		{"Context", newSyncModel},
+		{"ThreadSafeContext", newThreadSafeModel},
 		{"AsyncContext", newAsyncModel},
 	}
 

@@ -101,6 +101,21 @@ ctx.Batch(func() {
 }) // a single coalesced cascade
 ```
 
+## Core qualification
+
+[`scripts/core-conformance.json`](scripts/core-conformance.json) declares the
+machine-readable Core profile entry point. Its shell-free `report_command`
+replays the 16 required reactive-graph fixtures through `Context`,
+`ThreadSafeContext`, and `AsyncContext`, then writes the requested report and
+fresh assertion-consumption and negative-control evidence beneath the verifier's
+report root.
+
+The report is intentionally partial for the async flavor of the three eager
+signal fixtures; the single-threaded and thread-safe flavors still run them.
+The fixtureless C ABI proof builds a Go `c-shared` library, loads it as a native
+shared library, and invokes the exported channel constructor, length, and
+destructor symbols.
+
 ## Consumer simulation conformance
 
 `SimConsumerTestkit` runs one materialized `SimGeneratedScenario` through an
