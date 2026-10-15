@@ -1,0 +1,11 @@
+# lazily-core-api-v1
+generation	1
+deprecation_window_generations	2
+symbol	context	type	github.com/lazily-hub/lazily-go.Context	type Context struct	1	-	-	-
+symbol	source	type	github.com/lazily-hub/lazily-go.Source	type Source[T comparable] struct	1	-	-	-
+symbol	computed	type	github.com/lazily-hub/lazily-go.Computed	type Computed[T any] struct	1	-	-	-
+symbol	effect	type	github.com/lazily-hub/lazily-go.Effect	type Effect struct	1	-	-	-
+symbol	batch	operation	github.com/lazily-hub/lazily-go.Context.Batch	func(*Context, func())	1	-	-	-
+symbol	scope	operation	github.com/lazily-hub/lazily-go.Context.Scope	func(*Context) *TeardownScope	1	-	-	-
+symbol	scope	type	github.com/lazily-hub/lazily-go.TeardownScope	type TeardownScope struct	1	-	-	-
+symbol	typed_context	type	github.com/lazily-hub/lazily-go.Context	type Context struct	1	-	-	-
