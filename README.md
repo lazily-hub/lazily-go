@@ -388,8 +388,8 @@ proven in [`lazily-formal`][spec]'s `ZeroCopyTransport.lean` and pinned by the
 lazily-go replays the shared [`lazily-spec`][spec] conformance fixtures (IPC,
 keyed collections, Harel state charts, the lossless-tree CRDT, the command-plane
 message family, and the replay-equivalence proof) — asserting identical behavior
-to every other binding. Run `make check` (fmt + vet + build + test) locally; CI also runs the
-race detector.
+to every other binding. See [CONTRIBUTING.md](CONTRIBUTING.md) for local
+verification and the CI race-detector gate.
 
 ## Benchmarks
 
