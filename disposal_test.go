@@ -84,6 +84,109 @@ func TestDisposeIsIdempotentAndDetachesBothDirections(t *testing.T) {
 	}
 }
 
+// These are mutation controls for the two stale-handle fences. They first
+// prove the allocator really reused the raw slot, then show that generation is
+// the only thing rejecting same-kind ABA and slot kind is the only thing
+// rejecting cross-kind reuse. Removing either comparison makes the initial
+// stale resolution return the successor and fails this test.
+func TestStaleHandleIdentityFencesAreLoadBearing(t *testing.T) {
+	t.Run("generation", func(t *testing.T) {
+		ctx := NewContext()
+		stale := NewSource(ctx, 1)
+		staleID := stale.occupantID
+		staleGeneration := stale.occupantGeneration
+		stale.Dispose()
+		successor := NewSource(ctx, 2)
+
+		if successor.occupantID != staleID {
+			t.Fatalf("raw occupant id was not recycled: stale=%d successor=%d",
+				staleID, successor.occupantID)
+		}
+		if successor.occupantGeneration == staleGeneration {
+			t.Fatal("recycled occupant generation did not advance")
+		}
+		if got := ctx.resolveNode(stale, occupantSource); got != nil {
+			t.Fatalf("stale same-kind handle resolved to successor %T; generation fence is not load-bearing", got)
+		}
+
+		mutated := stale.occupantGeneration
+		stale.occupantGeneration = successor.occupantGeneration
+		if got := ctx.resolveNode(stale, occupantSource); got != successor {
+			t.Fatalf("negative control did not reach successor after bypassing only generation: got %T", got)
+		}
+		stale.occupantGeneration = mutated
+	})
+
+	t.Run("kind", func(t *testing.T) {
+		ctx := NewContext()
+		stale := NewEffect(ctx, func(*Compute) func() { return nil })
+		staleID := stale.occupantID
+		stale.Dispose()
+		successor := NewSource(ctx, 2)
+		if successor.occupantID != staleID {
+			t.Fatalf("raw occupant id was not recycled: stale=%d successor=%d",
+				staleID, successor.occupantID)
+		}
+
+		// Equalize generation to isolate the cross-kind fence.
+		stale.occupantGeneration = successor.occupantGeneration
+		if got := ctx.resolveNode(stale, occupantEffect); got != nil {
+			t.Fatalf("cross-kind stale handle resolved to successor %T; kind fence is not load-bearing", got)
+		}
+	})
+}
+
+func TestAsyncStaleHandleIdentityFencesAreLoadBearing(t *testing.T) {
+	t.Run("generation", func(t *testing.T) {
+		ctx := NewAsyncContext()
+		defer ctx.Close()
+		stale := NewAsyncSource(ctx, 1)
+		staleIdentity := stale.node.identity
+		stale.DisposeAsync()
+		successor := NewAsyncSource(ctx, 2)
+		successorIdentity := successor.node.identity
+
+		if successorIdentity.id != staleIdentity.id {
+			t.Fatalf("raw occupant id was not recycled: stale=%d successor=%d",
+				staleIdentity.id, successorIdentity.id)
+		}
+		if successorIdentity.generation == staleIdentity.generation {
+			t.Fatal("recycled occupant generation did not advance")
+		}
+		ctx.do(func() {
+			if got := ctx.resolveAsyncNode(staleIdentity, occupantSource); got != nil {
+				t.Fatalf("stale same-kind handle resolved to successor %T; generation fence is not load-bearing", got)
+			}
+			mutated := staleIdentity
+			mutated.generation = successorIdentity.generation
+			if got := ctx.resolveAsyncNode(mutated, occupantSource); got != successor.node {
+				t.Fatalf("negative control did not reach successor after bypassing only generation: got %T", got)
+			}
+		})
+	})
+
+	t.Run("kind", func(t *testing.T) {
+		ctx := NewAsyncContext()
+		defer ctx.Close()
+		stale := ctx.EffectAsync(func(*AsyncComputeContext) func() { return nil })
+		staleIdentity := stale.identity
+		stale.DisposeAsync()
+		successor := NewAsyncSource(ctx, 2)
+		if successor.node.identity.id != staleIdentity.id {
+			t.Fatalf("raw occupant id was not recycled: stale=%d successor=%d",
+				staleIdentity.id, successor.node.identity.id)
+		}
+
+		// Equalize generation to isolate the cross-kind fence.
+		staleIdentity.generation = successor.node.identity.generation
+		ctx.do(func() {
+			if got := ctx.resolveAsyncNode(staleIdentity, occupantEffect); got != nil {
+				t.Fatalf("cross-kind stale handle resolved to successor %T; kind fence is not load-bearing", got)
+			}
+		})
+	})
+}
+
 func TestDisposedCellReadsAsAnError(t *testing.T) {
 	ctx := NewContext()
 	c := NewSource(ctx, 7)

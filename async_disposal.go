@@ -115,7 +115,7 @@ func (e *AsyncEffectHandle) IsActive() bool {
 // Blocked waiters and any later reader receive a *DisposedError — the same
 // "errors on next recompute" contract as the synchronous Slot.Dispose.
 func (s *AsyncComputed[T]) DisposeAsync() {
-	s.c.do(func() { s.c.disposeAsyncSlot(s.node) })
+	s.c.do(func() { s.c.disposeAsyncOccupant(s.node.identity, occupantComputed) })
 }
 
 // Dispose is an alias for DisposeAsync.
@@ -125,13 +125,29 @@ func (s *AsyncComputed[T]) Dispose() { s.DisposeAsync() }
 // dirties the surviving cone. Cells are pure sources, so only downstream edges
 // need detaching. Idempotent.
 func (h *AsyncSource[T]) DisposeAsync() {
-	h.c.do(func() { h.c.disposeAsyncCell(h.node) })
+	h.c.do(func() { h.c.disposeAsyncOccupant(h.node.identity, occupantSource) })
 }
 
 // Dispose is an alias for DisposeAsync.
 func (h *AsyncSource[T]) Dispose() { h.DisposeAsync() }
 
-// disposeAsyncSlot runs inside the owner goroutine.
+// disposeAsyncOccupant resolves a handle only after its complete identity has
+// passed, then dispatches on the live occupant. It returns an effect cleanup so
+// the caller can run user code outside the owner goroutine.
+func (c *AsyncContext) disposeAsyncOccupant(identity asyncOccupantIdentity, kind occupantKind) func() {
+	key := c.resolveAsyncNode(identity, kind)
+	switch n := key.(type) {
+	case *asyncSourceNode:
+		c.disposeAsyncCell(n)
+	case *asyncComputedNode:
+		c.disposeAsyncSlot(n)
+	case *AsyncEffectHandle:
+		return c.disposeAsyncEffect(n)
+	}
+	return nil
+}
+
+// disposeAsyncSlot runs inside the owner goroutine after identity validation.
 func (c *AsyncContext) disposeAsyncSlot(s *asyncComputedNode) {
 	if s.disposed {
 		return
@@ -161,6 +177,7 @@ func (c *AsyncContext) disposeAsyncSlot(s *asyncComputedNode) {
 	}
 	s.deps = map[any]struct{}{}
 	c.detachAsyncNode(s)
+	c.retireAsyncNode(s.identity)
 }
 
 // disposeAsyncCell runs inside the owner goroutine.
@@ -170,6 +187,33 @@ func (c *AsyncContext) disposeAsyncCell(n *asyncSourceNode) {
 	}
 	n.disposed = true
 	c.detachAsyncNode(n)
+	c.retireAsyncNode(n.identity)
+}
+
+// disposeAsyncEffect runs inside the owner goroutine after identity validation.
+func (c *AsyncContext) disposeAsyncEffect(e *AsyncEffectHandle) func() {
+	if e.disposed {
+		return nil
+	}
+	e.disposed = true
+	if e.rerunScheduled {
+		// The rerun will never happen, so it must stop counting towards
+		// quiescence or the drain counters never reset.
+		e.rerunScheduled = false
+		c.pendingReruns--
+	}
+	if e.cancel != nil {
+		e.cancel()
+	}
+	delete(c.effects, e)
+	for dep := range e.deps {
+		c.removeDependent(dep, e)
+	}
+	e.deps = map[any]struct{}{}
+	cleanup := e.cleanup
+	e.cleanup = nil
+	c.retireAsyncNode(e.identity)
+	return cleanup
 }
 
 // detachAsyncNode drops key's reverse edges and dirties its dependent cone

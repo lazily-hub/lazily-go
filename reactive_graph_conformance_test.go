@@ -60,6 +60,7 @@ var reactiveGraphReplayed = []string{
 	"merge_per_settled_cone_not_per_write.json",
 	"read_after_dispose_is_an_error.json",
 	"recycled_id_inherits_nothing.json",
+	"stale_effect_handle_cannot_remove_recycled_source.json",
 	"scope_teardown_equals_fold_of_disposals.json",
 	"scoping_bounds_teardown_not_visibility.json",
 	"signal_materializes_once_per_batch.json",
@@ -159,6 +160,7 @@ type graphModel interface {
 	dependentCount(n nodeRef) int
 	dependencyCount(n nodeRef) int
 	isEffectActive(n nodeRef) bool
+	sameRawNodeID(a, b nodeRef) bool
 	// signal builds the derived eager construct (#lzsignaleager). Separate from
 	// nodeFactory because the corpus never creates one inside a teardown scope.
 	signal(id string, reads []nodeRef, offset int) nodeRef
@@ -524,6 +526,10 @@ func (m *syncModel) dependencyCount(r nodeRef) int { return m.ctx.DependencyCoun
 
 func (m *syncModel) isEffectActive(r nodeRef) bool { return r.h.(*Effect).IsActive() }
 
+func (m *syncModel) sameRawNodeID(a, b nodeRef) bool {
+	return m.graphNode(a).node().occupantID == m.graphNode(b).node().occupantID
+}
+
 type syncScope struct {
 	m *syncModel
 	s *TeardownScope
@@ -608,6 +614,10 @@ func (m *threadSafeModel) dependencyCount(n nodeRef) (out int) {
 }
 func (m *threadSafeModel) isEffectActive(n nodeRef) (out bool) {
 	m.ctx.WithLock(func(*Context) { out = m.inner.isEffectActive(n) })
+	return
+}
+func (m *threadSafeModel) sameRawNodeID(a, b nodeRef) (out bool) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.sameRawNodeID(a, b) })
 	return
 }
 func (m *threadSafeModel) signal(id string, reads []nodeRef, offset int) (out nodeRef) {
@@ -1040,6 +1050,29 @@ func (m *asyncModel) dependencyCount(r nodeRef) int { return m.ctx.DependencyCou
 
 func (m *asyncModel) isEffectActive(r nodeRef) bool { return r.h.(*AsyncEffectHandle).IsActive() }
 
+func (m *asyncModel) sameRawNodeID(a, b nodeRef) bool {
+	var aid, bid uint64
+	if !m.ctx.do(func() {
+		aid = asyncIdentity(m.graphNode(a)).id
+		bid = asyncIdentity(m.graphNode(b)).id
+	}) {
+		return false
+	}
+	return aid == bid
+}
+
+func asyncIdentity(n AsyncGraphNode) asyncOccupantIdentity {
+	switch key := n.asyncNodeKey().(type) {
+	case *asyncSourceNode:
+		return key.identity
+	case *asyncComputedNode:
+		return key.identity
+	case *AsyncEffectHandle:
+		return key.identity
+	}
+	panic(fmt.Sprintf("reactive-graph: unknown async node key %T", n.asyncNodeKey()))
+}
+
 type asyncScope struct {
 	m *asyncModel
 	s *AsyncTeardownScope
@@ -1072,20 +1105,22 @@ func (sc *asyncScope) closeScope() { sc.s.Close() }
 // ---------------------------------------------------------------------------
 
 type reactiveGraphOp struct {
-	Type       string   `json:"type"`
-	ID         string   `json:"id"`
-	Value      *int     `json:"value"`
-	Reads      []string `json:"reads"`
-	Offset     int      `json:"offset"`
-	Scope      string   `json:"scope"`
-	IDPrefix   string   `json:"id_prefix"`
-	Count      int      `json:"count"`
-	Source     string   `json:"source"`
-	LiveWidth  int      `json:"live_width"`
-	Cycles     int      `json:"cycles"`
-	Mode       string   `json:"mode"`
-	HandleOf   string   `json:"handle_of"`
-	HandleKind string   `json:"handle_kind"`
+	Type          string   `json:"type"`
+	ID            string   `json:"id"`
+	Value         *int     `json:"value"`
+	Reads         []string `json:"reads"`
+	Offset        int      `json:"offset"`
+	Scope         string   `json:"scope"`
+	IDPrefix      string   `json:"id_prefix"`
+	Count         int      `json:"count"`
+	Source        string   `json:"source"`
+	LiveWidth     int      `json:"live_width"`
+	Cycles        int      `json:"cycles"`
+	Mode          string   `json:"mode"`
+	HandleOf      string   `json:"handle_of"`
+	HandleKind    string   `json:"handle_kind"`
+	Successor     string   `json:"successor"`
+	SuccessorKind string   `json:"successor_kind"`
 	// ReadEach is the corpus's instruction to pull every generated subscriber
 	// once so its dependency edge is actually registered. This binding builds
 	// subscribers as effects, which register eagerly, so it was tempting to call
@@ -1128,14 +1163,17 @@ type reactiveGraphStep struct {
 }
 
 type reactiveGraphScenario struct {
-	Id    string              `json:"id"`
-	Name  string              `json:"name"`
-	Steps []reactiveGraphStep `json:"steps"`
+	Id       string              `json:"id"`
+	Name     string              `json:"name"`
+	Requires []string            `json:"requires"`
+	Steps    []reactiveGraphStep `json:"steps"`
 }
 
 type reactiveGraphFixture struct {
 	conformanceMeta
 	Shape     string                  `json:"shape"`
+	Requires  []string                `json:"requires"`
+	Generator string                  `json:"generator"`
 	Steps     []reactiveGraphStep     `json:"steps"`
 	Scenarios []reactiveGraphScenario `json:"scenarios"`
 	Expected  struct {
@@ -1196,8 +1234,9 @@ type replayEngine struct {
 	scopes   map[string]scopeModel
 	poisoned map[string]bool
 
-	step int
-	rep  replayReport
+	step                int
+	rep                 replayReport
+	recycledIDConfirmed bool
 
 	// readEachPending holds the subscribers a  op created this step,
 	// checked after settle because the async plane registers an effect's edges
@@ -1514,17 +1553,21 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 			e.t.Fatalf("%s#%d: no recorded handle for %q", e.fixture, e.step, op.HandleOf)
 		}
 		wantKind, known := map[string]nodeKind{
-			"cell": kindCell, "slot": kindSlot, "effect": kindEffect,
+			"cell": kindCell, "computed": kindSlot, "slot": kindSlot, "effect": kindEffect,
 		}[op.HandleKind]
 		if !known || h.kind != wantKind {
 			e.t.Fatalf("%s#%d: handle_kind %q does not match the recorded handle",
 				e.fixture, e.step, op.HandleKind)
 		}
-		// In this binding a handle is a pointer to the node, not an index into
-		// an arena, so there is no id to recycle and a stale handle can only
-		// ever name the node it was minted for. Disposing it again is the
-		// idempotence case; the "must not tear down whatever now owns that id"
-		// hazard is unreachable by construction rather than guarded against.
+		successor := e.node(op.Successor)
+		wantSuccessorKind, known := map[string]nodeKind{
+			"cell": kindCell, "computed": kindSlot, "slot": kindSlot, "effect": kindEffect,
+		}[op.SuccessorKind]
+		if !known || successor.kind != wantSuccessorKind {
+			e.t.Fatalf("%s#%d: successor_kind %q does not match %q",
+				e.fixture, e.step, op.SuccessorKind, op.Successor)
+		}
+		e.recycledIDConfirmed = e.m.sameRawNodeID(h, successor)
 		e.m.dispose(h)
 	default:
 		e.t.Fatalf("%s#%d: unsupported op %q — the fixture is listed as replayable, so "+
@@ -1627,6 +1670,7 @@ func (e *replayEngine) runChurn(op reactiveGraphOp) {
 func (e *replayEngine) replay(steps []reactiveGraphStep) {
 	for i, step := range steps {
 		e.step = i
+		e.recycledIDConfirmed = false
 		runsBefore := len(e.m.runLog())
 		// Measure this op's drain in isolation: `drain_exhausted` is a
 		// cumulative observable on the model, so clear it before every op or
@@ -1695,6 +1739,27 @@ func (e *replayEngine) replay(steps []reactiveGraphStep) {
 				e.unmarshal(key, raw, &want)
 				for _, id := range sortedBoolKeys(want) {
 					e.check("readable."+id, e.readable(id), want[id])
+				}
+			case "writable":
+				var want map[string]bool
+				e.unmarshal(key, raw, &want)
+				for _, id := range sortedBoolKeys(want) {
+					n := e.node(id)
+					e.check("writable."+id, n.kind == kindCell && e.readable(id), want[id])
+				}
+			case "recycled_id_confirmed":
+				var want bool
+				e.unmarshal(key, raw, &want)
+				e.check("recycled_id_confirmed", e.recycledIDConfirmed, want)
+			case "cleanups_of":
+				var want map[string]int
+				e.unmarshal(key, raw, &want)
+				counts := map[string]int{}
+				for _, id := range cleaned {
+					counts[id]++
+				}
+				for _, id := range sortedIntKeys(want) {
+					e.check("cleanups_of."+id, counts[id], want[id])
 				}
 			case "computes_of":
 				var want map[string]int
@@ -1950,6 +2015,29 @@ func reactiveGraphLedgerKeys(m map[string]string) []string {
 	return ks
 }
 
+// validateReactiveGraphCapabilities makes capability gates executable rather
+// than treating `requires` as prose. This binding deliberately owns a recycled
+// node-id arena, so these fixtures must run and must prove reuse; any unknown
+// capability fails closed instead of silently skipping scenarios.
+func validateReactiveGraphCapabilities(t *testing.T, fixture string, requires []string) {
+	t.Helper()
+	for _, capability := range requires {
+		if capability != "recycled_node_ids" {
+			t.Fatalf("%s requires unsupported capability %q", fixture, capability)
+		}
+	}
+}
+
+func validateReactiveGraphGenerator(t *testing.T, fixture, generator string) {
+	t.Helper()
+	if generator == "" {
+		return
+	}
+	if generator != "scripts/gen_stale_handle_disposal_fixture.py" {
+		t.Fatalf("%s declares unknown fixture generator %q", fixture, generator)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -2036,6 +2124,8 @@ func TestReactiveGraphConformance(t *testing.T) {
 					}
 					var fx reactiveGraphFixture
 					mustStrictJSON(t, name, raw, &fx)
+					validateReactiveGraphCapabilities(t, name, fx.Requires)
+					validateReactiveGraphGenerator(t, name, fx.Generator)
 
 					// Dispatch on the fixture's declared `shape`, never on its
 					// filename: a filename special case goes stale silently the
@@ -2062,6 +2152,7 @@ func TestReactiveGraphConformance(t *testing.T) {
 							// corpus is replayed once per execution model, so
 							// each id records twice; the ledger deduplicates.
 							sc := sv.Value()
+							validateReactiveGraphCapabilities(t, name+"["+sc.Name+"]", sc.Requires)
 							m := mdl.make()
 							e := newReplayEngine(t, m, name, "["+sc.Name+"]")
 							e.replay(sc.Steps)

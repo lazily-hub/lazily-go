@@ -126,9 +126,22 @@ type depOwner interface {
 	depSet() map[any]struct{}
 }
 
+type asyncOccupantIdentity struct {
+	id         uint64
+	generation uint64
+	kind       occupantKind
+}
+
+type asyncOccupantSlot struct {
+	generation uint64
+	kind       occupantKind
+	key        any
+}
+
 // asyncSourceNode is the loop-owned state of a mutable input cell.
 type asyncSourceNode struct {
-	value any
+	identity asyncOccupantIdentity
+	value    any
 	// policy folds a Merge op into the current value. Held type-erased so this
 	// loop-owned struct stays non-generic; see mergeFolder.
 	policy   func(cur, op any) any
@@ -138,6 +151,7 @@ type asyncSourceNode struct {
 // asyncComputedNode is the loop-owned state of a computed async slot. All fields are
 // touched only inside the owner goroutine.
 type asyncComputedNode struct {
+	identity asyncOccupantIdentity
 	c        *AsyncContext
 	compute  func(cc *AsyncComputeContext) (any, error)
 	eq       func(a, b any) bool
@@ -182,7 +196,9 @@ func NewAsyncSource[T any](c *AsyncContext, value T) *AsyncSource[T] {
 // policy other than KeepLatest it is the accumulator the corpus calls a merge
 // cell.
 func NewAsyncSourceWithPolicy[T any](c *AsyncContext, value T, policy MergePolicy[T]) *AsyncSource[T] {
-	return &AsyncSource[T]{c: c, node: &asyncSourceNode{value: value, policy: mergeFolder(policy)}}
+	node := &asyncSourceNode{value: value, policy: mergeFolder(policy)}
+	c.do(func() { node.identity = c.registerAsyncNode(node, occupantSource) })
+	return &AsyncSource[T]{c: c, node: node}
 }
 
 // mergeFolder erases MergePolicy[T] to a fold over `any` so the loop-owned node
@@ -294,6 +310,7 @@ func NewAsyncComputed[T any](c *AsyncContext, compute func(cc *AsyncComputeConte
 			return compute(cc)
 		},
 	}
+	c.do(func() { node.identity = c.registerAsyncNode(node, occupantComputed) })
 	return &AsyncComputed[T]{c: c, node: node}
 }
 
@@ -524,6 +541,7 @@ func TrackAsync[T any](cc *AsyncComputeContext, computed *AsyncComputed[T]) (T, 
 // Reruns are serialized per effect (a rerun does not start until the previous
 // cleanup completes), and disposal awaits the current cleanup.
 type AsyncEffectHandle struct {
+	identity       asyncOccupantIdentity
 	c              *AsyncContext
 	body           func(cc *AsyncComputeContext) func()
 	cleanup        func()
@@ -542,26 +560,7 @@ func (e *AsyncEffectHandle) depSet() map[any]struct{}         { return e.deps }
 func (e *AsyncEffectHandle) DisposeAsync() {
 	var cleanup func()
 	e.c.do(func() {
-		if e.disposed {
-			return
-		}
-		e.disposed = true
-		if e.rerunScheduled {
-			// The rerun will never happen, so it must stop counting towards
-			// quiescence or the drain counters never reset.
-			e.rerunScheduled = false
-			e.c.pendingReruns--
-		}
-		if e.cancel != nil {
-			e.cancel()
-		}
-		delete(e.c.effects, e)
-		for dep := range e.deps {
-			e.c.removeDependent(dep, e)
-		}
-		e.deps = map[any]struct{}{}
-		cleanup = e.cleanup
-		e.cleanup = nil
+		cleanup = e.c.disposeAsyncOccupant(e.identity, occupantEffect)
 	})
 	if cleanup != nil {
 		runCleanupSafe(cleanup)
@@ -581,12 +580,14 @@ type AsyncContext struct {
 	stopOnce sync.Once
 
 	// Loop-owned state — touched only inside the owner goroutine (loop).
-	dependents map[any]map[dependent]struct{}
-	computing  map[*asyncComputedNode]struct{}
-	effects    map[*AsyncEffectHandle]struct{}
-	disposed   bool
-	batchDepth int
-	batchQueue map[any]struct{}
+	dependents    map[any]map[dependent]struct{}
+	computing     map[*asyncComputedNode]struct{}
+	effects       map[*AsyncEffectHandle]struct{}
+	nodeSlots     []asyncOccupantSlot
+	freeNodeSlots []uint64
+	disposed      bool
+	batchDepth    int
+	batchQueue    map[any]struct{}
 
 	// --- bounded effect drain ---
 	//
@@ -707,6 +708,48 @@ func NewAsyncContext() *AsyncContext {
 	}
 	go c.loop()
 	return c
+}
+
+// registerAsyncNode runs on the owner goroutine and allocates a reusable raw
+// slot. Generation and kind travel with every handle so stale disposal can be
+// rejected before any loop-owned state is changed.
+func (c *AsyncContext) registerAsyncNode(key any, kind occupantKind) asyncOccupantIdentity {
+	var id uint64
+	if last := len(c.freeNodeSlots) - 1; last >= 0 {
+		id = c.freeNodeSlots[last]
+		c.freeNodeSlots = c.freeNodeSlots[:last]
+	} else {
+		id = uint64(len(c.nodeSlots))
+		c.nodeSlots = append(c.nodeSlots, asyncOccupantSlot{})
+	}
+	slot := &c.nodeSlots[id]
+	slot.kind = kind
+	slot.key = key
+	return asyncOccupantIdentity{id: id, generation: slot.generation, kind: kind}
+}
+
+// resolveAsyncNode validates the handle's generation and kind before exposing
+// the current raw-slot occupant. Disposal dispatches on this returned value,
+// which makes both checks mutation-killing rather than incidental assertions.
+func (c *AsyncContext) resolveAsyncNode(identity asyncOccupantIdentity, kind occupantKind) any {
+	if identity.kind != kind || identity.id >= uint64(len(c.nodeSlots)) {
+		return nil
+	}
+	slot := c.nodeSlots[identity.id]
+	if slot.kind != kind || slot.generation != identity.generation {
+		return nil
+	}
+	return slot.key
+}
+
+// retireAsyncNode advances generation before returning the raw slot to the
+// allocator, closing same-kind ABA as well as cross-kind reuse.
+func (c *AsyncContext) retireAsyncNode(identity asyncOccupantIdentity) {
+	slot := &c.nodeSlots[identity.id]
+	slot.key = nil
+	slot.kind = 0
+	slot.generation++
+	c.freeNodeSlots = append(c.freeNodeSlots, identity.id)
 }
 
 func (c *AsyncContext) loop() {
@@ -981,6 +1024,7 @@ func (c *AsyncContext) EffectAsync(body func(cc *AsyncComputeContext) func()) *A
 		if c.disposed {
 			return
 		}
+		e.identity = c.registerAsyncNode(e, occupantEffect)
 		c.effects[e] = struct{}{}
 		c.scheduleEffectRerun(e)
 	})
