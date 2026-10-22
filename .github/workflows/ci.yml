@@ -186,6 +186,18 @@ jobs:
             fi
           done
 
+          # The stale-handle vector is capability-gated on real raw-id reuse.
+          # Require its complete 9-scenario replay on every shipped graph model;
+          # a runner that merely lists the fixture or skips the discriminating
+          # assertions cannot satisfy this exact evidence line.
+          for model in Context ThreadSafeContext AsyncContext; do
+            evidence="reactive-graph[$model] stale_effect_handle_cannot_remove_recycled_source.json: 66 ops, 111 assertions"
+            if ! echo "$out" | grep -Fq "$evidence"; then
+              echo "::error::missing complete stale-handle reuse evidence for $model"
+              exit 1
+            fi
+          done
+
       # `race` runs after `test` and before the coverage guard on purpose, and it
       # deliberately does NOT carry the two evidence env vars — same ordering and
       # same reason as `make check`. The race binary replays the same corpus, so

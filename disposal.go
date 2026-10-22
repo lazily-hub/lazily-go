@@ -137,9 +137,14 @@ func (m *Computed[T]) DisposeNode() { m.ctx.disposeNode(m.self) }
 
 // disposeNode is the single teardown path for every node kind.
 func (c *Context) disposeNode(n reactiveNode) {
-	if n == nil || n.node().disposed {
+	if n == nil {
+		return
+	}
+	target := c.resolveNode(n, n.node().occupantKind)
+	if target == nil || target.node().disposed {
 		return // idempotent: disposing twice is a no-op, not an error
 	}
+	n = target
 	// A driven Computed owns a puller Effect; tear it down first (design
 	// §9.3.4) so disposing the formula never strands a live puller that re-pulls
 	// a disposed node. Clearing the side-table entry keeps it from aliasing.
@@ -151,10 +156,26 @@ func (c *Context) disposeNode(n reactiveNode) {
 		// Effects own a cleanup callback and a pending-queue entry, so their
 		// teardown is Effect.Dispose. It detaches upstream and marks the base
 		// disposed; effects are sinks, so there is no cone to dirty.
-		e.Dispose()
+		c.disposeEffect(e)
 		return
 	}
 	c.teardown(n)
+}
+
+// disposeEffect tears down an effect after its complete occupant identity has
+// been validated. The arena slot is retired before user cleanup runs, so a
+// cleanup-created node can reuse it only at the next generation.
+func (c *Context) disposeEffect(e *Effect) {
+	e.active = false
+	e.disposed = true
+	c.removePendingEffect(e)
+	e.detachUpstream()
+	cleanup := e.cleanup
+	e.cleanup = nil
+	c.retireNode(e)
+	if cleanup != nil {
+		cleanup()
+	}
 }
 
 // teardown detaches a node in both directions and dirties what survives.
@@ -177,9 +198,6 @@ func (c *Context) teardown(n reactiveNode) {
 
 	// Downstream: snapshot the dependents, then drop the edge in both
 	// directions before cascading, so nothing observes a half-detached graph.
-	if len(b.dependents) == 0 {
-		return
-	}
 	survivors := make([]reactiveNode, 0, len(b.dependents))
 	for d := range b.dependents {
 		survivors = append(survivors, d)
@@ -195,6 +213,7 @@ func (c *Context) teardown(n reactiveNode) {
 		d.invalidate()
 	}
 	c.disposing--
+	c.retireNode(n)
 }
 
 // TryGet reads the slot, returning a *DisposedError instead of panicking when

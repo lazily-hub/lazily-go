@@ -69,6 +69,14 @@ type reactiveBase struct {
 	dependencies map[reactiveNode]struct{}
 	self         reactiveNode
 
+	// occupantID, occupantGeneration, and occupantKind are the stable handle
+	// identity recorded when this node is placed in Context's reusable arena.
+	// A stale pointer still carries its old generation, so disposal can reject
+	// it before touching the graph even after its numeric slot is reused.
+	occupantID         uint64
+	occupantGeneration uint64
+	occupantKind       occupantKind
+
 	// disposed marks a node torn down by Dispose (or by a TeardownScope).
 	// A disposed node has no edges in either direction, reads as an error,
 	// and reports zero degree. See disposal.go.
@@ -96,6 +104,20 @@ type reactiveBase struct {
 	// subscribe/unsubscribe workload does not grow the registry without bound
 	// (#lzspecedgeindex).
 	slotIndex int
+}
+
+type occupantKind uint8
+
+const (
+	occupantSource occupantKind = iota + 1
+	occupantComputed
+	occupantEffect
+)
+
+type occupantSlot struct {
+	generation uint64
+	kind       occupantKind
+	node       reactiveNode
 }
 
 func newReactiveBase() reactiveBase {
@@ -285,10 +307,16 @@ type Context struct {
 	// eagerBy is the eager side table (design §9.3.3): it maps an eager
 	// Computed's node to the puller Effect that keeps it materialized. Off the
 	// node so a lazy computed costs nothing; one entry per eager computed. Keyed by
-	// node identity (a pointer), and cleared on lazy/dispose so it never
-	// aliases a stale node — Go's pointer identity means there is no recycled-id
-	// hazard here (cf. the generation-tagged SlotId the arena bindings need).
+	// node identity (a pointer), and cleared on lazy/dispose. Graph handles also
+	// carry a generation-tagged occupant slot; pointer identity is not used as a
+	// substitute for the stale-handle fence.
 	eagerBy map[reactiveNode]*Effect
+
+	// nodeSlots is a compact allocator for graph-node identity. Slots are
+	// recycled on disposal, but their generation advances first, preventing a
+	// stale handle from acting on a later occupant (including same-kind ABA).
+	nodeSlots     []occupantSlot
+	freeNodeSlots []uint64
 
 	// drainBudget bounds effect runs within one drain. See DefaultDrainBudget.
 	drainBudget int
@@ -439,6 +467,54 @@ func NewContext() *Context {
 func (c *Context) registerSlot(s cacheable) {
 	s.node().slotIndex = len(c.slots)
 	c.slots = append(c.slots, s)
+}
+
+// registerNode gives n a reusable raw slot plus a generation/kind fence.
+func (c *Context) registerNode(n reactiveNode, kind occupantKind) {
+	var id uint64
+	if last := len(c.freeNodeSlots) - 1; last >= 0 {
+		id = c.freeNodeSlots[last]
+		c.freeNodeSlots = c.freeNodeSlots[:last]
+	} else {
+		id = uint64(len(c.nodeSlots))
+		c.nodeSlots = append(c.nodeSlots, occupantSlot{})
+	}
+	slot := &c.nodeSlots[id]
+	slot.kind = kind
+	slot.node = n
+	b := n.node()
+	b.occupantID = id
+	b.occupantGeneration = slot.generation
+	b.occupantKind = kind
+}
+
+// resolveNode validates the complete handle identity, then returns the current
+// arena occupant. The lookup happens by raw slot only after both fences pass;
+// this makes generation and kind checks load-bearing rather than redundant
+// with Go pointer identity.
+func (c *Context) resolveNode(n reactiveNode, kind occupantKind) reactiveNode {
+	if n == nil {
+		return nil
+	}
+	b := n.node()
+	if b.occupantKind != kind || b.occupantID >= uint64(len(c.nodeSlots)) {
+		return nil
+	}
+	slot := c.nodeSlots[b.occupantID]
+	if slot.kind != kind || slot.generation != b.occupantGeneration {
+		return nil
+	}
+	return slot.node
+}
+
+// retireNode advances the generation before making the raw slot reusable.
+func (c *Context) retireNode(n reactiveNode) {
+	b := n.node()
+	slot := &c.nodeSlots[b.occupantID]
+	slot.node = nil
+	slot.kind = 0
+	slot.generation++
+	c.freeNodeSlots = append(c.freeNodeSlots, b.occupantID)
 }
 
 // unregisterSlot swap-removes a disposed slot from the registry in O(1).
@@ -762,6 +838,7 @@ type Computed[T any] struct {
 func NewSlot[T any](ctx *Context, compute func(c *Compute) T) *Computed[T] {
 	s := &Computed[T]{reactiveBase: newReactiveBase(), ctx: ctx, compute: compute}
 	s.self = s
+	ctx.registerNode(s, occupantComputed)
 	ctx.registerSlot(s)
 	return s
 }
@@ -955,6 +1032,7 @@ func NewSource[T comparable](ctx *Context, initial T) *Source[T] {
 func NewSourceWithPolicy[T comparable](ctx *Context, initial T, policy MergePolicy[T]) *Source[T] {
 	c := &Source[T]{reactiveBase: newReactiveBase(), ctx: ctx, value: initial, policy: policy}
 	c.self = c
+	ctx.registerNode(c, occupantSource)
 	return c
 }
 
@@ -1149,6 +1227,7 @@ type Effect struct {
 func NewEffect(ctx *Context, run EffectRun) *Effect {
 	e := &Effect{reactiveBase: newReactiveBase(), ctx: ctx, run: run, active: true}
 	e.self = e
+	ctx.registerNode(e, occupantEffect)
 	e.rerun()
 	return e
 }
@@ -1156,18 +1235,7 @@ func NewEffect(ctx *Context, run EffectRun) *Effect {
 // Dispose removes the eager observer. Invokes the last cleanup, then
 // unsubscribes from all dependencies. Idempotent.
 func (e *Effect) Dispose() {
-	if !e.active {
-		return
-	}
-	e.active = false
-	e.disposed = true
-	e.ctx.removePendingEffect(e)
-	e.detachUpstream()
-	c := e.cleanup
-	e.cleanup = nil
-	if c != nil {
-		c()
-	}
+	e.ctx.disposeNode(e)
 }
 
 // IsActive reports whether the effect is still active (not disposed).
