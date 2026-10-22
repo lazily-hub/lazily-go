@@ -4,6 +4,18 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.31.0 — 2026-10-22
+
+### Fixed
+
+- Reactive source, computed, and effect handles now carry reusable slot
+  generations and node kinds. Disposal validates both before mutating the
+  synchronous or async graph, so same-kind ABA and cross-kind stale handles
+  cannot detach a recycled successor or run its cleanup.
+- The canonical lazily-spec v0.43.0 stale-handle matrix now replays across the
+  synchronous, thread-safe, and async execution models with generation/kind
+  mutation controls.
+
 ## v0.30.0 — 2026-10-15
 
 ### Added
