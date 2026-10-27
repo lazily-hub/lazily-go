@@ -243,6 +243,7 @@ EXPECTED_CLOSURE_TARGETS=(
 	"conformance-coverage"     # rungs 1+4 (#lzguardsnotinci); pulls in `test`
 	"core-api-check"           # Phase 4 Core API compatibility surface
 	"core-artifact-consumer-check" # clean built-artifact consumer at both supported toolchains
+	"core-evidence-check"      # per-binding Core evidence gate (#lzbindingevidenceci)
 	"fmt-check"                # gofmt
 	"module-dependency-check"  # published graph requires nothing (#lzgooptionalpgx)
 	"race"                     # CRDT reads are graph WRITES (v0.23.2 data race)
@@ -383,6 +384,7 @@ EXPECTED_GATE_STEPS=(
 	"conformance-coverage|Conformance coverage + scenario ledger guard (#lzguardsnotinci)"
 	"core-api-check|Core API compatibility gate"
 	"core-artifact-consumer-check|Core artifact consumer (minimum/current)"
+	"core-evidence-check|Core evidence gate (#lzbindingevidenceci)"
 	"fmt-check|gofmt"
 	"module-dependency-check|Published module dependency floor (#lzgooptionalpgx)"
 	"race|race (cgo)"

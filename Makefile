@@ -1,11 +1,21 @@
 # lazily-go — build, test, and verification targets.
 
-.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach module-dependency-check core-api-check core-artifact-consumer-check
+.PHONY: all build test test-interop-peer test-postgres-projection-barrier vet fmt fmt-check race cover conformance bench check tidy conformance-coverage assertion-ordering-check ci-reach module-dependency-check core-api-check core-artifact-consumer-check core-evidence-check
 
 all: check
 
 core-artifact-consumer-check:
 	./scripts/core-artifact-consumer-check.sh
+
+# Per-binding Core evidence gate (#lzbindingevidenceci). Runs lazily-spec's
+# verifier for this binding alone: it regenerates the Core report through
+# scripts/core-conformance.json's report_command, then checks it against the
+# canonical profile, so stale evidence handles, unreported skips and a missing
+# report are red on push instead of only at cohort qualification.
+# --require-all turns an absent ../lazily-spec layout or declaration into a
+# failure, never a skip.
+core-evidence-check:
+	node ../lazily-spec/scripts/check-core-evidence.mjs --bindings-root .. --binding go --reports build/core-evidence --generate-reports --require-all
 
 core-api-check:
 	go test -count=1 -run TestCoreAPI .
@@ -131,7 +141,7 @@ test-postgres-projection-barrier:
 assertion-ordering-check:
 	python3 ../lazily-spec/scripts/check-assertion-ordering.py --binding go --root .
 
-check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier module-dependency-check core-api-check core-artifact-consumer-check conformance-coverage assertion-ordering-check ci-reach
+check: fmt-check vet build test race test-interop-peer test-postgres-projection-barrier module-dependency-check core-api-check core-artifact-consumer-check core-evidence-check conformance-coverage assertion-ordering-check ci-reach
 	@echo "lazily-go: check OK"
 
 # Published-module dependency floor (#lzgooptionalpgx). Static: fails when the
