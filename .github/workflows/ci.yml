@@ -68,7 +68,7 @@ jobs:
       - name: Guard — canonical fixtures present (#lzspecconf)
         run: |
           test -d ../lazily-spec/conformance || { echo "::error::../lazily-spec/conformance missing — the conformance tests would silently skip"; exit 1; }
-          for corpus in collections coordination presence reactive-graph reliable-sync signaling statechart temporal windowing; do
+          for corpus in collections coordination egress presence reactive-graph reliable-sync signaling statechart temporal windowing; do
             test -d "../lazily-spec/conformance/$corpus" || { echo "::error::../lazily-spec/conformance/$corpus missing — its conformance runner would silently skip"; exit 1; }
           done
 
@@ -196,6 +196,30 @@ jobs:
               echo "::error::missing complete stale-handle reuse evidence for $model"
               exit 1
             fi
+          done
+
+          # The egress corpus (#lzegress) must reach EVERY egress flavor, and the
+          # effect-CAS corpus (#lzeffectcas) every effect-CAS model. Each runner
+          # asserts its executed step count equals the corpus total; these lines
+          # prove each flavor's runner actually ran here rather than being
+          # renamed out of the `-run Conformance` filter.
+          for flavor in sync thread-safe async; do
+            line=$(echo "$out" | grep -E "egress\[$flavor\]: [0-9]+ fixtures, [0-9]+ steps executed" || true)
+            n=$(echo "$line" | sed -E 's/.*fixtures, ([0-9]+) steps.*/\1/')
+            if [ -z "$line" ] || [ "${n:-0}" -lt 1 ]; then
+              echo "::error::egress corpus was not replayed against the $flavor flavor"
+              exit 1
+            fi
+            echo "egress[$flavor]: $n steps executed"
+          done
+          for model in core restart-every-step thread-safe; do
+            line=$(echo "$out" | grep -E "effect-cas\[$model\]: [0-9]+ scenarios, [0-9]+ steps executed" || true)
+            n=$(echo "$line" | sed -E 's/.*\]: ([0-9]+) scenarios.*/\1/')
+            if [ -z "$line" ] || [ "${n:-0}" -lt 1 ]; then
+              echo "::error::effect-CAS corpus was not replayed against the $model model"
+              exit 1
+            fi
+            echo "effect-cas[$model]: $n scenarios executed"
           done
 
       # `race` runs after `test` and before the coverage guard on purpose, and it

@@ -4,6 +4,27 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## Unreleased
+
+### Added
+
+- Reactive egress (`#lzegress`): the pure `EgressCore[T]` delivery authority
+  (monotone sequence assignment, bounded unacknowledged window, cumulative ACK
+  watermark, bounded retry/backoff/exhaustion, producer-generation fence) and
+  three reactive shells — `EgressCell`, `ThreadSafeEgressCell`, and
+  `AsyncEgressCell` — each exposing four independently invalidated readers and
+  one transport Effect per incarnation (`AttachTransport`). The canonical
+  `conformance/egress/egress_*.json` corpus replays against all three flavors
+  with per-reader invalidation asserted in both directions, under `-race` too.
+- Generic effect compare-and-swap (`#lzeffectcas`): `EffectCasCore` with stable
+  `EffectIdentity`, keyed single-flight, latest-wins supersession, logical-clock
+  retry, reconnect fencing, exact terminal receipts and resumable ordered plans,
+  the `CompareAndApply` adapter boundary, a `ThreadSafeEffectCas` reactive shell
+  (`RunOnce` invokes the adapter outside every lock), and the full-fidelity
+  `DurableState` / `HydrateEffectCasCore` crash-recovery image
+  (`#lzeffectcasdurable`). `conformance/egress/effect_cas.json` replays against
+  the core, the thread-safe shell, and a core re-hydrated after every step.
+
 ## v0.31.0 — 2026-10-22
 
 ### Fixed

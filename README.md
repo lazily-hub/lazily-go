@@ -177,6 +177,44 @@ if !work.Ack("worker-a", delivery.DeliveryID) {
 }
 ```
 
+## Reactive egress
+
+`EgressCore[T]` is the transport-agnostic delivery authority for outbound
+records (`#lzegress`): `Enqueue` assigns a monotone sequence, `Claim` moves one
+record into a bounded unacknowledged window at the caller's producer generation,
+`Ack` advances a cumulative watermark, `Fail` / `RetryNow` apply a bounded
+retry budget with doubling backoff, and `Reconnect` fences the old attachment
+and replays unacknowledged records under the new generation.
+
+`EgressCell`, `ThreadSafeEgressCell`, and `AsyncEgressCell` share that core and
+expose its four projections (pending, inflight, acked-through, retry) as
+independently invalidated readers. Transport I/O lives in exactly one Effect per
+attachment; an acknowledgement reopens the window by re-running that Effect. In
+the async flavor only the attachment is async-coloured. All three replay the
+canonical `egress/egress_*.json` corpus.
+
+```go
+egress, _ := lazily.NewEgressCell[string](ctx, 1, lazily.DefaultEgressPolicy())
+attachment := egress.AttachTransport(lazily.EgressTransportFunc[string](
+    func(envelope lazily.EgressEnvelope[string]) bool { return send(envelope) }))
+egress.Enqueue("event")
+// When the peer acknowledges sequence N:
+egress.Ack(1, n)
+attachment.Dispose()
+```
+
+## Generic effect CAS
+
+`EffectCasCore[K,A,P,R,E]` orchestrates keyed compare-and-swap effects against
+an application-owned `CompareAndApply` backend (`#lzeffectcas`): stable
+`EffectIdentity`, one in-flight attempt per key, latest-wins supersession,
+logical-clock retry, reconnect fencing, exact terminal receipts, and ordered
+multi-step plans whose later steps expect the prior receipt's authority.
+`ThreadSafeEffectCas` adds a reactive snapshot reader and `RunOnce`, which calls
+the adapter outside every lock. `DurableState` / `HydrateEffectCasCore` persist
+and restore the full core for crash recovery. Behavior replays the canonical
+`egress/effect_cas.json` corpus.
+
 ## Latest-durable projection egress
 
 `LatestDurableProjectionCore[K,V]` is a keyed durable-sink authority for state

@@ -77,11 +77,6 @@ KNOWN_UNCOVERED=(
   # implemented here, but this binding has no canonical replay for the new
   # registers corpus yet; the Registers coverage row is `~` until it does.
   "collections/registers_convergence.json"
-  # Reactive egress is currently Rust-only; Go has no egress replay runner.
-  "egress/egress_generation_fence.json"
-  "egress/egress_inflight_window.json"
-  "egress/egress_ordered_ack.json"
-  "egress/egress_retry_budget.json"
   # Experimental protobuf-v1 generation is piloted in Rust/Kotlin/TypeScript;
   # Go must negotiate the capability before replaying this typed trace.
   "protobuf/graph_boundary_traces.json"
