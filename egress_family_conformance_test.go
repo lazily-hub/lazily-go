@@ -198,6 +198,8 @@ func egressAckValue(t *testing.T, ack EgressAck) map[string]any {
 		return map[string]any{"ack": string(ack.Kind), "through": ack.Through}
 	case EgressAckStaleGeneration:
 		return map[string]any{"ack": "stale_generation", "current": ack.Current}
+	case EgressAckBeyondSent:
+		return map[string]any{"ack": "beyond_sent", "next_sequence": ack.NextSequence}
 	}
 	t.Fatalf("unrendered ack kind %q", ack.Kind)
 	return nil
@@ -862,5 +864,56 @@ func TestEgressCoreRejectsInvalidPolicy(t *testing.T) {
 		if _, err := NewEgressCore[int](1, tc.policy); err != tc.want {
 			t.Fatalf("policy %+v: err=%v, want %v", tc.policy, err, tc.want)
 		}
+	}
+}
+
+// TestEgressCoreRefusesAckBeyondSent pins fix 1 directly: an acknowledgement
+// through a sequence never assigned is refused, moves no state, and reports no
+// invalidation — even before any record was ever acknowledged.
+func TestEgressCoreRefusesAckBeyondSent(t *testing.T) {
+	core, err := NewEgressCore[int](1, DefaultEgressPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, ack := core.Ack(1, 0)
+	if ack.Kind != EgressAckBeyondSent || ack.NextSequence != 0 || !change.IsEmpty() {
+		t.Fatalf("ack on an empty egress=%+v change=%+v, want beyond_sent(0) with no change", ack, change)
+	}
+	core.Enqueue(10)
+	core.Claim(1)
+	change, ack = core.Ack(1, 1)
+	if ack.Kind != EgressAckBeyondSent || ack.NextSequence != 1 || !change.IsEmpty() {
+		t.Fatalf("ack through 1 with next_sequence 1=%+v change=%+v, want beyond_sent(1)", ack, change)
+	}
+	if core.AckedThrough().Present || len(core.Inflight()) != 1 {
+		t.Fatalf("a refused ack moved state: acked=%+v inflight=%v", core.AckedThrough(), core.Inflight())
+	}
+	if _, ack = core.Ack(1, 0); ack.Kind != EgressAckAdvanced || ack.Through != 0 {
+		t.Fatalf("ack through the last assigned sequence=%+v, want advanced(0)", ack)
+	}
+}
+
+// TestEgressCoreReconnectInvalidatesPendingWithoutReplay pins fix 2: a
+// reconnect with nothing in flight still re-stamps every pending record with
+// the new generation, so it must report the pending projection as changed.
+func TestEgressCoreReconnectInvalidatesPendingWithoutReplay(t *testing.T) {
+	core, err := NewEgressCore[int](4, DefaultEgressPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	core.Enqueue(12)
+	change, reconnect := core.Reconnect(5)
+	if reconnect.Kind != EgressReconnectAdvanced || reconnect.Replayed != 0 {
+		t.Fatalf("reconnect=%+v", reconnect)
+	}
+	if !change.Pending || change.Inflight {
+		t.Fatalf("change=%+v, want pending invalidated and inflight untouched", change)
+	}
+	if pending := core.Pending(); len(pending) != 1 || pending[0].Generation != 5 {
+		t.Fatalf("pending=%+v, want re-stamped at generation 5", pending)
+	}
+	empty, _ := NewEgressCore[int](1, DefaultEgressPolicy())
+	if change, _ := empty.Reconnect(2); change.Pending {
+		t.Fatalf("reconnect of an empty egress invalidated pending: %+v", change)
 	}
 }

@@ -24,6 +24,11 @@ All notable changes to lazily-go are documented here. This project adheres to
   `DurableState` / `HydrateEffectCasCore` crash-recovery image
   (`#lzeffectcasdurable`). `conformance/egress/effect_cas.json` replays against
   the core, the thread-safe shell, and a core re-hydrated after every step.
+- Egress refuses an acknowledgement through a sequence never assigned
+  (`EgressAckBeyondSent`, carrying `NextSequence`) without moving state, and a
+  reconnect invalidates the pending reader whenever anything is pending (every
+  pending record is re-stamped with the new generation), matching lazily-spec
+  ec718e3 / lazily-rs a185d27.
 
 ## v0.31.0 — 2026-10-22
 

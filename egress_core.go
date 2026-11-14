@@ -83,14 +83,20 @@ const (
 	EgressAckAdvanced        EgressAckKind = "advanced"
 	EgressAckUnchanged       EgressAckKind = "unchanged"
 	EgressAckStaleGeneration EgressAckKind = "stale_generation"
+	// EgressAckBeyondSent refuses an acknowledgement through a sequence this
+	// egress never assigned. Accepting it would advance the watermark past
+	// records not yet sent and silently prune them on arrival.
+	EgressAckBeyondSent EgressAckKind = "beyond_sent"
 )
 
 // EgressAck is the outcome of a cumulative acknowledgement. Through is the
-// watermark for Advanced/Unchanged; Current for StaleGeneration.
+// watermark for Advanced/Unchanged; Current for StaleGeneration; NextSequence
+// for BeyondSent.
 type EgressAck struct {
-	Kind    EgressAckKind
-	Through uint64
-	Current uint64
+	Kind         EgressAckKind
+	Through      uint64
+	Current      uint64
+	NextSequence uint64
 }
 
 // EgressFailureKind discriminates an EgressFailure.
@@ -285,9 +291,14 @@ func (c *EgressCore[T]) Claim(generation uint64) (EgressChange, EgressClaim[T]) 
 }
 
 // Ack advances the acknowledgement watermark and prunes acknowledged records.
+// An acknowledgement through a sequence never assigned (through >=
+// NextSequence) is refused as BeyondSent and changes nothing.
 func (c *EgressCore[T]) Ack(generation, through uint64) (EgressChange, EgressAck) {
 	if generation != c.generation {
 		return EgressChange{}, EgressAck{Kind: EgressAckStaleGeneration, Current: c.generation}
+	}
+	if through >= c.nextSequence {
+		return EgressChange{}, EgressAck{Kind: EgressAckBeyondSent, NextSequence: c.nextSequence}
 	}
 	if c.ackedThrough.Present && through <= c.ackedThrough.Value {
 		return EgressChange{}, EgressAck{Kind: EgressAckUnchanged, Through: c.ackedThrough.Value}
@@ -377,6 +388,10 @@ func (c *EgressCore[T]) Reconnect(generation uint64) (EgressChange, EgressReconn
 	}
 	c.generation = generation
 	replayed := len(c.inflight) + len(c.failed)
+	// Every pending record is re-stamped with the new generation below, so the
+	// pending projection moves whenever anything is pending — not only when a
+	// record was replayed into it.
+	pendingChanged := replayed > 0 || len(c.pending) > 0
 	for _, record := range c.inflight {
 		record.generation = generation
 		c.pending = insertEgressOrdered(c.pending, record)
@@ -392,7 +407,7 @@ func (c *EgressCore[T]) Reconnect(generation uint64) (EgressChange, EgressReconn
 	}
 	retryChanged := c.retry.Present
 	c.retry = None[EgressRetry]()
-	return EgressChange{Pending: replayed > 0, Inflight: replayed > 0, Retry: retryChanged},
+	return EgressChange{Pending: pendingChanged, Inflight: replayed > 0, Retry: retryChanged},
 		EgressReconnect{Kind: EgressReconnectAdvanced, Generation: generation, Replayed: replayed}
 }
 
