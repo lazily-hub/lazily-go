@@ -411,14 +411,20 @@ func TestIPCConformanceAssertionDrift(t *testing.T) {
 // without bumping this is a fallback claiming to be a revision it is not.
 const agentDocSchemaVersionFallback = "1.1.0"
 
-// agentDocSchemaVersion reports the SemVer of the canonical vocabulary the
+func workflowVocabularySchema(version string) string {
+	if strings.HasPrefix(version, "1.") {
+		return "agent-doc-state.json"
+	}
+	return "workflow-state.json"
+}
+
+// workflowSchemaVersion reports the SemVer of the canonical vocabulary the
 // replay is validating against — from the resolved schemas root when present,
 // else the revision the transcribed fallback pins. The root is resolved through
 // the schemas seam so LAZILY_SPEC_SCHEMAS_DIR reaches this loader
 // (#lzspecschemasoverride).
-func agentDocSchemaVersion(t *testing.T) string {
+func workflowSchemaVersion(t *testing.T, name string) string {
 	t.Helper()
-	const name = "agent-doc-state.json"
 	if raw, ok := specSchemaRead(t, name); ok {
 		var schema struct {
 			SchemaVersion string `json:"schema_version"`
@@ -429,10 +435,13 @@ func agentDocSchemaVersion(t *testing.T) string {
 		}
 		specSchemaUnusable(t, name, fmt.Sprintf("it declares no schema_version (parse error: %v)", err))
 	}
-	return agentDocSchemaVersionFallback
+	if name == "agent-doc-state.json" {
+		return agentDocSchemaVersionFallback
+	}
+	return "2.0.0"
 }
 
-// assertAgentDocSchemaVersion checks the fixture's `schema_version` against the
+// assertWorkflowSchemaVersion checks the fixture's `schema_version` against the
 // vocabulary the replay actually validates type_tags with.
 //
 // The key was decoded and dropped: the runner pinned an eight-tag vocabulary and
@@ -441,12 +450,12 @@ func agentDocSchemaVersion(t *testing.T) string {
 // a renamed or removed type_tag bumps major — would still have been checked
 // against the new vocabulary and passed. The schema's compatibility rule is the
 // assertion: same major, and no minor the local vocabulary does not yet have.
-func assertAgentDocSchemaVersion(t *testing.T, fixture conformanceFixture, name string) {
+func assertWorkflowSchemaVersion(t *testing.T, fixture conformanceFixture, name string) {
 	t.Helper()
 	if fixture.SchemaVersion == "" {
 		t.Fatalf("%s: fixture states no schema_version; the type_tag vocabulary it is checked against is unpinned", name)
 	}
-	local := agentDocSchemaVersion(t)
+	local := workflowSchemaVersion(t, workflowVocabularySchema(fixture.SchemaVersion))
 	fixMajor, fixMinor := agentDocSemver(t, name+" fixture", fixture.SchemaVersion)
 	locMajor, locMinor := agentDocSemver(t, name+" schema", local)
 	if fixMajor != locMajor {
@@ -478,11 +487,9 @@ func agentDocSemver(t *testing.T, what, version string) (int, int) {
 	return major, minor
 }
 
-// agentDocTypeTagVocabulary loads the pinned eight-value type_tag vocabulary
-// from the canonical schema when the spec checkout is present, else falls back
-// to the pinned set (mirroring lazily-kt). Resolved through the schemas seam so
-// LAZILY_SPEC_SCHEMAS_DIR reaches this loader (#lzspecschemasoverride).
-func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
+// workflowTypeTagVocabulary loads the revision-specific type tags through the
+// schema override seam. A run without a schema checkout uses the pinned tags.
+func workflowTypeTagVocabulary(t *testing.T, name string) map[string]bool {
 	t.Helper()
 	fallback := []string{
 		"agent_doc.document.baseline",
@@ -494,7 +501,14 @@ func agentDocTypeTagVocabulary(t *testing.T) map[string]bool {
 		"agent_doc.route",
 		"agent_doc.proof.marker",
 	}
-	const name = "agent-doc-state.json"
+	if name == "workflow-state.json" {
+		fallback = []string{
+			"workflow.document.baseline",
+			"workflow.execution.cycle",
+			"workflow.queue.head",
+			"workflow.transport.patch",
+		}
+	}
 	var tags []string
 	if raw, ok := specSchemaRead(t, name); ok {
 		var schema struct {
@@ -581,10 +595,10 @@ func TestIPCConformanceAgentDocSnapshot(t *testing.T) {
 	if f.Kind != "Snapshot" {
 		t.Fatalf("kind = %q, want Snapshot", f.Kind)
 	}
-	assertAgentDocSchemaVersion(t, f, "agent-doc/snapshot_agent_doc_state.json")
+	assertWorkflowSchemaVersion(t, f, "agent-doc/snapshot_agent_doc_state.json")
 	msg := decodeWire(t, f)
 	snap := msg.(IpcMessageSnapshot).Value
-	vocab := agentDocTypeTagVocabulary(t)
+	vocab := workflowTypeTagVocabulary(t, workflowVocabularySchema(f.SchemaVersion))
 
 	actualTags := map[string]bool{}
 	for _, n := range snap.Nodes {
@@ -618,13 +632,13 @@ func TestIPCConformanceAgentDocSnapshot(t *testing.T) {
 			}
 			assertValueEqualsRaw(t, all, expected, "agentdoc-snapshot:all_type_tags_in_vocabulary")
 		case "cycle_phase":
-			node := findNodeByTag(t, snap, "agent_doc.closeout.cycle")
+			node := findSnapshotNode(t, snap, 102)
 			phase := decodePayloadPhase(t, payloadBytesFromState(t, node.State))
 			if phase != rawString(t, expected) {
 				t.Fatalf("cycle_phase: got %q, want %s", phase, string(expected))
 			}
 		case "queue_head_phase":
-			node := findNodeByTag(t, snap, "agent_doc.queue.head")
+			node := findSnapshotNode(t, snap, 103)
 			phase := decodePayloadPhase(t, payloadBytesFromState(t, node.State))
 			if phase != rawString(t, expected) {
 				t.Fatalf("queue_head_phase: got %q, want %s", phase, string(expected))
@@ -640,10 +654,10 @@ func TestIPCConformanceAgentDocDelta(t *testing.T) {
 	if f.Kind != "Delta" {
 		t.Fatalf("kind = %q, want Delta", f.Kind)
 	}
-	assertAgentDocSchemaVersion(t, f, "agent-doc/delta_agent_doc_state.json")
+	assertWorkflowSchemaVersion(t, f, "agent-doc/delta_agent_doc_state.json")
 	msg := decodeWire(t, f)
 	d := msg.(IpcMessageDelta).Value
-	vocab := agentDocTypeTagVocabulary(t)
+	vocab := workflowTypeTagVocabulary(t, workflowVocabularySchema(f.SchemaVersion))
 
 	addedTags := map[string]bool{}
 	for _, op := range d.Ops {
@@ -697,14 +711,14 @@ func TestIPCConformanceAgentDocDelta(t *testing.T) {
 	}
 }
 
-func findNodeByTag(t *testing.T, snap Snapshot, tag string) NodeSnapshot {
+func findSnapshotNode(t *testing.T, snap Snapshot, id NodeId) NodeSnapshot {
 	t.Helper()
 	for _, n := range snap.Nodes {
-		if n.TypeTag == tag {
+		if n.Node == id {
 			return n
 		}
 	}
-	t.Fatalf("no node with type_tag %q", tag)
+	t.Fatalf("no snapshot node %d", id)
 	return NodeSnapshot{}
 }
 
