@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -51,6 +52,7 @@ var reactiveGraphReplayed = []string{
 	"disposal_does_not_run_surviving_effects.json",
 	"dispose_detaches_edges_both_directions.json",
 	"dispose_signal_reverts_to_lazy.json",
+	"effect_cleanup_is_optional.json",
 	"exact_fold_paths_stay_exact.json",
 	"failed_compute_is_never_cached.json",
 	"feedback_drain_bound_reports_exhaustion.json",
@@ -137,7 +139,7 @@ type nodeRef struct {
 type nodeFactory interface {
 	cell(id string, value int) nodeRef
 	computed(id string, reads []nodeRef, offset int) nodeRef
-	effect(id string, reads []nodeRef) nodeRef
+	effect(id string, reads []nodeRef, cleanup effectCleanup) nodeRef
 }
 
 // scopeModel is one teardown scope in whichever graph is under test.
@@ -217,6 +219,34 @@ type graphModel interface {
 	runLog() []string
 	cleanupLog() []string
 	close()
+}
+
+// --- effect cleanup shape (#lzeffectvoid) ----------------------------------
+
+// effectCleanup is the `effect` op's `cleanup` field: which runs of a plain
+// effect's body return a cleanup and which return nil, EffectRun's idiomatic
+// "no cleanup". The body itself returns nil — the runner never substitutes a
+// no-op closure, which would be observationally identical and test nothing.
+type effectCleanup int
+
+const (
+	cleanupEveryRun effectCleanup = iota
+	cleanupNone
+	cleanupAlternate
+)
+
+// returnsCleanup reports whether the body's run-th run (1-based, the creation
+// run is run 1) returns a cleanup.
+func (c effectCleanup) returnsCleanup(run int) bool {
+	switch c {
+	case cleanupEveryRun:
+		return true
+	case cleanupNone:
+		return false
+	case cleanupAlternate:
+		return run%2 == 1
+	}
+	panic(fmt.Sprintf("reactive-graph: unknown effect cleanup shape %d", int(c)))
 }
 
 // --- effect log, shared by both models --------------------------------------
@@ -444,10 +474,12 @@ func (m *syncModel) divergeEffect(id string, own nodeRef) nodeRef {
 func (m *syncModel) drainExhausted() bool { return m.ctx.LastDrainExhaustion() != nil }
 func (m *syncModel) clearDrain()          { m.ctx.ClearDrainExhaustion() }
 
-func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
+func (m *syncModel) effect(id string, reads []nodeRef, cleanup effectCleanup) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
+	run := 0 // per-effect run counter, the creation run is run 1
 	e := NewEffect(m.ctx, func(c *Compute) func() {
 		m.log.run(id)
+		run++
 		// The body must not unwind on a disposed-node read: catch the
 		// *DisposedError so the effect body returns normally. Dependency tracking
 		// is value-threaded through c (no ambient stack), so a panic strands no
@@ -464,6 +496,9 @@ func (m *syncModel) effect(id string, reads []nodeRef) nodeRef {
 				m.trackRead(c, d)
 			}
 		}()
+		if !cleanup.returnsCleanup(run) {
+			return nil
+		}
 		return func() { m.log.cleanup(id) }
 	})
 	return nodeRef{kind: kindEffect, id: id, h: e}
@@ -547,8 +582,8 @@ func (sc *syncScope) computed(id string, reads []nodeRef, offset int) nodeRef {
 	return r
 }
 
-func (sc *syncScope) effect(id string, reads []nodeRef) nodeRef {
-	r := sc.m.effect(id, reads)
+func (sc *syncScope) effect(id string, reads []nodeRef, cleanup effectCleanup) nodeRef {
+	r := sc.m.effect(id, reads, cleanup)
 	Own(sc.s, r.h.(*Effect))
 	return r
 }
@@ -590,8 +625,8 @@ func (m *threadSafeModel) computed(id string, reads []nodeRef, offset int) (out 
 	m.ctx.WithLock(func(*Context) { out = m.inner.computed(id, reads, offset) })
 	return
 }
-func (m *threadSafeModel) effect(id string, reads []nodeRef) (out nodeRef) {
-	m.ctx.WithLock(func(*Context) { out = m.inner.effect(id, reads) })
+func (m *threadSafeModel) effect(id string, reads []nodeRef, cleanup effectCleanup) (out nodeRef) {
+	m.ctx.WithLock(func(*Context) { out = m.inner.effect(id, reads, cleanup) })
 	return
 }
 func (m *threadSafeModel) read(n nodeRef) (value int, err error) {
@@ -677,8 +712,8 @@ func (sc *threadSafeScope) computed(id string, reads []nodeRef, offset int) (out
 	sc.model.ctx.WithLock(func(*Context) { out = sc.inner.computed(id, reads, offset) })
 	return
 }
-func (sc *threadSafeScope) effect(id string, reads []nodeRef) (out nodeRef) {
-	sc.model.ctx.WithLock(func(*Context) { out = sc.inner.effect(id, reads) })
+func (sc *threadSafeScope) effect(id string, reads []nodeRef, cleanup effectCleanup) (out nodeRef) {
+	sc.model.ctx.WithLock(func(*Context) { out = sc.inner.effect(id, reads, cleanup) })
 	return
 }
 func (sc *threadSafeScope) owned() (out int) {
@@ -998,14 +1033,22 @@ func (m *asyncModel) divergeEffect(id string, own nodeRef) nodeRef {
 func (m *asyncModel) drainExhausted() bool { return m.ctx.LastDrainExhaustion() != nil }
 func (m *asyncModel) clearDrain()          { m.ctx.ClearDrainExhaustion() }
 
-func (m *asyncModel) effect(id string, reads []nodeRef) nodeRef {
+func (m *asyncModel) effect(id string, reads []nodeRef, cleanup effectCleanup) nodeRef {
 	deps := append([]nodeRef(nil), reads...)
+	// Per-effect run counter (the creation run is run 1). Atomic because async
+	// runs are spawned; the library serializes one effect's runs, but the
+	// counter must not rely on that to stay race-detector clean.
+	var run atomic.Int64
 	e := m.ctx.EffectAsync(func(cc *AsyncComputeContext) func() {
 		m.log.run(id)
+		n := int(run.Add(1))
 		for _, d := range deps {
 			// A read that fails because a dependency is gone is the contract,
 			// not a test failure: the effect simply observes the error.
 			_, _ = m.trackRead(cc, d)
+		}
+		if !cleanup.returnsCleanup(n) {
+			return nil
 		}
 		return func() { m.log.cleanup(id) }
 	})
@@ -1090,8 +1133,8 @@ func (sc *asyncScope) computed(id string, reads []nodeRef, offset int) nodeRef {
 	return r
 }
 
-func (sc *asyncScope) effect(id string, reads []nodeRef) nodeRef {
-	r := sc.m.effect(id, reads)
+func (sc *asyncScope) effect(id string, reads []nodeRef, cleanup effectCleanup) nodeRef {
+	r := sc.m.effect(id, reads, cleanup)
 	OwnAsync(sc.s, r.h.(*AsyncEffectHandle))
 	return r
 }
@@ -1149,6 +1192,12 @@ type reactiveGraphOp struct {
 	// reads this cell and writes it back incremented. Not a dependency cycle —
 	// the loop closes through the scheduler — so only a bounded drain exits it.
 	WritesOwnCone string `json:"writes_own_cone"`
+	// Cleanup selects what a plain effect's body returns (#lzeffectvoid):
+	// absent or "every_run" returns a cleanup from every run, "none" returns
+	// nil — EffectRun's idiomatic no-cleanup form — from every run, and
+	// "alternate" returns a cleanup from odd runs (the creation run is run 1)
+	// and nil from even ones. Any other value fails the replay.
+	Cleanup string `json:"cleanup"`
 }
 
 // reactiveGraphWrite is one cell write inside a `batch` op.
@@ -1418,6 +1467,10 @@ func (e *replayEngine) create(op reactiveGraphOp) nodeRef {
 		// feed folds into a merge cell; a diverging effect writes its own
 		// dependency cone; a plain effect is a pure sink. The corpus never
 		// scopes either of the first two.
+		if (op.MergesInto != "" || op.WritesOwnCone != "") && op.Cleanup != "" {
+			e.t.Fatalf("%s#%d: the corpus never shapes a feed or diverging effect's cleanup",
+				e.fixture, e.step)
+		}
 		if op.MergesInto != "" {
 			target := e.cellNode(op.MergesInto)
 			id := op.MergesInto
@@ -1426,7 +1479,7 @@ func (e *replayEngine) create(op reactiveGraphOp) nodeRef {
 		if op.WritesOwnCone != "" {
 			return e.m.divergeEffect(op.ID, e.cellNode(op.WritesOwnCone))
 		}
-		return target.effect(op.ID, e.refs(op.Reads))
+		return target.effect(op.ID, e.refs(op.Reads), e.effectCleanup(op))
 	default:
 		// Fail closed (#lzscenariobodyskip). `effect` used to be the `default`
 		// arm, which ASSUMED the last variant without checking it: any op type
@@ -1435,6 +1488,21 @@ func (e *replayEngine) create(op reactiveGraphOp) nodeRef {
 		e.t.Fatalf("%s#%d: unknown node constructor %q", e.fixture, e.step, op.Type)
 		return nodeRef{}
 	}
+}
+
+// effectCleanup decodes the `effect` op's `cleanup` field. An unknown value is
+// a hard failure, never a silent default to every_run (#lzeffectvoid).
+func (e *replayEngine) effectCleanup(op reactiveGraphOp) effectCleanup {
+	switch op.Cleanup {
+	case "", "every_run":
+		return cleanupEveryRun
+	case "none":
+		return cleanupNone
+	case "alternate":
+		return cleanupAlternate
+	}
+	e.t.Fatalf("%s#%d: unknown effect cleanup %q", e.fixture, e.step, op.Cleanup)
+	return cleanupEveryRun
 }
 
 func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
@@ -1526,7 +1594,7 @@ func (e *replayEngine) runOp(op reactiveGraphOp) (opValue *int, opError bool) {
 		base := e.refs(op.Reads)
 		for i := 0; i < op.Count; i++ {
 			id := fmt.Sprintf("%s_%d", op.IDPrefix, i)
-			e.put(id, e.m.effect(id, base))
+			e.put(id, e.m.effect(id, base, cleanupEveryRun))
 			e.readEach(op, id, base)
 		}
 	case "dispose_fanout":
@@ -1650,7 +1718,7 @@ func (e *replayEngine) runChurn(op reactiveGraphOp) {
 			if n, ok := e.nodes[id]; ok {
 				e.m.dispose(n)
 			}
-			e.put(id, e.m.effect(id, []nodeRef{source}))
+			e.put(id, e.m.effect(id, []nodeRef{source}, cleanupEveryRun))
 			e.readEach(op, id, []nodeRef{source})
 		}
 	case "scope_per_cycle":
@@ -1659,7 +1727,7 @@ func (e *replayEngine) runChurn(op reactiveGraphOp) {
 		name := op.IDPrefix + "_scoped"
 		for c := 0; c < op.Cycles; c++ {
 			sc := e.m.scope()
-			sc.effect(name, []nodeRef{source})
+			sc.effect(name, []nodeRef{source}, cleanupEveryRun)
 			sc.closeScope()
 		}
 	default:
