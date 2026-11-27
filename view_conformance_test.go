@@ -10,6 +10,27 @@ import (
 	"testing"
 )
 
+func TestViewSignalInitial(t *testing.T) {
+	document := map[string]any{
+		"id":   "counter",
+		"root": "root",
+		"nodes": map[string]any{
+			"root": map[string]any{"role": "region"},
+		},
+	}
+	signal := map[string]any{}
+	document["signals"] = map[string]any{"count": signal}
+	if _, err := InstallView(NewContext(), document); err == nil {
+		t.Fatal("an omitted signal initial must be rejected")
+	}
+	signal["initial"] = nil
+	view, err := InstallView(NewContext(), document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertViewJSON(t, "explicit null initial", view.SignalsJSON(), map[string]any{"count": nil})
+}
+
 func TestViewConformance(t *testing.T) {
 	dir := specPath("view")
 	info, err := os.Stat(dir)

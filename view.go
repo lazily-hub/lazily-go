@@ -112,7 +112,11 @@ func InstallView(ctx *Context, doc any) (*View, error) {
 		if err := viewAllow(sig, "signal "+sid, "initial"); err != nil {
 			return nil, err
 		}
-		initial, err := viewLiteral(sig["initial"])
+		rawInitial, ok := sig["initial"]
+		if !ok {
+			return nil, fmt.Errorf("signal %s: initial is required", sid)
+		}
+		initial, err := viewLiteral(rawInitial)
 		if err != nil {
 			return nil, fmt.Errorf("signal %s: %w", sid, err)
 		}
