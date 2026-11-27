@@ -4,6 +4,12 @@ All notable changes to lazily-go are documented here. This project adheres to
 [Semantic Versioning](https://semver.org/) and tracks the shared
 [`lazily-spec`](https://github.com/lazily-hub/lazily-spec) protocol version.
 
+## v0.33.0 — 2026-11-27
+
+### Added
+
+- Replay the portable View conformance fixtures from lazily-spec v0.48.0.
+
 ## v0.32.0 — 2026-11-14
 
 ### Added
